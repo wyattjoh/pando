@@ -1,5 +1,7 @@
 use std::{
-    env, fs,
+    env,
+    fmt::Write as FmtWrite,
+    fs,
     hash::{Hash, Hasher},
     io::{self, IsTerminal, Write},
     os::unix::ffi::OsStrExt,
@@ -8,12 +10,14 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use cliclack::{confirm, input, select};
+use console::{Key, Term, strip_ansi_codes, style};
 use siphasher::sip::SipHasher13;
 
 use crate::{
     WorktreeKind,
     config::{EffectiveConfig, HookPhase, HookStep},
     git::{self, Repository},
+    render,
     setup::{self, HookOutcome},
     trust, ui,
 };
@@ -166,17 +170,38 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
         .iter()
         .position(|worktree| worktree.current)
         .unwrap_or(0);
-    let mut prompt = select("Choose a worktree")
-        .initial_value(default)
-        .filter_mode()
-        .max_rows(20);
-    for (index, worktree) in choices.iter().enumerate() {
-        prompt = prompt.item(index, worktree.branch_label(), picker_hint(worktree));
-    }
     let branch_action = choices.len();
-    prompt = prompt.item(branch_action, "Create or switch branch…", "");
+    let mut labels = render::menu_labels(&choices);
+    labels.push(
+        style("+ Create or switch branches...")
+            .color256(244)
+            .force_styling(true)
+            .to_string(),
+    );
+    let current = choices
+        .iter()
+        .map(|worktree| worktree.current)
+        .chain(std::iter::once(false))
+        .collect();
+    let shortcuts = choices
+        .iter()
+        .map(|worktree| !worktree.current)
+        .chain(std::iter::once(true))
+        .collect();
+    let filters = choices
+        .iter()
+        .map(|worktree| {
+            format!(
+                "{} {} {}",
+                worktree.branch_label(),
+                worktree.state_label(),
+                worktree.path.display()
+            )
+        })
+        .chain(std::iter::once("create switch branches".to_owned()))
+        .collect();
     let selection = prompt_result(
-        prompt.interact(),
+        WorktreePicker::new(labels, filters, current, shortcuts, default).interact(),
         "selection cancelled",
         "failed to read worktree selection from the terminal",
     )?;
@@ -194,12 +219,298 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
     resolve_and_switch(repository, &branch)
 }
 
-fn picker_hint(worktree: &crate::Worktree) -> String {
-    let state = worktree.state_label();
-    match (worktree.current, state.is_empty()) {
-        (true, true) => "current".to_owned(),
-        (true, false) => format!("current, {state}"),
-        (false, _) => state,
+const PICKER_FRAME_ROWS: usize = 5;
+
+fn picker_viewport_rows(terminal_rows: u16) -> usize {
+    usize::from(terminal_rows)
+        .saturating_sub(PICKER_FRAME_ROWS)
+        .max(1)
+}
+
+struct WorktreePicker {
+    labels: Vec<String>,
+    filters: Vec<String>,
+    current: Vec<bool>,
+    shortcuts: Vec<bool>,
+    selected: usize,
+    number_start: usize,
+    viewport_rows: usize,
+    filter: String,
+}
+
+impl WorktreePicker {
+    fn new(
+        labels: Vec<String>,
+        filters: Vec<String>,
+        current: Vec<bool>,
+        shortcuts: Vec<bool>,
+        selected: usize,
+    ) -> Self {
+        Self {
+            labels,
+            filters,
+            current,
+            shortcuts,
+            selected,
+            number_start: selected.saturating_add(1),
+            viewport_rows: 20,
+            filter: String::new(),
+        }
+    }
+
+    fn interact(mut self) -> io::Result<usize> {
+        let term = Term::stderr();
+        if !term.is_term() {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
+        self.viewport_rows = picker_viewport_rows(term.size().0);
+        term.hide_cursor()?;
+        let result = self.interact_inner(&term);
+        term.show_cursor()?;
+        result
+    }
+
+    fn interact_inner(&mut self, mut term: &Term) -> io::Result<usize> {
+        let mut previous_lines = 0;
+        let mut shortcut_prefix = false;
+        loop {
+            let visible = self.visible();
+            if self.selected >= visible.len() {
+                self.selected = 0;
+            }
+            let displayed_start = self.displayed_start(&visible);
+            let displayed = self.displayed(&visible, displayed_start);
+            let frame = self.render(displayed, displayed_start, visible.len());
+            term.clear_last_lines(previous_lines)?;
+            term.write_all(frame.as_bytes())?;
+            term.flush()?;
+            previous_lines = frame.lines().count();
+            let key = term.read_key_raw()?;
+            if let Some(selection) = self.shortcut_selection(&key) {
+                return Ok(selection);
+            }
+            // `console` reports Ctrl-A as Home on Unix.
+            if key == Key::Home {
+                shortcut_prefix = true;
+                continue;
+            }
+            if shortcut_prefix {
+                shortcut_prefix = false;
+                if let Some(number) = shortcut_number(&key) {
+                    if let Some((index, _)) = self
+                        .numbered(
+                            &visible,
+                            self.selected,
+                            self.number_start,
+                            self.number_start + 8 == self.shortcuts.len() - 1,
+                        )
+                        .iter()
+                        .find(|(_, shortcut)| *shortcut == number)
+                    {
+                        return Ok(*index);
+                    }
+                    continue;
+                }
+            }
+            match key {
+                Key::ArrowUp if self.selected > 0 => {
+                    self.selected -= 1;
+                    self.number_start = self.selected.saturating_sub(9);
+                }
+                Key::ArrowDown if self.selected + 1 < visible.len() => {
+                    self.selected += 1;
+                    let action = self.shortcuts.len() - 1;
+                    self.number_start = if self.selected + 9 <= action {
+                        self.selected + 1
+                    } else {
+                        action.saturating_sub(8)
+                    };
+                }
+                Key::Enter => return Ok(visible[self.selected]),
+                Key::Escape | Key::CtrlC => return Err(io::ErrorKind::Interrupted.into()),
+                Key::Backspace => {
+                    self.filter.pop();
+                    self.selected = 0;
+                    self.number_start = 1;
+                }
+                Key::Char(character) if !character.is_control() => {
+                    self.filter.push(character);
+                    self.selected = 0;
+                    self.number_start = 1;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn visible(&self) -> Vec<usize> {
+        let needle = self.filter.to_lowercase();
+        self.filters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, filter)| filter.to_lowercase().contains(&needle).then_some(index))
+            .collect()
+    }
+
+    fn displayed_start(&self, visible: &[usize]) -> usize {
+        let desired_start = self
+            .selected
+            .saturating_sub(self.viewport_rows.saturating_sub(10));
+        let last_page_start = if visible.len() > self.viewport_rows {
+            visible
+                .len()
+                .saturating_sub(self.viewport_rows.saturating_sub(1))
+        } else {
+            0
+        };
+        desired_start.min(last_page_start)
+    }
+
+    fn displayed<'a>(&self, visible: &'a [usize], start: usize) -> &'a [usize] {
+        let has_above = start > 0;
+        let rows_before_bottom_hint = self.viewport_rows.saturating_sub(usize::from(has_above));
+        let has_below = visible.len() > start + rows_before_bottom_hint;
+        let item_rows = rows_before_bottom_hint.saturating_sub(usize::from(has_below));
+        &visible[start..visible.len().min(start + item_rows)]
+    }
+
+    fn shortcut_selection(&self, key: &Key) -> Option<usize> {
+        (key == &Key::BackTab).then_some(self.labels.len() - 1)
+    }
+
+    fn numbered(
+        &self,
+        visible: &[usize],
+        selected: usize,
+        number_start: usize,
+        pinned_at_bottom: bool,
+    ) -> Vec<(usize, usize)> {
+        visible[number_start.min(visible.len())..]
+            .iter()
+            .copied()
+            .filter(|index| {
+                self.shortcuts[*index] && (pinned_at_bottom || *index != visible[selected])
+            })
+            .take(9)
+            .enumerate()
+            .map(|(offset, index)| (index, offset + 1))
+            .collect()
+    }
+
+    fn render(&self, visible: &[usize], displayed_start: usize, visible_len: usize) -> String {
+        let filter = if self.filter.is_empty() {
+            "type to filter".to_owned()
+        } else {
+            self.filter.clone()
+        };
+        let mut output = format!(
+            "{}  {}\n{}  {}\n",
+            ui::accent_style().force_styling(true).apply_to("◆"),
+            ui::header_style()
+                .force_styling(true)
+                .apply_to("Choose a worktree"),
+            ui::accent_style().force_styling(true).apply_to("│"),
+            style(filter).dim().force_styling(true)
+        );
+        let numbered = self.numbered(
+            visible,
+            self.selected.saturating_sub(displayed_start),
+            self.number_start.saturating_sub(displayed_start),
+            self.number_start + 8 == self.shortcuts.len() - 1,
+        );
+        let pinned_at_bottom = self.number_start + 8 == self.shortcuts.len() - 1;
+        if displayed_start > 0 {
+            writeln!(
+                output,
+                "{}  {}",
+                ui::accent_style().apply_to("│"),
+                style(format!("↑ {displayed_start} more above"))
+                    .dim()
+                    .force_styling(true)
+            )
+            .expect("writing to a string cannot fail");
+        }
+        for (position, index) in visible.iter().enumerate() {
+            let marker = if self.current[*index] {
+                ui::header_style()
+                    .force_styling(true)
+                    .apply_to("*")
+                    .to_string()
+            } else if displayed_start + position == self.selected && !pinned_at_bottom {
+                " ".to_owned()
+            } else {
+                numbered
+                    .iter()
+                    .find_map(|(numbered_index, number)| {
+                        (numbered_index == index).then_some(number)
+                    })
+                    .map_or_else(
+                        || " ".to_owned(),
+                        |number| style(number).white().force_styling(true).to_string(),
+                    )
+            };
+            let is_selected = displayed_start + position == self.selected;
+            let selected = if is_selected {
+                ui::accent_style().apply_to("●")
+            } else {
+                style("○").dim()
+            };
+            let label = if is_selected {
+                style(strip_ansi_codes(&self.labels[*index]))
+                    .white()
+                    .bold()
+                    .force_styling(true)
+                    .to_string()
+            } else {
+                self.labels[*index].clone()
+            };
+            writeln!(
+                output,
+                "{}  {selected} {marker} {label}",
+                ui::accent_style().apply_to("│"),
+            )
+            .expect("writing to a string cannot fail");
+        }
+        let more_below = visible_len.saturating_sub(displayed_start + visible.len());
+        if more_below > 0 {
+            writeln!(
+                output,
+                "{}  {}",
+                ui::accent_style().apply_to("│"),
+                style(format!("↓ {more_below} more below"))
+                    .dim()
+                    .force_styling(true)
+            )
+            .expect("writing to a string cannot fail");
+        }
+        writeln!(
+            output,
+            "{}\n{}  {}",
+            ui::accent_style().apply_to("│"),
+            ui::accent_style().apply_to("└"),
+            style(
+                "↑/↓ navigate · Ctrl-A then 1–9 select · Shift-Tab create · type to filter · Enter select · Esc/Ctrl-C cancel"
+            )
+            .color256(244)
+            .force_styling(true)
+        )
+        .expect("writing to a string cannot fail");
+        output
+    }
+}
+
+fn shortcut_number(key: &Key) -> Option<usize> {
+    match key {
+        Key::Char('1') => Some(1),
+        Key::Char('2') => Some(2),
+        Key::Char('3') => Some(3),
+        Key::Char('4') => Some(4),
+        Key::Char('5') => Some(5),
+        Key::Char('6') => Some(6),
+        Key::Char('7') => Some(7),
+        Key::Char('8') => Some(8),
+        Key::Char('9') => Some(9),
+        _ => None,
     }
 }
 
@@ -530,7 +841,96 @@ pub fn port_for_branch(branch: &str) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::port_for_branch;
+    use console::{Key, style};
+
+    use super::{WorktreePicker, picker_viewport_rows, port_for_branch};
+
+    #[test]
+    fn picker_reserves_a_row_to_avoid_scrolling_its_header() {
+        assert_eq!(picker_viewport_rows(20), 15);
+        assert_eq!(picker_viewport_rows(5), 1);
+    }
+
+    #[test]
+    fn picker_stops_scrolling_at_the_last_full_page() {
+        let mut picker = WorktreePicker::new(
+            (0..20).map(|index| index.to_string()).collect(),
+            (0..20).map(|index| index.to_string()).collect(),
+            vec![false; 20],
+            vec![true; 20],
+            19,
+        );
+        picker.viewport_rows = 15;
+        let visible = picker.visible();
+        let start = picker.displayed_start(&visible);
+
+        assert_eq!(start, 6);
+        assert_eq!(picker.displayed(&visible, start).len(), 14);
+    }
+
+    #[test]
+    fn picker_shows_hints_for_results_outside_the_page() {
+        let mut picker = WorktreePicker::new(
+            (0..20).map(|index| index.to_string()).collect(),
+            (0..20).map(|index| index.to_string()).collect(),
+            vec![false; 20],
+            vec![true; 20],
+            0,
+        );
+        picker.viewport_rows = 15;
+        let visible = picker.visible();
+
+        let first_page = picker.displayed(&visible, 0);
+        let first_rendered = picker.render(first_page, 0, visible.len());
+        assert!(first_rendered.contains("↓ 6 more below"));
+        assert!(!first_rendered.contains("more above"));
+
+        let final_page = picker.displayed(&visible, 6);
+        let final_rendered = picker.render(final_page, 6, visible.len());
+        assert!(final_rendered.contains("↑ 6 more above"));
+        assert!(!final_rendered.contains("more below"));
+    }
+
+    #[test]
+    fn picker_renders_selected_label_in_white() {
+        let first = style("first").cyan().force_styling(true).to_string();
+        let second = style("second").cyan().force_styling(true).to_string();
+        let picker = WorktreePicker::new(
+            vec![first, second.clone()],
+            vec!["first".to_owned(), "second".to_owned()],
+            vec![true, false],
+            vec![false, true],
+            0,
+        );
+
+        let rendered = picker.render(&[0, 1], 0, 2);
+
+        assert!(
+            rendered.contains(
+                &style("first")
+                    .white()
+                    .bold()
+                    .force_styling(true)
+                    .to_string()
+            )
+        );
+        assert!(rendered.contains(&second));
+        assert!(rendered.contains("Shift-Tab create"));
+    }
+
+    #[test]
+    fn picker_shift_tab_selects_the_create_action() {
+        let picker = WorktreePicker::new(
+            vec!["main".to_owned(), "Create".to_owned()],
+            vec!["main".to_owned(), "Create".to_owned()],
+            vec![true, false],
+            vec![false, true],
+            0,
+        );
+
+        assert_eq!(picker.shortcut_selection(&Key::BackTab), Some(1));
+        assert_eq!(picker.shortcut_selection(&Key::CtrlC), None);
+    }
 
     #[test]
     fn ports_match_worktrunk_v0_66_golden_values() {

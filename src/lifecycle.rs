@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use console::style;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -16,7 +17,7 @@ use crate::{
     hash,
     setup::{self, HookOutcome},
     smart::approve_hooks,
-    trust,
+    trust, ui,
 };
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -79,7 +80,15 @@ pub fn remove(branches: &[String], force: bool) -> Result<()> {
     if removing_current {
         write_destination(primary)?;
     }
-    Ok(())
+    let count = targets.len();
+    ui::finish(
+        style(format!(
+            "Removed {count} worktree{}; branches retained.",
+            plural(count)
+        ))
+        .green()
+        .bold(),
+    )
 }
 
 /// Integrates the current topic branch into the configured target branch.
@@ -201,7 +210,14 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
     git::merge_ff_only(primary, &source)?;
     if state.no_remove {
         remove_journal(&repository.common_dir, &state.topic_identity)?;
-        return Ok(());
+        return ui::finish(
+            style(format!(
+                "Merged {} into {}; worktree retained.",
+                state.source_branch, state.target_branch
+            ))
+            .green()
+            .bold(),
+        );
     }
     state.cleanup_pending = true;
     write_journal(&repository.common_dir, &state)?;
@@ -224,7 +240,19 @@ fn cleanup_merge(repository: &Repository, state: &MergeJournal) -> Result<()> {
         .context("cleanup requires a primary worktree")?;
     git::remove_worktree(primary, &state.topic_path, false)?;
     remove_journal(&repository.common_dir, &state.topic_identity)?;
-    write_destination(primary)
+    write_destination(primary)?;
+    ui::finish(
+        style(format!(
+            "Merged {} into {}; worktree removed.",
+            state.source_branch, state.target_branch
+        ))
+        .green()
+        .bold(),
+    )
+}
+
+const fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }
 
 fn select_removal_targets(

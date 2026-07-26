@@ -1,18 +1,19 @@
+use console::style;
 use unicode_width::UnicodeWidthStr;
 
-use crate::Worktree;
+use crate::{Condition, Worktree, ui};
 
 #[must_use]
 pub fn table(worktrees: &[Worktree]) -> String {
     let worktrees: Vec<_> = worktrees.iter().collect();
-    let (branch_width, state_width) = column_widths(&worktrees, true);
+    let branch_width = branch_width(&worktrees, true);
     let mut output = format!(
-        "  {}  {}  PATH\n",
-        pad("BRANCH", branch_width),
-        pad("STATE", state_width)
+        "  {}  {}\n",
+        style(pad("BRANCH", branch_width)).dim(),
+        style("PATH").dim(),
     );
     for worktree in worktrees {
-        output.push_str(&row(worktree, branch_width, state_width));
+        output.push_str(&styled_row(worktree, branch_width));
         output.push('\n');
     }
     output
@@ -20,31 +21,68 @@ pub fn table(worktrees: &[Worktree]) -> String {
 
 #[must_use]
 pub fn menu_labels(worktrees: &[&Worktree]) -> Vec<String> {
-    let (branch_width, state_width) = column_widths(worktrees, false);
+    let branch_width = branch_width(worktrees, false);
     worktrees
         .iter()
-        .map(|worktree| row(worktree, branch_width, state_width))
+        .map(|worktree| {
+            format!(
+                "{}  {}",
+                style(pad(&marked_branch_label(worktree), branch_width))
+                    .cyan()
+                    .bold()
+                    .force_styling(true),
+                style(abbreviated_path(&worktree.path))
+                    .cyan()
+                    .force_styling(true),
+            )
+        })
         .collect()
 }
 
-fn column_widths(worktrees: &[&Worktree], include_headers: bool) -> (usize, usize) {
-    let mut branch_width = usize::from(include_headers) * UnicodeWidthStr::width("BRANCH");
-    let mut state_width = usize::from(include_headers) * UnicodeWidthStr::width("STATE");
-    for worktree in worktrees {
-        branch_width = branch_width.max(UnicodeWidthStr::width(worktree.branch_label()));
-        state_width = state_width.max(UnicodeWidthStr::width(worktree.state_label().as_str()));
-    }
-    (branch_width, state_width)
+fn branch_width(worktrees: &[&Worktree], include_header: bool) -> usize {
+    worktrees
+        .iter()
+        .map(|worktree| UnicodeWidthStr::width(marked_branch_label(worktree).as_str()))
+        .max()
+        .unwrap_or(0)
+        .max(usize::from(include_header) * UnicodeWidthStr::width("BRANCH"))
 }
 
-fn row(worktree: &Worktree, branch_width: usize, state_width: usize) -> String {
+fn styled_row(worktree: &Worktree, branch_width: usize) -> String {
+    let current_marker = if worktree.current {
+        ui::header_style().apply_to("*").to_string()
+    } else {
+        " ".to_owned()
+    };
     format!(
-        "{} {}  {}  {}",
-        if worktree.current { '*' } else { ' ' },
-        pad(worktree.branch_label(), branch_width),
-        pad(&worktree.state_label(), state_width),
-        worktree.path.display()
+        "{current_marker} {}  {}",
+        style(pad(&marked_branch_label(worktree), branch_width))
+            .cyan()
+            .bold(),
+        style(worktree.path.display()).cyan(),
     )
+}
+
+fn marked_branch_label(worktree: &Worktree) -> String {
+    if worktree.condition == Condition::Dirty {
+        format!("{} *", worktree.branch_label())
+    } else {
+        worktree.branch_label().to_owned()
+    }
+}
+
+fn abbreviated_path(path: &std::path::Path) -> String {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return path.display().to_string();
+    };
+    let Ok(relative) = path.strip_prefix(home) else {
+        return path.display().to_string();
+    };
+    if relative.as_os_str().is_empty() {
+        "~".to_owned()
+    } else {
+        format!("~/{}", relative.display())
+    }
 }
 
 fn pad(value: &str, width: usize) -> String {
