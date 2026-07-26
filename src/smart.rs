@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use cliclack::{confirm, input, select};
-use console::{Key, Term, strip_ansi_codes, style};
+use console::{Key, Term, strip_ansi_codes};
 use siphasher::sip::SipHasher13;
 
 use crate::{
@@ -173,9 +173,8 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
     let branch_action = choices.len();
     let mut labels = render::menu_labels(&choices);
     labels.push(
-        style("+ Create or switch branches...")
-            .color256(244)
-            .force_styling(true)
+        ui::interactive(ui::shortcut_style())
+            .apply_to("+ Create or switch branches...")
             .to_string(),
     );
     let current = choices
@@ -405,12 +404,10 @@ impl WorktreePicker {
         };
         let mut output = format!(
             "{}  {}\n{}  {}\n",
-            ui::accent_style().force_styling(true).apply_to("◆"),
-            ui::header_style()
-                .force_styling(true)
-                .apply_to("Choose a worktree"),
-            ui::accent_style().force_styling(true).apply_to("│"),
-            style(filter).dim().force_styling(true)
+            ui::interactive(ui::accent_style()).apply_to("◆"),
+            ui::interactive(ui::heading_style()).apply_to("Choose a worktree"),
+            ui::interactive(ui::accent_style()).apply_to("│"),
+            ui::interactive(ui::muted_style()).apply_to(filter)
         );
         let numbered = self.numbered(
             visible,
@@ -423,17 +420,15 @@ impl WorktreePicker {
             writeln!(
                 output,
                 "{}  {}",
-                ui::accent_style().apply_to("│"),
-                style(format!("↑ {displayed_start} more above"))
-                    .dim()
-                    .force_styling(true)
+                ui::interactive(ui::accent_style()).apply_to("│"),
+                ui::interactive(ui::muted_style())
+                    .apply_to(format!("↑ {displayed_start} more above"))
             )
             .expect("writing to a string cannot fail");
         }
         for (position, index) in visible.iter().enumerate() {
             let marker = if self.current[*index] {
-                ui::header_style()
-                    .force_styling(true)
+                ui::interactive(ui::accent_style().bold())
                     .apply_to("*")
                     .to_string()
             } else if displayed_start + position == self.selected && !pinned_at_bottom {
@@ -446,20 +441,22 @@ impl WorktreePicker {
                     })
                     .map_or_else(
                         || " ".to_owned(),
-                        |number| style(number).white().force_styling(true).to_string(),
+                        |number| {
+                            ui::interactive(ui::shortcut_style())
+                                .apply_to(number)
+                                .to_string()
+                        },
                     )
             };
             let is_selected = displayed_start + position == self.selected;
             let selected = if is_selected {
-                ui::accent_style().apply_to("●")
+                ui::interactive(ui::accent_style()).apply_to("●")
             } else {
-                style("○").dim()
+                ui::interactive(ui::muted_style()).apply_to("○")
             };
             let label = if is_selected {
-                style(strip_ansi_codes(&self.labels[*index]))
-                    .white()
-                    .bold()
-                    .force_styling(true)
+                ui::interactive(ui::selected_style())
+                    .apply_to(strip_ansi_codes(&self.labels[*index]))
                     .to_string()
             } else {
                 self.labels[*index].clone()
@@ -467,7 +464,7 @@ impl WorktreePicker {
             writeln!(
                 output,
                 "{}  {selected} {marker} {label}",
-                ui::accent_style().apply_to("│"),
+                ui::interactive(ui::accent_style()).apply_to("│"),
             )
             .expect("writing to a string cannot fail");
         }
@@ -476,27 +473,61 @@ impl WorktreePicker {
             writeln!(
                 output,
                 "{}  {}",
-                ui::accent_style().apply_to("│"),
-                style(format!("↓ {more_below} more below"))
-                    .dim()
-                    .force_styling(true)
+                ui::interactive(ui::accent_style()).apply_to("│"),
+                ui::interactive(ui::muted_style()).apply_to(format!("↓ {more_below} more below"))
             )
             .expect("writing to a string cannot fail");
         }
         writeln!(
             output,
             "{}\n{}  {}",
-            ui::accent_style().apply_to("│"),
-            ui::accent_style().apply_to("└"),
-            style(
-                "↑/↓ navigate · Ctrl-A then 1–9 select · Shift-Tab create · type to filter · Enter select · Esc/Ctrl-C cancel"
-            )
-            .color256(244)
-            .force_styling(true)
+            ui::interactive(ui::accent_style()).apply_to("│"),
+            ui::interactive(ui::accent_style()).apply_to("└"),
+            picker_help()
         )
         .expect("writing to a string cannot fail");
         output
     }
+}
+
+fn picker_help() -> String {
+    let mut output = String::new();
+    for (index, (shortcut, description)) in [
+        ("↑/↓", "navigate"),
+        ("Ctrl-A then 1–9", "select"),
+        ("Shift-Tab", "create"),
+        ("type to filter", ""),
+        ("Enter", "select"),
+        ("Esc/Ctrl-C", "cancel"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            write!(
+                output,
+                "{}",
+                ui::interactive(ui::muted_style()).apply_to(" · ")
+            )
+            .expect("writing to a string cannot fail");
+        }
+        let style = if description.is_empty() {
+            ui::muted_style()
+        } else {
+            ui::shortcut_style()
+        };
+        write!(output, "{}", ui::interactive(style).apply_to(shortcut))
+            .expect("writing to a string cannot fail");
+        if !description.is_empty() {
+            write!(
+                output,
+                "{}",
+                ui::interactive(ui::muted_style()).apply_to(format!(" {description}"))
+            )
+            .expect("writing to a string cannot fail");
+        }
+    }
+    output
 }
 
 fn shortcut_number(key: &Key) -> Option<usize> {
@@ -841,9 +872,10 @@ pub fn port_for_branch(branch: &str) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use console::{Key, style};
+    use console::{Key, strip_ansi_codes};
 
     use super::{WorktreePicker, picker_viewport_rows, port_for_branch};
+    use crate::ui;
 
     #[test]
     fn picker_reserves_a_row_to_avoid_scrolling_its_header() {
@@ -893,8 +925,12 @@ mod tests {
 
     #[test]
     fn picker_renders_selected_label_in_white() {
-        let first = style("first").cyan().force_styling(true).to_string();
-        let second = style("second").cyan().force_styling(true).to_string();
+        let first = ui::interactive(ui::worktree_data_style())
+            .apply_to("first")
+            .to_string();
+        let second = ui::interactive(ui::worktree_data_style())
+            .apply_to("second")
+            .to_string();
         let picker = WorktreePicker::new(
             vec![first, second.clone()],
             vec!["first".to_owned(), "second".to_owned()],
@@ -907,15 +943,13 @@ mod tests {
 
         assert!(
             rendered.contains(
-                &style("first")
-                    .white()
-                    .bold()
-                    .force_styling(true)
+                &ui::interactive(ui::selected_style())
+                    .apply_to("first")
                     .to_string()
             )
         );
         assert!(rendered.contains(&second));
-        assert!(rendered.contains("Shift-Tab create"));
+        assert!(strip_ansi_codes(&rendered).contains("Shift-Tab create"));
     }
 
     #[test]

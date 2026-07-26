@@ -6,7 +6,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use console::style;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -36,6 +35,21 @@ struct MergeJournal {
     validated_source: Option<String>,
     #[serde(default)]
     validated_target: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum MergeWorktreeOutcome {
+    Retained,
+    Removed,
+}
+
+impl MergeWorktreeOutcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Retained => "retained",
+            Self::Removed => "removed",
+        }
+    }
 }
 
 /// Removes selected topic worktrees and emits a destination only if the current
@@ -81,14 +95,10 @@ pub fn remove(branches: &[String], force: bool) -> Result<()> {
         write_destination(primary)?;
     }
     let count = targets.len();
-    ui::finish(
-        style(format!(
-            "Removed {count} worktree{}; branches retained.",
-            plural(count)
-        ))
-        .green()
-        .bold(),
-    )
+    ui::finish(ui::success_style().apply_to(format!(
+        "Removed {count} worktree{}; branches retained.",
+        plural(count)
+    )))
 }
 
 /// Integrates the current topic branch into the configured target branch.
@@ -210,14 +220,7 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
     git::merge_ff_only(primary, &source)?;
     if state.no_remove {
         remove_journal(&repository.common_dir, &state.topic_identity)?;
-        return ui::finish(
-            style(format!(
-                "Merged {} into {}; worktree retained.",
-                state.source_branch, state.target_branch
-            ))
-            .green()
-            .bold(),
-        );
+        return ui::finish(merge_summary(&state, MergeWorktreeOutcome::Retained));
     }
     state.cleanup_pending = true;
     write_journal(&repository.common_dir, &state)?;
@@ -241,13 +244,17 @@ fn cleanup_merge(repository: &Repository, state: &MergeJournal) -> Result<()> {
     git::remove_worktree(primary, &state.topic_path, false)?;
     remove_journal(&repository.common_dir, &state.topic_identity)?;
     write_destination(primary)?;
-    ui::finish(
-        style(format!(
-            "Merged {} into {}; worktree removed.",
-            state.source_branch, state.target_branch
-        ))
-        .green()
-        .bold(),
+    ui::finish(merge_summary(state, MergeWorktreeOutcome::Removed))
+}
+
+fn merge_summary(state: &MergeJournal, worktree_outcome: MergeWorktreeOutcome) -> String {
+    format!(
+        "{} {} {} {}{}",
+        ui::success_style().apply_to("Merged"),
+        ui::worktree_data_style().apply_to(&state.source_branch),
+        ui::success_style().apply_to("into"),
+        ui::worktree_data_style().apply_to(&state.target_branch),
+        ui::success_style().apply_to(format!("; worktree {}.", worktree_outcome.label())),
     )
 }
 

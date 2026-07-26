@@ -7,7 +7,10 @@ use std::{
     thread,
 };
 
-use nix::{pty::openpty, unistd::dup};
+use nix::{
+    pty::{Winsize, openpty},
+    unistd::dup,
+};
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
@@ -94,6 +97,64 @@ fn list_shows_current_repository_worktrees_from_nested_directory() {
     );
     assert!(!stderr.contains("clean"));
     assert!(stderr.contains("2 worktrees"), "{stderr}");
+}
+
+#[test]
+fn list_uses_semantic_terminal_styles_without_writing_stdout() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .arg("list")
+        .current_dir(&repo.main)
+        .env("CLICOLOR_FORCE", "1");
+
+    let output = run_terminal_command(command);
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(
+        output
+            .stderr
+            .contains(&forced_style(worktrees::ui::heading_style(), "Worktrees")),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains(&forced_style(
+            worktrees::ui::worktree_data_style().bold(),
+            "main"
+        )),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output
+            .stderr
+            .contains(&forced_style(worktrees::ui::warning_style(), "*")),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains(&forced_style(
+            worktrees::ui::muted_style(),
+            "2 worktrees, 1 dirty"
+        )),
+        "{}",
+        output.stderr
+    );
+
+    let mut no_color = Command::cargo_bin("worktrees").unwrap();
+    no_color
+        .arg("list")
+        .current_dir(&repo.main)
+        .env("NO_COLOR", "1")
+        .env_remove("CLICOLOR_FORCE");
+    let plain = run_terminal_command(no_color);
+    assert!(plain.status.success(), "{}", plain.stderr);
+    assert!(plain.stdout.is_empty());
+    assert!(!plain.stderr.contains('\u{1b}'), "{}", plain.stderr);
+    assert!(plain.stderr.contains("* main"), "{}", plain.stderr);
 }
 
 #[test]
@@ -317,6 +378,90 @@ fn switch_defaults_to_current_worktree_and_keeps_stdout_pure() {
 }
 
 #[test]
+fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
+    let repo = Repository::new();
+
+    let output = run_switch(&repo.main, b"\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", repo.main.canonicalize().unwrap().display())
+    );
+    assert!(
+        output.stderr.contains(&forced_style(
+            worktrees::ui::heading_style(),
+            "Choose a worktree"
+        )),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains(&forced_style(
+            worktrees::ui::selected_style(),
+            format!("main     {}", repo.main.canonicalize().unwrap().display())
+        )),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains(&forced_style(
+            worktrees::ui::worktree_data_style().bold(),
+            "feature"
+        )),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains(&forced_style(
+            worktrees::ui::muted_style(),
+            "type to filter"
+        )),
+        "{}",
+        output.stderr
+    );
+    for shortcut in ["Ctrl-A then 1–9", "Shift-Tab", "Enter", "Esc/Ctrl-C"] {
+        assert!(
+            output
+                .stderr
+                .contains(&forced_style(worktrees::ui::shortcut_style(), shortcut)),
+            "missing semantic shortcut {shortcut:?}: {}",
+            output.stderr
+        );
+    }
+}
+
+#[test]
+fn switch_pagination_hint_uses_muted_semantic_style() {
+    let repo = Repository::new();
+    for index in 0..8 {
+        repo.add_worktree(&format!("page-{index}"), &format!("page-{index}"));
+    }
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command.arg("switch").current_dir(&repo.main);
+
+    let output = run_pty_command_with_rows(command, b"\r", 10);
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", repo.main.canonicalize().unwrap().display())
+    );
+    let plain = console::strip_ansi_codes(&output.stderr);
+    let hint = plain
+        .lines()
+        .find_map(|line| line.find('↓').map(|start| line[start..].trim().to_owned()))
+        .expect("a constrained terminal should show a lower-page hint");
+    assert!(
+        output
+            .stderr
+            .contains(&forced_style(worktrees::ui::muted_style(), &hint)),
+        "{}",
+        output.stderr
+    );
+}
+
+#[test]
 fn switch_ctrl_a_number_selects_the_numbered_worktree() {
     let repo = Repository::new();
     let second = repo.add_worktree("second-shortcut", "second-shortcut");
@@ -374,11 +519,7 @@ fn switch_picker_marks_dirty_branches_and_shows_paths() {
         output.stderr
     );
     assert!(picker.contains("* main"), "{}", output.stderr);
-    assert!(
-        output.stderr.contains("long-path-choice *"),
-        "{}",
-        output.stderr
-    );
+    assert!(picker.contains("long-path-choice *"), "{}", output.stderr);
     assert!(
         !output.stderr.contains("current, clean"),
         "{}",
@@ -446,6 +587,65 @@ fn switch_rejects_a_repository_with_no_navigable_worktree() {
 }
 
 #[test]
+fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
+    let repo = Repository::new();
+    let mut remove = Command::cargo_bin("worktrees").unwrap();
+    remove
+        .args(["remove", "feature"])
+        .current_dir(&repo.main)
+        .env("CLICOLOR_FORCE", "1");
+
+    let removed = run_pty_command(remove, b"");
+
+    assert!(removed.status.success(), "{}", removed.stderr);
+    assert!(removed.stdout.is_empty());
+    assert!(
+        removed.stderr.contains(&forced_style(
+            worktrees::ui::success_style(),
+            "Removed 1 worktree; branches retained."
+        )),
+        "{}",
+        removed.stderr
+    );
+    git(&repo.main, ["show-ref", "--verify", "refs/heads/feature"]);
+
+    let topic = repo.add_worktree("merge-topic", "merge-topic");
+    fs::write(
+        topic.join(".worktrees.yaml"),
+        "worktrees:\n  target-branch: main\n",
+    )
+    .unwrap();
+    git(&topic, ["add", ".worktrees.yaml"]);
+    git(&topic, ["commit", "-m", "configure merge target"]);
+    let mut merge = Command::cargo_bin("worktrees").unwrap();
+    merge
+        .args(["merge", "--no-remove"])
+        .current_dir(&topic)
+        .env("CLICOLOR_FORCE", "1");
+
+    let merged = run_pty_command(merge, b"");
+
+    assert!(merged.status.success(), "{}", merged.stderr);
+    assert!(merged.stdout.is_empty());
+    assert!(
+        merged.stderr.contains(&format!(
+            "{} {} {} {}{}",
+            forced_style(worktrees::ui::success_style(), "Merged"),
+            forced_style(worktrees::ui::worktree_data_style(), "merge-topic"),
+            forced_style(worktrees::ui::success_style(), "into"),
+            forced_style(worktrees::ui::worktree_data_style(), "main"),
+            forced_style(worktrees::ui::success_style(), "; worktree retained.")
+        )),
+        "{}",
+        merged.stderr
+    );
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s"]),
+        "configure merge target"
+    );
+}
+
+#[test]
 fn install_decline_makes_no_filesystem_changes() {
     let home = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
@@ -457,6 +657,14 @@ fn install_decline_makes_no_filesystem_changes() {
     assert!(output.status.success(), "{}", output.stderr);
     assert!(output.stdout.is_empty());
     assert!(output.stderr.contains("cancelled"), "{}", output.stderr);
+    assert!(
+        output.stderr.contains(&forced_style(
+            worktrees::ui::warning_style(),
+            "Installation cancelled; no files were changed."
+        )),
+        "{}",
+        output.stderr
+    );
 
     assert_eq!(fs::read(&zshrc).unwrap(), b"export KEEP=yes\n");
     assert!(!xdg.path().join("worktrees/worktrees.zsh").exists());
@@ -475,7 +683,18 @@ fn install_preserves_zshrc_and_is_idempotent() {
     assert!(installed.status.success(), "{}", installed.stderr);
     assert!(installed.stdout.is_empty());
     assert!(
-        installed.stderr.contains("Installed zsh integration"),
+        installed.stderr.contains(&forced_style(
+            worktrees::ui::success_style(),
+            "Installed zsh integration."
+        )),
+        "{}",
+        installed.stderr
+    );
+    assert!(
+        installed.stderr.contains(&forced_style(
+            worktrees::ui::success_style(),
+            "Zsh integration installed."
+        )),
         "{}",
         installed.stderr
     );
@@ -719,6 +938,50 @@ fn switch_explicitly_enters_an_existing_worktree() {
         String::from_utf8(output.stderr)
             .unwrap()
             .contains("Worktree destination printed.")
+    );
+}
+
+#[test]
+fn machine_readable_commands_keep_themed_feedback_off_stdout() {
+    let repo = Repository::new();
+    let mut get = Command::cargo_bin("worktrees").unwrap();
+    get.args(["get", "branch"])
+        .current_dir(&repo.main)
+        .env("CLICOLOR_FORCE", "1");
+
+    let queried = run_pty_command(get, b"");
+
+    assert!(queried.status.success(), "{}", queried.stderr);
+    assert_eq!(queried.stdout, "main\n");
+    assert!(!queried.stdout.contains('\u{1b}'));
+    assert!(
+        queried.stderr.contains(&forced_style(
+            worktrees::ui::muted_style(),
+            "Branch printed."
+        )),
+        "{}",
+        queried.stderr
+    );
+
+    let xdg = tempfile::tempdir().unwrap();
+    let mut trust = Command::cargo_bin("worktrees").unwrap();
+    trust
+        .args(["trust", "status"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("CLICOLOR_FORCE", "1");
+
+    let inspected = run_pty_command(trust, b"");
+
+    assert!(inspected.status.success(), "{}", inspected.stderr);
+    assert!(inspected.stdout.is_empty());
+    assert!(
+        inspected.stderr.contains(&forced_style(
+            worktrees::ui::muted_style(),
+            "Hook trust status checked."
+        )),
+        "{}",
+        inspected.stderr
     );
 }
 
@@ -1349,10 +1612,8 @@ fn picker_branch_action_uses_the_shared_resolver_and_escape_cancels() {
     assert!(created.status.success(), "{}", created.stderr);
     assert!(
         created.stderr.contains(
-            &console::style("Branch name:")
-                .green()
-                .bold()
-                .force_styling(true)
+            &worktrees::ui::interactive(worktrees::ui::heading_style())
+                .apply_to("Branch name:")
                 .to_string()
         ),
         "{}",
@@ -1735,7 +1996,9 @@ fn git_output<const N: usize>(dir: &Path, args: [&str; N]) -> String {
 }
 
 fn run_install(home: &Path, xdg: &Path, zdotdir: Option<&Path>, input: &[u8]) -> PtyOutput {
-    run_pty_command(install_command(home, xdg, zdotdir), input)
+    let mut command = install_command(home, xdg, zdotdir);
+    command.env("CLICOLOR_FORCE", "1");
+    run_pty_command(command, input)
 }
 
 fn install_command(home: &Path, xdg: &Path, zdotdir: Option<&Path>) -> Command {
@@ -1762,14 +2025,60 @@ struct PtyOutput {
     stderr: String,
 }
 
+fn forced_style(style: console::Style, value: impl std::fmt::Display) -> String {
+    style.force_styling(true).apply_to(value).to_string()
+}
+
 fn run_switch(cwd: &Path, input: &[u8]) -> PtyOutput {
     let mut command = Command::cargo_bin("worktrees").unwrap();
     command.arg("switch").current_dir(cwd);
     run_pty_command(command, input)
 }
 
-fn run_pty_command(mut command: Command, input: &[u8]) -> PtyOutput {
-    let pty = openpty(None, None).unwrap();
+fn run_terminal_command(mut command: Command) -> PtyOutput {
+    let stdout_pty = openpty(None, None).unwrap();
+    let stderr_pty = openpty(None, None).unwrap();
+    let mut stdout_reader = fs::File::from(stdout_pty.master);
+    let mut stderr_reader = fs::File::from(stderr_pty.master);
+    let mut child = command
+        .env("TERM", "xterm-256color")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_pty.slave))
+        .stderr(Stdio::from(stderr_pty.slave))
+        .spawn()
+        .unwrap();
+    drop(command);
+
+    let stdout = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout_reader.read_to_end(&mut bytes);
+        bytes
+    });
+    let stderr = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr_reader.read_to_end(&mut bytes);
+        bytes
+    });
+    let status = child.wait().unwrap();
+    PtyOutput {
+        status,
+        stdout: String::from_utf8_lossy(&stdout.join().unwrap()).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr.join().unwrap()).into_owned(),
+    }
+}
+
+fn run_pty_command(command: Command, input: &[u8]) -> PtyOutput {
+    run_pty_command_with_rows(command, input, 0)
+}
+
+fn run_pty_command_with_rows(mut command: Command, input: &[u8], rows: u16) -> PtyOutput {
+    let window = (rows > 0).then_some(Winsize {
+        ws_row: rows,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    });
+    let pty = openpty(window.as_ref(), None).unwrap();
     let stdin_fd = dup(&pty.slave).unwrap();
     let stderr_fd = dup(&pty.slave).unwrap();
     let mut master_writer = fs::File::from(dup(&pty.master).unwrap());
@@ -1886,26 +2195,57 @@ fn commit_generates_message_from_global_configuration() {
     ).unwrap();
     fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
 
-    let output = Command::cargo_bin("worktrees")
-        .unwrap()
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
         .arg("commit")
         .current_dir(&repo.main)
         .env("XDG_CONFIG_HOME", xdg.path())
-        .output()
-        .unwrap();
+        .env("CLICOLOR_FORCE", "1");
+    let output = run_terminal_command(command);
 
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "{}", output.stderr);
     assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Staged changes:"), "{stderr}");
-    assert!(stderr.contains("generated.txt | 1 +"), "{stderr}");
-    assert!(stderr.contains("Generating commit message..."), "{stderr}");
-    assert!(stderr.contains("Generated commit message:"), "{stderr}");
-    assert!(stderr.contains("Committed changes @ "), "{stderr}");
+    let stderr = &output.stderr;
+    for heading in [
+        "Staged changes:",
+        "Generating commit message...",
+        "Generated commit message:",
+    ] {
+        assert!(
+            stderr.contains(&forced_style(worktrees::ui::heading_style(), heading)),
+            "missing semantic heading {heading:?}: {stderr}"
+        );
+    }
+    assert!(
+        stderr.contains(&forced_style(
+            worktrees::ui::worktree_data_style(),
+            "generated.txt"
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&forced_style(
+            worktrees::ui::worktree_data_style().bold(),
+            "feat: generated"
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&forced_style(
+            worktrees::ui::success_style(),
+            "Committed changes @"
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("\u{1b}[2m0s\u{1b}[0m") || stderr.contains("\u{1b}[2m1s\u{1b}[0m"),
+        "missing muted elapsed metadata: {stderr}"
+    );
+    let hash = git_output(&repo.main, ["rev-parse", "--short=7", "HEAD"]);
+    assert!(
+        stderr.contains(&forced_style(worktrees::ui::muted_style(), hash)),
+        "{stderr}"
+    );
     let message = Command::new("git")
         .args(["log", "-1", "--format=%B"])
         .current_dir(&repo.main)

@@ -54,15 +54,21 @@ pub fn run() -> Result<()> {
 
     if !integration_changed && !zshrc_changed {
         ui::info("The worktrees zsh integration is already current; no changes are required.")?;
-        return ui::finish("Zsh integration is already current.");
+        return ui::finish(ui::success_style().apply_to("Zsh integration is already current."));
     }
 
-    ui::info("Planned zsh integration changes:")?;
+    ui::info(ui::heading_style().apply_to("Planned zsh integration changes:"))?;
     if integration_changed {
-        ui::step(format!("write {}", integration_path.display()))?;
+        ui::step(format!(
+            "write {}",
+            ui::worktree_data_style().apply_to(integration_path.display())
+        ))?;
     }
     if zshrc_changed {
-        ui::step(format!("update {}", zshrc_path.display()))?;
+        ui::step(format!(
+            "update {}",
+            ui::worktree_data_style().apply_to(zshrc_path.display())
+        ))?;
     }
 
     let confirmed = confirm("Apply these changes?")
@@ -71,7 +77,7 @@ pub fn run() -> Result<()> {
         .context("failed to read installation confirmation")?;
     if !confirmed {
         ui::warning("Installation cancelled; no files were changed.")?;
-        return ui::finish("Zsh integration installation cancelled.");
+        return ui::finish(ui::warning_style().apply_to("Zsh integration installation cancelled."));
     }
 
     if integration_changed {
@@ -86,9 +92,9 @@ pub fn run() -> Result<()> {
     ui::success("Installed zsh integration.")?;
     ui::info(format!(
         "Restart zsh or run: source {}",
-        zshrc_path.display()
+        ui::worktree_data_style().apply_to(zshrc_path.display())
     ))?;
-    ui::finish("Zsh integration installed.")
+    ui::finish(ui::success_style().apply_to("Zsh integration installed."))
 }
 
 fn config_home() -> Result<PathBuf> {
