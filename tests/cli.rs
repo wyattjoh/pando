@@ -1791,8 +1791,10 @@ fn commit_with_explicit_message_stages_all_change_kinds() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("feat: commit every change"));
+    assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Created commit"), "{stderr}");
+    assert!(stderr.contains("feat: commit every change"), "{stderr}");
     assert!(stderr.contains("Staged changes:"), "{stderr}");
     assert!(stderr.contains("README.md"), "{stderr}");
     assert!(stderr.contains("added.txt"), "{stderr}");
@@ -1847,9 +1849,13 @@ fn commit_generates_message_from_global_configuration() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Staging changes…"), "{stderr}");
+    assert!(stderr.contains("Staged changes:"), "{stderr}");
+    assert!(stderr.contains("generated.txt | 1 +"), "{stderr}");
     assert!(stderr.contains("Generating commit message…"), "{stderr}");
+    assert!(stderr.contains("Generated commit message"), "{stderr}");
+    assert!(stderr.contains("[main "), "{stderr}");
     let message = Command::new("git")
         .args(["log", "-1", "--format=%B"])
         .current_dir(&repo.main)
