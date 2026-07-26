@@ -59,9 +59,30 @@ enum Commands {
 
 fn main() {
     if let Err(error) = run() {
-        let message = format!("error: {error:#}");
-        if ui::error(&message).is_err() {
-            eprintln!("{message}");
+        let interaction = error.downcast_ref::<ui::InteractionError>();
+        let rendered = match interaction {
+            Some(interaction) if interaction.is_cancelled() => ui::cancel(interaction),
+            Some(interaction) => ui::warning(interaction).and_then(|()| {
+                interaction.completion().map_or(Ok(()), |completion| {
+                    ui::finish(ui::warning_style().apply_to(completion))
+                })
+            }),
+            None => {
+                let message = format!("error: {error:#}");
+                let rendered = ui::error(&message);
+                if rendered.is_err() {
+                    eprintln!("{message}");
+                }
+                rendered
+            }
+        };
+        if rendered.is_err()
+            && let Some(interaction) = interaction
+        {
+            eprintln!("{interaction}");
+        }
+        if rendered.is_ok() && interaction.is_some_and(ui::InteractionError::is_successful) {
+            return;
         }
         std::process::exit(1);
     }

@@ -1,13 +1,75 @@
-use std::fmt::Display;
+use std::{
+    error::Error,
+    fmt::{self, Display},
+    io::{self, IsTerminal},
+};
 
-use anyhow::{Context, Result};
-use cliclack::{Theme, ThemeState, log, outro, set_theme};
+use anyhow::{Context, Result, bail};
+use cliclack::{Theme, ThemeState, log, outro, outro_cancel, set_theme};
 use console::{
     Style, colors_enabled_stderr, set_colors_enabled, set_true_colors_enabled,
     true_colors_enabled_stderr,
 };
 
 struct WorktreesTheme;
+
+#[derive(Debug)]
+enum InteractionKind {
+    Cancelled,
+    Declined,
+}
+
+/// A user-directed outcome from an interactive prompt.
+#[derive(Debug)]
+pub struct InteractionError {
+    kind: InteractionKind,
+    message: String,
+    completion: Option<String>,
+}
+
+impl InteractionError {
+    fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            kind: InteractionKind::Cancelled,
+            message: message.into(),
+            completion: None,
+        }
+    }
+
+    fn declined(message: impl Into<String>, completion: Option<String>) -> Self {
+        Self {
+            kind: InteractionKind::Declined,
+            message: message.into(),
+            completion,
+        }
+    }
+
+    /// Returns whether the outcome came from Escape or Ctrl-C.
+    #[must_use]
+    pub const fn is_cancelled(&self) -> bool {
+        matches!(self.kind, InteractionKind::Cancelled)
+    }
+
+    /// Returns whether the command treats this deliberate no-op as successful.
+    #[must_use]
+    pub const fn is_successful(&self) -> bool {
+        self.completion.is_some()
+    }
+
+    /// Returns the final outro for a successful deliberate no-op.
+    #[must_use]
+    pub fn completion(&self) -> Option<&str> {
+        self.completion.as_deref()
+    }
+}
+
+impl Display for InteractionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for InteractionError {}
 
 impl Theme for WorktreesTheme {
     fn bar_color(&self, state: &ThemeState) -> Style {
@@ -68,10 +130,13 @@ pub fn accent_style() -> Style {
     Style::new().green()
 }
 
-/// Forces a semantic style for interactive stderr UI while stdout is captured.
+/// Returns a semantic style for interactive stderr UI.
+///
+/// Theme installation mirrors stderr's detected color capability to the styles
+/// used by Cliclack, so this helper deliberately does not force ANSI output.
 #[must_use]
-pub fn interactive(style: Style) -> Style {
-    style.force_styling(true)
+pub const fn interactive(style: Style) -> Style {
+    style
 }
 
 /// Returns the shared heading style for terminal UI titles and prompts.
@@ -120,6 +185,47 @@ pub fn warning_style() -> Style {
 #[must_use]
 pub fn error_style() -> Style {
     Style::new().red()
+}
+
+/// Requires both prompt input and presentation output to be terminals.
+///
+/// # Errors
+///
+/// Returns an error when either stdin or stderr is not an interactive terminal.
+pub fn ensure_interactive(reason: &str) -> Result<()> {
+    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        Ok(())
+    } else {
+        bail!("{reason}, but no interactive terminal is available")
+    }
+}
+
+/// Maps Cliclack prompt results into user-directed or operational outcomes.
+///
+/// # Errors
+///
+/// Returns a cancellation [`InteractionError`] for Escape or Ctrl-C and
+/// preserves other terminal failures with operation context.
+pub fn prompt_result<T>(result: io::Result<T>, cancelled: &str, failure: &str) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            Err(InteractionError::cancelled(cancelled).into())
+        }
+        Err(error) => Err(error).context(failure.to_owned()),
+    }
+}
+
+/// Creates a deliberate-decline outcome for the command boundary.
+#[must_use]
+pub fn declined(message: impl Into<String>) -> anyhow::Error {
+    InteractionError::declined(message, None).into()
+}
+
+/// Creates a successful deliberate no-op outcome for the command boundary.
+#[must_use]
+pub fn declined_noop(message: impl Into<String>, completion: impl Into<String>) -> anyhow::Error {
+    InteractionError::declined(message, Some(completion.into())).into()
 }
 
 /// Writes an informational message through the terminal UI.
@@ -174,6 +280,15 @@ pub fn step(message: impl Display) -> Result<()> {
 /// Returns an error when the terminal cannot be written.
 pub fn finish(message: impl Display) -> Result<()> {
     outro(message).context("failed to write terminal message")
+}
+
+/// Writes a cancellation outro without presenting an operational error.
+///
+/// # Errors
+///
+/// Returns an error when the terminal cannot be written.
+pub fn cancel(message: impl Display) -> Result<()> {
+    outro_cancel(message).context("failed to write terminal cancellation")
 }
 
 #[cfg(test)]

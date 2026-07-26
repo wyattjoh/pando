@@ -57,6 +57,7 @@ pub fn run() -> Result<()> {
         return ui::finish(ui::success_style().apply_to("Zsh integration is already current."));
     }
 
+    ui::ensure_interactive("zsh integration installation requires confirmation")?;
     ui::info(ui::heading_style().apply_to("Planned zsh integration changes:"))?;
     if integration_changed {
         ui::step(format!(
@@ -71,13 +72,18 @@ pub fn run() -> Result<()> {
         ))?;
     }
 
-    let confirmed = confirm("Apply these changes?")
-        .initial_value(false)
-        .interact()
-        .context("failed to read installation confirmation")?;
+    let confirmed = ui::prompt_result(
+        confirm("Apply these changes?")
+            .initial_value(false)
+            .interact(),
+        "installation cancelled",
+        "failed to read installation confirmation",
+    )?;
     if !confirmed {
-        ui::warning("Installation cancelled; no files were changed.")?;
-        return ui::finish(ui::warning_style().apply_to("Zsh integration installation cancelled."));
+        return Err(ui::declined_noop(
+            "Installation declined; no files were changed.",
+            "Zsh integration was not installed.",
+        ));
     }
 
     if integration_changed {

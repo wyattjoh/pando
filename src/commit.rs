@@ -77,7 +77,7 @@ pub fn run(message: Option<String>) -> Result<()> {
     let generated = match run_generator(&repository, &command.value, &prompt) {
         Ok(generated) => {
             if let Some(spinner) = &spinner {
-                spinner.clear();
+                spinner.stop("Generated commit message");
             }
             generated
         }
@@ -281,11 +281,7 @@ fn approve_shared_generation(repository: &Repository, config: &EffectiveConfig) 
     if !shared || trust::is_generation_trusted(repository, &config.generation)? {
         return Ok(());
     }
-    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-        bail!(
-            "shared commit generation settings require approval, but no interactive terminal is available"
-        );
-    }
+    ui::ensure_interactive("shared commit generation settings require approval")?;
     ui::info("The repository requests these commit generation settings:")?;
     if let Some(value) = &config.generation.command
         && value.source == GenerationSource::Shared
@@ -297,12 +293,17 @@ fn approve_shared_generation(repository: &Repository, config: &EffectiveConfig) 
     {
         ui::step(format!("template:\n{}", value.value))?;
     }
-    let approved = confirm("Trust these settings for this repository?")
-        .initial_value(false)
-        .interact()
-        .context("failed to read commit generator approval")?;
+    let approved = ui::prompt_result(
+        confirm("Trust these settings for this repository?")
+            .initial_value(false)
+            .interact(),
+        "commit generator approval cancelled",
+        "failed to read commit generator approval",
+    )?;
     if !approved {
-        bail!("commit generator approval declined; no changes were staged");
+        return Err(ui::declined(
+            "commit generator approval declined; no changes were staged",
+        ));
     }
     trust::approve_generation(repository, &config.generation)
 }
