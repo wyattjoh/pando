@@ -197,6 +197,87 @@ pub fn head_commit(cwd: &Path) -> Result<String> {
         .context("failed to resolve the invoking worktree's HEAD")
 }
 
+/// Runs a fast-forward-only merge, preserving Git output on the caller's stderr.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot execute the merge.
+pub fn merge_ff_only(cwd: &Path, branch: &str) -> Result<()> {
+    run_git_inherit(cwd, ["merge", "--ff-only", branch], "fast-forward merge")
+}
+
+/// Rebases the current branch onto `target`, preserving Git output on stderr.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot execute the rebase.
+pub fn rebase_onto(cwd: &Path, target: &str) -> Result<()> {
+    run_git_inherit(cwd, ["rebase", target], "rebase")
+}
+
+/// Continues an already active rebase, preserving Git output on stderr.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot continue the rebase.
+pub fn rebase_continue(cwd: &Path) -> Result<()> {
+    run_git_inherit(cwd, ["rebase", "--continue"], "rebase continuation")
+}
+
+/// Removes a registered worktree without deleting its branch.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot remove the worktree.
+pub fn remove_worktree(cwd: &Path, path: &Path, force: bool) -> Result<()> {
+    let mut command = Command::new("git");
+    command.arg("worktree").arg("remove");
+    if force {
+        command.arg("--force");
+    }
+    let status = command
+        .arg(path)
+        .current_dir(cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::from(open_stderr()?))
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to start git worktree remove")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("git worktree remove failed with {status}")
+    }
+}
+
+/// Reports whether `ancestor` is an ancestor of `descendant`.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot inspect ancestry.
+pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let output = run_git(cwd, ["merge-base", "--is-ancestor", ancestor, descendant])
+        .context("failed to inspect commit ancestry")?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!(
+            "git merge-base --is-ancestor failed: {}",
+            stderr_detail(&output)
+        ),
+    }
+}
+
+/// Reports whether a Git rebase is active in this worktree.
+///
+/// # Errors
+///
+/// Returns an error when Git state cannot be inspected.
+pub fn rebase_in_progress(cwd: &Path) -> Result<bool> {
+    let git_dir = worktree_identity(cwd)?;
+    Ok(git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists())
+}
+
 /// Reports whether the invoking worktree has staged, unstaged, or untracked changes.
 ///
 /// # Errors
@@ -452,6 +533,29 @@ fn run_worktree_add<const N: usize>(
             destination.display(),
             stderr_detail(&output)
         )
+    }
+}
+
+fn open_stderr() -> Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/stderr")
+        .map_err(Into::into)
+}
+
+fn run_git_inherit<const N: usize>(cwd: &Path, args: [&str; N], operation: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::from(open_stderr()?))
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("failed to start git {operation}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("git {operation} failed with {status}")
     }
 }
 
