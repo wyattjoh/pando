@@ -194,6 +194,12 @@ worktrees trust commit-reset
 
 `commit-reset` is idempotent and does not alter post-create approval. Supplying `-m`/`--message` bypasses all generator configuration, template validation, and generator trust.
 
+## Lifecycle commands
+
+`worktrees remove [--force] [branch ...]` removes registered topic worktrees but never deletes their local branch refs. No arguments removes the current topic; explicit branches select registered topics. Dirty worktrees require `--force`, and removing the current worktree emits the primary path after deletion.
+
+`worktrees merge [--no-rebase] [--no-remove]` integrates the current clean topic into the configured target checked out in the primary worktree using `git merge --ff-only`. A diverged topic rebases by default. Phase-specific `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries; the journal pins recovery state through conflicts and cleanup retries.
+
 ## Context queries
 
 Every successful `get` command writes exactly one value and a newline:

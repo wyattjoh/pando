@@ -9,7 +9,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{config::HookStep, hash, trust};
+use crate::{
+    config::{HookPhase, HookStep},
+    hash, trust,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HookOutcome {
@@ -161,19 +164,19 @@ fn remove_record(path: &Path) -> Result<()> {
     }
 }
 
-/// Runs post-create steps sequentially from the destination.
+/// Runs phase steps sequentially from the destination.
 ///
 /// # Errors
 ///
 /// Returns an error when a command cannot start, stream output, or be awaited.
-pub fn run_steps(steps: &[HookStep], destination: &Path) -> Result<HookOutcome> {
+pub fn run_steps(phase: HookPhase, steps: &[HookStep], destination: &Path) -> Result<HookOutcome> {
     for (index, step) in steps.iter().enumerate() {
-        eprintln!("Running post-create {}:", step.label(index));
+        eprintln!("Running {} {}:", phase.key(), step.label(index));
         eprintln!("{}", step.command);
         let hook_stdout = fs::OpenOptions::new()
             .write(true)
             .open("/dev/stderr")
-            .context("failed to open stderr for post-create output")?;
+            .with_context(|| format!("failed to open stderr for {} output", phase.key()))?;
         let status = Command::new("/bin/sh")
             .args(["-c", &step.command])
             .current_dir(destination)
@@ -181,7 +184,7 @@ pub fn run_steps(steps: &[HookStep], destination: &Path) -> Result<HookOutcome> 
             .stdout(Stdio::from(hook_stdout))
             .stderr(Stdio::inherit())
             .status()
-            .with_context(|| format!("failed to run post-create {}", step.label(index)))?;
+            .with_context(|| format!("failed to run {} {}", phase.key(), step.label(index)))?;
         if status.success() {
             continue;
         }

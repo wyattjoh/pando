@@ -28,6 +28,19 @@ enum Commands {
         #[arg(value_enum)]
         property: GetProperty,
     },
+    /// Remove one or more topic worktrees while retaining their branches.
+    Remove {
+        #[arg(long)]
+        force: bool,
+        branches: Vec<String>,
+    },
+    /// Integrate the current topic into the configured target branch.
+    Merge {
+        #[arg(long)]
+        no_rebase: bool,
+        #[arg(long)]
+        no_remove: bool,
+    },
     /// Stage all changes and create a commit.
     Commit {
         /// Commit message; omit to use the configured generator.
@@ -56,6 +69,11 @@ fn run() -> Result<()> {
         Commands::Switch { branch } => smart::switch(branch),
         Commands::Get { property } => smart::get(property),
         Commands::Commit { message } => commit::run(message),
+        Commands::Remove { force, branches } => worktrees::lifecycle::remove(&branches, force),
+        Commands::Merge {
+            no_rebase,
+            no_remove,
+        } => worktrees::lifecycle::merge(no_rebase, no_remove),
         Commands::Trust { command } => smart::trust_command(command),
         Commands::Install => install::run(),
     }

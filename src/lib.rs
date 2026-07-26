@@ -3,6 +3,7 @@ pub mod config;
 pub mod git;
 mod hash;
 pub mod install;
+pub mod lifecycle;
 pub mod render;
 pub mod setup;
 pub mod smart;

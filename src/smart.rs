@@ -13,7 +13,7 @@ use siphasher::sip::SipHasher13;
 
 use crate::{
     WorktreeKind,
-    config::EffectiveConfig,
+    config::{EffectiveConfig, HookPhase, HookStep},
     git::{self, Repository},
     render,
     setup::{self, HookOutcome},
@@ -31,9 +31,9 @@ pub enum GetProperty {
 
 #[derive(Clone, Copy, Debug, clap::Subcommand)]
 pub enum TrustCommand {
-    /// Show whether the current effective post-create commands are trusted.
+    /// Show configured and trusted state for every hook phase.
     Status,
-    /// Revoke post-create approval for this repository clone.
+    /// Revoke every hook-phase approval for this repository clone.
     Reset,
     /// Show approval state for the effective commit generator settings.
     CommitStatus,
@@ -113,20 +113,23 @@ pub fn trust_command(command: TrustCommand) -> Result<()> {
     match command {
         TrustCommand::Status => {
             let config = EffectiveConfig::load(&repository)?;
-            let trusted = trust::is_trusted(&repository, &config.steps)?;
-            if config.steps.is_empty() {
-                println!("No post-create commands are configured.");
-            } else if trusted {
-                println!("The current post-create commands are trusted.");
-            } else {
-                println!("The current post-create commands are not trusted.");
+            for phase in HookPhase::all() {
+                let steps = config.hooks(phase);
+                let trusted = trust::is_trusted(&repository, phase, steps)?;
+                if steps.is_empty() {
+                    println!("No {} are configured.", phase.key());
+                } else if trusted {
+                    println!("The current {} are trusted.", phase.key());
+                } else {
+                    println!("The current {} are not trusted.", phase.key());
+                }
             }
         }
         TrustCommand::Reset => {
             if trust::reset(&repository)? {
-                println!("Reset post-create trust for this repository.");
+                println!("Reset hook trust for this repository.");
             } else {
-                println!("No saved post-create trust existed for this repository.");
+                println!("No saved hook trust existed for this repository.");
             }
         }
         TrustCommand::CommitStatus => {
@@ -290,13 +293,13 @@ fn create(repository: &Repository, branch: &str, kind: &CreationKind) -> Result<
     if let CreationKind::New { head } = kind {
         confirm_new_branch(repository, branch, head, &destination)?;
     }
-    approve_hooks(repository, &config)?;
+    approve_hooks(repository, HookPhase::PostCreate, &config.post_create)?;
 
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create destination parent {}", parent.display()))?;
     }
-    let pending = (!config.steps.is_empty())
+    let pending = (!config.post_create.is_empty())
         .then(|| setup::prepare(&repository.common_dir, branch, &destination))
         .transpose()?;
     let creation = match kind {
@@ -392,13 +395,17 @@ fn confirm_new_branch(
     Ok(())
 }
 
-fn approve_hooks(repository: &Repository, config: &EffectiveConfig) -> Result<()> {
-    if config.steps.is_empty() || trust::is_trusted(repository, &config.steps)? {
+pub(crate) fn approve_hooks(
+    repository: &Repository,
+    phase: HookPhase,
+    steps: &[HookStep],
+) -> Result<()> {
+    if steps.is_empty() || trust::is_trusted(repository, phase, steps)? {
         return Ok(());
     }
-    ensure_interactive("post-create commands require approval")?;
-    eprintln!("The repository requests these post-create commands:");
-    for (index, step) in config.steps.iter().enumerate() {
+    ensure_interactive(&format!("{} require approval", phase.plural_name()))?;
+    eprintln!("The repository requests these {}:", phase.plural_name());
+    for (index, step) in steps.iter().enumerate() {
         eprintln!("  {}: {}", step.label(index), step.command);
     }
     let confirmed = Confirm::new()
@@ -407,9 +414,9 @@ fn approve_hooks(repository: &Repository, config: &EffectiveConfig) -> Result<()
         .interact()
         .context("failed to read hook approval")?;
     if !confirmed {
-        bail!("post-create command approval declined; no worktree was created");
+        bail!("{} approval declined", phase.plural_name());
     }
-    trust::approve(repository, &config.steps)
+    trust::approve(repository, phase, steps)
 }
 
 fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&str>) -> Result<()> {
@@ -419,7 +426,7 @@ fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&s
         return write_destination(&destination);
     }
     let config = EffectiveConfig::load(repository)?;
-    if config.steps.is_empty() {
+    if config.post_create.is_empty() {
         setup::clear(&repository.common_dir, &worktree_identity, branch)?;
         return write_destination(&destination);
     }
@@ -434,7 +441,7 @@ fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&s
         .ok_or_else(|| io::Error::new(io::ErrorKind::Interrupted, "setup recovery cancelled"))?;
     match choice {
         0 => {
-            approve_hooks(repository, &config)?;
+            approve_hooks(repository, HookPhase::PostCreate, &config.post_create)?;
             finish_setup(
                 repository,
                 &config,
@@ -463,7 +470,7 @@ fn finish_setup(
     branch: Option<&str>,
     destination: &Path,
 ) -> Result<()> {
-    match setup::run_steps(&config.steps, destination)? {
+    match setup::run_steps(HookPhase::PostCreate, &config.post_create, destination)? {
         HookOutcome::Success => {
             setup::clear(&repository.common_dir, worktree_identity, branch)?;
             write_destination(destination)

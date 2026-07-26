@@ -8,6 +8,35 @@ use serde::Deserialize;
 
 use crate::git::{self, Repository};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum HookPhase {
+    PostCreate,
+    PreMerge,
+    PreRemove,
+}
+impl HookPhase {
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::PostCreate => "post-create",
+            Self::PreMerge => "pre-merge",
+            Self::PreRemove => "pre-remove",
+        }
+    }
+    #[must_use]
+    pub const fn all() -> [Self; 3] {
+        [Self::PostCreate, Self::PreMerge, Self::PreRemove]
+    }
+    #[must_use]
+    pub const fn plural_name(self) -> &'static str {
+        match self {
+            Self::PostCreate => "post-create commands",
+            Self::PreMerge => "pre-merge commands",
+            Self::PreRemove => "pre-remove commands",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookStep {
@@ -28,19 +57,46 @@ impl HookStep {
 struct RootConfig {
     root: PathBuf,
 }
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorktreesConfig {
+    #[serde(default)]
+    root: Option<PathBuf>,
+    #[serde(default, rename = "target-branch")]
+    target_branch: Option<String>,
+}
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetConfig {
+    #[serde(default, rename = "target-branch")]
+    target_branch: Option<String>,
+}
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HooksConfig {
     #[serde(default, rename = "post-create")]
     post_create: Vec<HookStep>,
+    #[serde(default, rename = "pre-merge")]
+    pre_merge: Vec<HookStep>,
+    #[serde(default, rename = "pre-remove")]
+    pre_remove: Vec<HookStep>,
+}
+impl HooksConfig {
+    fn steps(&self, phase: HookPhase) -> &[HookStep] {
+        match phase {
+            HookPhase::PostCreate => &self.post_create,
+            HookPhase::PreMerge => &self.pre_merge,
+            HookPhase::PreRemove => &self.pre_remove,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GlobalConfig {
     #[serde(default)]
-    worktrees: Option<RootConfig>,
+    worktrees: Option<WorktreesConfig>,
     #[serde(default)]
     commit: Option<CommitConfig>,
 }
@@ -64,6 +120,8 @@ struct GenerationConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SharedConfig {
+    #[serde(default)]
+    worktrees: Option<TargetConfig>,
     #[serde(default)]
     hooks: Option<HooksConfig>,
     #[serde(default)]
@@ -103,7 +161,10 @@ pub struct EffectiveGeneration {
 #[derive(Clone, Debug)]
 pub struct EffectiveConfig {
     pub root: Option<PathBuf>,
-    pub steps: Vec<HookStep>,
+    pub target_branch: Option<String>,
+    pub post_create: Vec<HookStep>,
+    pub pre_merge: Vec<HookStep>,
+    pub pre_remove: Vec<HookStep>,
     pub generation: EffectiveGeneration,
 }
 
@@ -114,13 +175,22 @@ impl EffectiveConfig {
     ///
     /// Returns an error when a file is invalid, inaccessible, or violates local-file safety.
     pub fn load(repository: &Repository) -> Result<Self> {
+        Self::load_for_worktree(repository, &repository.current().path)
+    }
+
+    /// Loads configuration with shared lifecycle hooks from `worktree`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when configured files are invalid or inaccessible.
+    pub fn load_for_worktree(repository: &Repository, worktree: &Path) -> Result<Self> {
         let global_path = config_home()?.join("worktrees/config.yaml");
         let global: GlobalConfig = read_yaml_optional(&global_path)?;
 
-        let shared_path = repository.current().path.join(".worktrees.yaml");
+        let shared_path = worktree.join(".worktrees.yaml");
         let shared: SharedConfig = read_yaml_optional(&shared_path)?;
-        let shared_steps = shared.hooks.clone().unwrap_or_default().post_create;
-        validate_steps(&shared_steps, &shared_path)?;
+        let shared_hooks = shared.hooks.clone().unwrap_or_default();
+        validate_hooks(&shared_hooks, &shared_path)?;
         let shared_generation = shared.commit.and_then(|commit| commit.generation);
         validate_generation(shared_generation.as_ref(), &shared_path)?;
 
@@ -180,25 +250,41 @@ impl EffectiveConfig {
             ),
         };
 
-        let configured_root = local
-            .worktrees
-            .map(|section| section.root)
-            .or_else(|| global.worktrees.map(|section| section.root));
+        let configured_root = local.worktrees.map(|section| section.root).or_else(|| {
+            global
+                .worktrees
+                .as_ref()
+                .and_then(|section| section.root.clone())
+        });
         let root = configured_root
             .map(|root| resolve_root(repository, &root))
             .transpose()?;
 
-        let local_steps = local.hooks.unwrap_or_default().post_create;
+        let local_hooks = local.hooks.unwrap_or_default();
         if let Some(path) = &local_path {
-            validate_steps(&local_steps, path)?;
+            validate_hooks(&local_hooks, path)?;
         }
-        let mut steps = shared_steps;
-        steps.extend(local_steps);
+        let target_branch = shared
+            .worktrees
+            .and_then(|section| section.target_branch)
+            .or_else(|| global.worktrees.and_then(|section| section.target_branch));
         Ok(Self {
             root,
-            steps,
+            target_branch,
+            post_create: combine(&shared_hooks, &local_hooks, HookPhase::PostCreate),
+            pre_merge: combine(&shared_hooks, &local_hooks, HookPhase::PreMerge),
+            pre_remove: combine(&shared_hooks, &local_hooks, HookPhase::PreRemove),
             generation,
         })
+    }
+
+    #[must_use]
+    pub fn hooks(&self, phase: HookPhase) -> &[HookStep] {
+        match phase {
+            HookPhase::PostCreate => &self.post_create,
+            HookPhase::PreMerge => &self.pre_merge,
+            HookPhase::PreRemove => &self.pre_remove,
+        }
     }
 
     /// Returns the configured, resolved worktree root.
@@ -211,6 +297,21 @@ impl EffectiveConfig {
             "no worktree root is configured; create ${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml with:\nworktrees:\n  root: ../worktrees",
         )
     }
+
+    /// Returns the configured target branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no target branch is configured.
+    pub fn require_target_branch(&self) -> Result<&str> {
+        self.target_branch.as_deref().context("no target branch is configured; add worktrees.target-branch to .worktrees.yaml or global config")
+    }
+}
+
+fn combine(shared: &HooksConfig, local: &HooksConfig, phase: HookPhase) -> Vec<HookStep> {
+    let mut steps = shared.steps(phase).to_vec();
+    steps.extend_from_slice(local.steps(phase));
+    steps
 }
 
 fn validate_generation(generation: Option<&GenerationConfig>, source_hint: &Path) -> Result<()> {
@@ -255,25 +356,29 @@ fn resolve_generation_value(
         })
 }
 
-fn validate_steps(steps: &[HookStep], source_hint: &Path) -> Result<()> {
-    for (index, step) in steps.iter().enumerate() {
-        if step.command.trim().is_empty() {
-            bail!(
-                "post-create step {} has an empty command while loading configuration near {}",
-                index + 1,
-                source_hint.display()
-            );
-        }
-        if step
-            .name
-            .as_ref()
-            .is_some_and(|name| name.trim().is_empty())
-        {
-            bail!(
-                "post-create step {} has an empty name while loading configuration near {}",
-                index + 1,
-                source_hint.display()
-            );
+fn validate_hooks(hooks: &HooksConfig, source_hint: &Path) -> Result<()> {
+    for phase in HookPhase::all() {
+        for (index, step) in hooks.steps(phase).iter().enumerate() {
+            if step.command.trim().is_empty() {
+                bail!(
+                    "{} step {} has an empty command while loading configuration near {}",
+                    phase.key(),
+                    index + 1,
+                    source_hint.display()
+                );
+            }
+            if step
+                .name
+                .as_ref()
+                .is_some_and(|name| name.trim().is_empty())
+            {
+                bail!(
+                    "{} step {} has an empty name while loading configuration near {}",
+                    phase.key(),
+                    index + 1,
+                    source_hint.display()
+                );
+            }
         }
     }
     Ok(())

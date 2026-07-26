@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    config::{self, EffectiveGeneration, GenerationSource, HookStep},
+    config::{self, EffectiveGeneration, GenerationSource, HookPhase, HookStep},
     git::Repository,
     hash,
 };
@@ -20,14 +20,64 @@ use crate::{
 #[serde(deny_unknown_fields)]
 struct TrustFile {
     #[serde(default)]
-    repositories: BTreeMap<String, String>,
+    repositories: BTreeMap<String, TrustRecord>,
     #[serde(default)]
     commit_generators: BTreeMap<String, String>,
 }
 
-/// Returns the deterministic executable identity of an ordered command list.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+enum TrustRecord {
+    /// Legacy records approved only post-create commands.
+    Legacy(String),
+    Phases(PhaseApprovals),
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PhaseApprovals {
+    #[serde(default, rename = "post-create")]
+    post_create: Option<String>,
+    #[serde(default, rename = "pre-merge")]
+    pre_merge: Option<String>,
+    #[serde(default, rename = "pre-remove")]
+    pre_remove: Option<String>,
+}
+
+impl PhaseApprovals {
+    fn get(&self, phase: HookPhase) -> Option<&String> {
+        match phase {
+            HookPhase::PostCreate => self.post_create.as_ref(),
+            HookPhase::PreMerge => self.pre_merge.as_ref(),
+            HookPhase::PreRemove => self.pre_remove.as_ref(),
+        }
+    }
+
+    fn set(&mut self, phase: HookPhase, hash: String) {
+        match phase {
+            HookPhase::PostCreate => self.post_create = Some(hash),
+            HookPhase::PreMerge => self.pre_merge = Some(hash),
+            HookPhase::PreRemove => self.pre_remove = Some(hash),
+        }
+    }
+}
+
+/// Returns the deterministic executable identity of an ordered command list for one phase.
 #[must_use]
-pub fn command_hash(steps: &[HookStep]) -> String {
+pub fn command_hash(phase: HookPhase, steps: &[HookStep]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"worktrees-hook-phase-v1\0");
+    digest.update(phase.key().as_bytes());
+    digest.update(b"\0");
+    for step in steps {
+        let bytes = step.command.as_bytes();
+        digest.update((bytes.len() as u64).to_be_bytes());
+        digest.update(bytes);
+    }
+    hash::encode_hex(&digest.finalize())
+}
+
+fn legacy_post_create_hash(steps: &[HookStep]) -> String {
     let mut digest = Sha256::new();
     digest.update(b"worktrees-post-create-v1\0");
     for step in steps {
@@ -38,29 +88,50 @@ pub fn command_hash(steps: &[HookStep]) -> String {
     hash::encode_hex(&digest.finalize())
 }
 
-/// Reports whether the current ordered commands are trusted for this clone.
+/// Reports whether the ordered commands are trusted for this clone and phase.
 ///
 /// # Errors
 ///
 /// Returns an error when repository identity or trust storage cannot be resolved.
-pub fn is_trusted(repository: &Repository, steps: &[HookStep]) -> Result<bool> {
+pub fn is_trusted(repository: &Repository, phase: HookPhase, steps: &[HookStep]) -> Result<bool> {
     let identity = repository_key(repository)?;
     let trust = read_trust()?;
     if steps.is_empty() {
         return Ok(true);
     }
-    Ok(trust.repositories.get(&identity) == Some(&command_hash(steps)))
+    let approved = match trust.repositories.get(&identity) {
+        Some(TrustRecord::Legacy(hash)) if phase == HookPhase::PostCreate => {
+            hash == &legacy_post_create_hash(steps)
+        }
+        Some(TrustRecord::Phases(approvals)) => {
+            approvals.get(phase) == Some(&command_hash(phase, steps))
+        }
+        _ => false,
+    };
+    Ok(approved)
 }
 
-/// Atomically saves approval for the current ordered commands.
+/// Atomically saves approval for one ordered phase plan.
 ///
 /// # Errors
 ///
 /// Returns an error when repository identity or trust storage cannot be updated.
-pub fn approve(repository: &Repository, steps: &[HookStep]) -> Result<()> {
+pub fn approve(repository: &Repository, phase: HookPhase, steps: &[HookStep]) -> Result<()> {
     let identity = repository_key(repository)?;
     let mut trust = read_trust()?;
-    trust.repositories.insert(identity, command_hash(steps));
+    let approvals = match trust.repositories.remove(&identity) {
+        Some(TrustRecord::Legacy(post_create)) => PhaseApprovals {
+            post_create: Some(post_create),
+            ..PhaseApprovals::default()
+        },
+        Some(TrustRecord::Phases(approvals)) => approvals,
+        None => PhaseApprovals::default(),
+    };
+    let mut approvals = approvals;
+    approvals.set(phase, command_hash(phase, steps));
+    trust
+        .repositories
+        .insert(identity, TrustRecord::Phases(approvals));
     write_trust(&trust)
 }
 
@@ -136,7 +207,7 @@ pub fn reset_generation(repository: &Repository) -> Result<bool> {
     Ok(removed)
 }
 
-/// Removes post-create approval for this clone and reports whether one existed.
+/// Removes this clone's phase approvals and reports whether any existed.
 ///
 /// # Errors
 ///
@@ -228,4 +299,24 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
         "could not allocate a temporary trust file beside {}",
         path.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TrustRecord, legacy_post_create_hash};
+    use crate::config::{HookPhase, HookStep};
+
+    #[test]
+    fn legacy_records_preserve_post_create_approval() {
+        let steps = vec![HookStep {
+            command: "make".into(),
+            name: None,
+        }];
+        let record = TrustRecord::Legacy(legacy_post_create_hash(&steps));
+        assert!(matches!(record, TrustRecord::Legacy(_)));
+        assert_ne!(
+            legacy_post_create_hash(&steps),
+            super::command_hash(HookPhase::PostCreate, &steps)
+        );
+    }
 }
