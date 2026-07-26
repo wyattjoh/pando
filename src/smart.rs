@@ -401,7 +401,10 @@ pub(crate) fn approve_hooks(
         return Ok(());
     }
     ensure_interactive(&format!("{} require approval", phase.plural_name()))?;
-    ui::info(format!("The repository requests these {}:", phase.plural_name()))?;
+    ui::info(format!(
+        "The repository requests these {}:",
+        phase.plural_name()
+    ))?;
     for (index, step) in steps.iter().enumerate() {
         ui::step(format!("{}: {}", step.label(index), step.command))?;
     }
