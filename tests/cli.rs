@@ -2749,6 +2749,24 @@ fn commit_generates_message_from_global_configuration() {
             "missing semantic heading {heading:?}: {stderr}"
         );
     }
+    let plain_stderr = console::strip_ansi_codes(stderr);
+    assert_eq!(
+        plain_stderr.matches("Generated commit message").count(),
+        1,
+        "generation completion was printed more than once: {stderr}"
+    );
+    assert!(
+        plain_stderr.lines().any(|line| {
+            line.find("Generated commit message:").is_some_and(|start| {
+                line[start + "Generated commit message:".len()..]
+                    .split_whitespace()
+                    .next()
+                    .and_then(|duration| duration.strip_suffix('s'))
+                    .is_some_and(|seconds| seconds.parse::<u64>().is_ok())
+            })
+        }),
+        "generation completion omitted its duration: {stderr}"
+    );
     assert!(
         stderr.contains(&forced_style(
             worktrees::ui::worktree_data_style(),

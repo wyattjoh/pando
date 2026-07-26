@@ -46,7 +46,7 @@ pub fn run(message: Option<String>) -> Result<()> {
     ensure_worktree(&repository)?;
     if let Some(message) = message {
         stage_changes(&repository)?;
-        return commit_with_feedback(&repository, &message, "Created commit", None);
+        return commit_with_feedback(&repository, &message, Some("Created commit"), None);
     }
 
     let config = EffectiveConfig::load(&repository)?;
@@ -75,12 +75,7 @@ pub fn run(message: Option<String>) -> Result<()> {
         ui::info(ui::heading_style().apply_to("Generating commit message..."))?;
     }
     let generated = match run_generator(&repository, &command.value, &prompt) {
-        Ok(generated) => {
-            if let Some(spinner) = &spinner {
-                spinner.stop("Generated commit message");
-            }
-            generated
-        }
+        Ok(generated) => generated,
         Err(error) => {
             if let Some(spinner) = &spinner {
                 spinner.error("Failed to generate commit message");
@@ -88,24 +83,32 @@ pub fn run(message: Option<String>) -> Result<()> {
             return Err(error);
         }
     };
-    commit_with_feedback(
-        &repository,
-        &generated,
-        "Generated commit message:",
-        Some(generation_started.elapsed()),
-    )
+    let generation_elapsed = generation_started.elapsed();
+    if let Some(spinner) = &spinner {
+        spinner.stop(format!(
+            "{} {}",
+            ui::heading_style().apply_to("Generated commit message:"),
+            muted_elapsed(generation_elapsed)
+        ));
+    }
+    let status = spinner.is_none().then_some("Generated commit message:");
+    commit_with_feedback(&repository, &generated, status, Some(generation_elapsed))
 }
 
 fn commit_with_feedback(
     repository: &Repository,
     message: &str,
-    status: &str,
+    status: Option<&str>,
     elapsed: Option<Duration>,
 ) -> Result<()> {
     git::commit(&repository.current().path, message)?;
-    let status = render_commit_status(status, elapsed);
     let message = render_commit_message(message);
-    ui::step(format!("{status}\n{message}"))?;
+    if let Some(status) = status {
+        let status = render_commit_status(status, elapsed);
+        ui::step(format!("{status}\n{message}"))?;
+    } else {
+        ui::step(message)?;
+    }
     let hash = git::head_commit(&repository.current().path)?;
     let hash = hash.get(..7).unwrap_or(&hash);
     ui::finish(format!(
