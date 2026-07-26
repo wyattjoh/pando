@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use anyhow::{Context, Result};
-use cliclack::log;
+use cliclack::{log, outro};
 
 /// Writes an informational message through the terminal UI.
 ///
@@ -46,4 +46,13 @@ pub fn error(message: impl Display) -> Result<()> {
 /// Returns an error when the terminal cannot be written.
 pub fn step(message: impl Display) -> Result<()> {
     log::step(message).context("failed to write terminal message")
+}
+
+/// Writes a terminal UI outro.
+///
+/// # Errors
+///
+/// Returns an error when the terminal cannot be written.
+pub fn finish(message: impl Display) -> Result<()> {
+    outro(message).context("failed to write terminal message")
 }
