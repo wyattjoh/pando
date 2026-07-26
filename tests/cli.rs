@@ -1864,9 +1864,11 @@ fn commit_generator_trust_commands_distinguish_absent_and_user_controlled_settin
         .output()
         .unwrap();
     assert!(absent.status.success());
-    assert_eq!(
-        String::from_utf8(absent.stdout).unwrap(),
-        "No commit generator is configured.\n"
+    assert!(absent.stdout.is_empty());
+    assert!(
+        String::from_utf8(absent.stderr)
+            .unwrap()
+            .contains("No commit generator is configured.")
     );
 
     let xdg = tempfile::tempdir().unwrap();
@@ -1884,9 +1886,11 @@ fn commit_generator_trust_commands_distinguish_absent_and_user_controlled_settin
         .output()
         .unwrap();
     assert!(controlled.status.success());
-    assert_eq!(
-        String::from_utf8(controlled.stdout).unwrap(),
-        "The effective commit generator is user-controlled.\n"
+    assert!(controlled.stdout.is_empty());
+    assert!(
+        String::from_utf8(controlled.stderr)
+            .unwrap()
+            .contains("The effective commit generator is user-controlled.")
     );
 
     let reset = Command::cargo_bin("worktrees")
@@ -1897,9 +1901,11 @@ fn commit_generator_trust_commands_distinguish_absent_and_user_controlled_settin
         .output()
         .unwrap();
     assert!(reset.status.success());
-    assert_eq!(
-        String::from_utf8(reset.stdout).unwrap(),
-        "No saved commit generator trust existed for this repository.\n"
+    assert!(reset.stdout.is_empty());
+    assert!(
+        String::from_utf8(reset.stderr)
+            .unwrap()
+            .contains("No saved commit generator trust existed for this repository.")
     );
 }
 
