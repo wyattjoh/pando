@@ -309,7 +309,7 @@ fn switch_defaults_to_current_worktree_and_keeps_stdout_pure() {
 }
 
 #[test]
-fn switch_autocomplete_filters_choices_and_selects_the_match() {
+fn switch_filter_mode_filters_choices_and_selects_the_match() {
     let repo = Repository::new();
     let filtered = repo.add_worktree("filtered-choice", "needle-filter");
 
@@ -321,6 +321,34 @@ fn switch_autocomplete_filters_choices_and_selects_the_match() {
         format!("{}\n", filtered.canonicalize().unwrap().display())
     );
     assert!(output.stderr.contains("needle-filter"), "{}", output.stderr);
+}
+
+#[test]
+fn switch_picker_keeps_long_worktree_paths_out_of_the_initial_display() {
+    let repo = Repository::new();
+    let long = repo.add_worktree(
+        &format!("worktree-{}", "very-long-path-segment-".repeat(8)),
+        "long-path-choice",
+    );
+
+    let output = run_switch(&repo.main, b"\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", repo.main.canonicalize().unwrap().display())
+    );
+    assert!(output.stderr.contains("main"), "{}", output.stderr);
+    assert!(
+        !output.stderr.contains(repo.main.to_str().unwrap()),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        !output.stderr.contains(long.to_str().unwrap()),
+        "{}",
+        output.stderr
+    );
 }
 
 #[test]
@@ -1273,9 +1301,9 @@ fn picker_branch_action_uses_the_shared_resolver_and_escape_cancels() {
         run_pty_command(command, input)
     };
 
-    let created = run(b"Create\x1b[B\rpicker-existing\r");
+    let created = run(b"Create\rpicker-existing\r");
     assert!(created.status.success(), "{}", created.stderr);
-    assert!(root.join("picker-existing").exists());
+    assert!(root.join("picker-existing").exists(), "{}", created.stderr);
 
     let cancelled = run(b"\x1b");
     assert!(!cancelled.status.success());
