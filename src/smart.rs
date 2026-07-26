@@ -7,8 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use console::{Key, Term};
-use dialoguer::{Confirm, Select, theme::ColorfulTheme};
+use cliclack::{confirm, input, select};
 use siphasher::sip::SipHasher13;
 
 use crate::{
@@ -170,14 +169,17 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
         .iter()
         .position(|worktree| worktree.current)
         .unwrap_or(0);
-    let selection = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Choose a worktree")
-        .items(&labels)
-        .default(default)
-        .max_length(20)
-        .interact_opt()
-        .context("failed to read worktree selection from the terminal")?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Interrupted, "selection cancelled"))?;
+    let mut prompt = select("Choose a worktree")
+        .initial_value(default)
+        .max_rows(20);
+    for (index, label) in labels.iter().enumerate() {
+        prompt = prompt.item(index, label, "");
+    }
+    let selection = prompt_result(
+        prompt.interact(),
+        "selection cancelled",
+        "failed to read worktree selection from the terminal",
+    )?;
     if selection < choices.len() {
         let chosen = choices[selection];
         let branch = match &chosen.kind {
@@ -192,34 +194,20 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
 }
 
 fn read_branch_name() -> Result<String> {
-    let terminal = Term::stderr();
-    let mut value = String::new();
-    terminal.write_str("Branch name: ")?;
-    loop {
-        match terminal.read_key()? {
-            Key::Char(character) => value.push(character),
-            Key::Backspace => {
-                value.pop();
-            }
-            Key::Enter => {
-                terminal.write_line("")?;
-                let value = value.trim().to_owned();
-                if value.is_empty() {
-                    bail!("branch name cannot be empty");
+    let value: String = prompt_result(
+        input("Branch name:")
+            .validate(|value: &String| {
+                if value.trim().is_empty() {
+                    Err("branch name cannot be empty")
+                } else {
+                    Ok(())
                 }
-                return Ok(value);
-            }
-            Key::Escape | Key::CtrlC | Key::UnknownEscSeq(_) => {
-                terminal.write_line("")?;
-                return Err(
-                    io::Error::new(io::ErrorKind::Interrupted, "branch entry cancelled").into(),
-                );
-            }
-            _ => continue,
-        }
-        terminal.clear_line()?;
-        terminal.write_str(&format!("Branch name: {value}"))?;
-    }
+            })
+            .interact(),
+        "branch entry cancelled",
+        "failed to read branch name",
+    )?;
+    Ok(value.trim().to_owned())
 }
 
 fn resolve_and_switch(repository: &Repository, branch: &str) -> Result<()> {
@@ -266,13 +254,15 @@ fn choose_remote(remotes: &[String], branch: &str) -> Result<String> {
             remotes.join(", ")
         );
     }
-    let selection = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("Choose the upstream for {branch}"))
-        .items(remotes)
-        .default(0)
-        .interact_opt()
-        .context("failed to read remote selection")?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Interrupted, "remote selection cancelled"))?;
+    let mut prompt = select(format!("Choose the upstream for {branch}")).initial_value(0);
+    for (index, remote) in remotes.iter().enumerate() {
+        prompt = prompt.item(index, remote, "");
+    }
+    let selection = prompt_result(
+        prompt.interact(),
+        "remote selection cancelled",
+        "failed to read remote selection",
+    )?;
     Ok(remotes[selection].clone())
 }
 
@@ -384,9 +374,8 @@ fn confirm_new_branch(
             "Warning: staged, unstaged, and untracked changes remain in the source worktree."
         );
     }
-    let confirmed = Confirm::new()
-        .with_prompt("Create this branch and worktree?")
-        .default(false)
+    let confirmed = confirm("Create this branch and worktree?")
+        .initial_value(false)
         .interact()
         .context("failed to read new-branch confirmation")?;
     if !confirmed {
@@ -408,9 +397,8 @@ pub(crate) fn approve_hooks(
     for (index, step) in steps.iter().enumerate() {
         eprintln!("  {}: {}", step.label(index), step.command);
     }
-    let confirmed = Confirm::new()
-        .with_prompt("Trust and run these commands for this repository?")
-        .default(false)
+    let confirmed = confirm("Trust and run these commands for this repository?")
+        .initial_value(false)
         .interact()
         .context("failed to read hook approval")?;
     if !confirmed {
@@ -432,13 +420,15 @@ fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&s
     }
     ensure_interactive("incomplete setup requires a recovery choice")?;
     let choices = ["Retry setup", "Enter once", "Mark setup complete and enter"];
-    let choice = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Setup did not complete for this worktree")
-        .items(choices)
-        .default(0)
-        .interact_opt()
-        .context("failed to read setup recovery choice")?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Interrupted, "setup recovery cancelled"))?;
+    let mut prompt = select("Setup did not complete for this worktree").initial_value(0);
+    for (index, choice) in choices.iter().enumerate() {
+        prompt = prompt.item(index, choice, "");
+    }
+    let choice = prompt_result(
+        prompt.interact(),
+        "setup recovery cancelled",
+        "failed to read setup recovery choice",
+    )?;
     match choice {
         0 => {
             approve_hooks(repository, HookPhase::PostCreate, &config.post_create)?;
@@ -482,6 +472,16 @@ fn finish_setup(
         HookOutcome::Interrupted => {
             bail!("post-create setup was interrupted; setup remains incomplete")
         }
+    }
+}
+
+fn prompt_result<T>(result: io::Result<T>, cancelled: &str, failure: &str) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            Err(io::Error::new(io::ErrorKind::Interrupted, cancelled.to_owned()).into())
+        }
+        Err(error) => Err(error).context(failure.to_owned()),
     }
 }
 

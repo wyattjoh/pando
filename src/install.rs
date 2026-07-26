@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use dialoguer::Confirm;
+use cliclack::confirm;
 
 const START_MARKER: &[u8] = b"# >>> worktrees shell integration >>>";
 const END_MARKER: &[u8] = b"# <<< worktrees shell integration <<<";
@@ -63,9 +63,8 @@ pub fn run() -> Result<()> {
         println!("  update {}", zshrc_path.display());
     }
 
-    let confirmed = Confirm::new()
-        .with_prompt("Apply these changes?")
-        .default(false)
+    let confirmed = confirm("Apply these changes?")
+        .initial_value(false)
         .interact()
         .context("failed to read installation confirmation")?;
     if !confirmed {
