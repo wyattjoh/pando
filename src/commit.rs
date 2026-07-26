@@ -91,10 +91,18 @@ pub fn run(message: Option<String>) -> Result<()> {
 fn commit_with_feedback(repository: &Repository, message: &str, status: &str) -> Result<()> {
     let output = trim_git_margin(&git::commit(&repository.current().path, message)?);
     let status = style(status).green().bold();
+    let message = render_commit_message(message);
     if output.is_empty() {
-        ui::step(status)
+        ui::step(format!("{status}\n{message}"))
     } else {
-        ui::step(format!("{status}\n{output}"))
+        ui::step(format!("{status}\n{message}\n{output}"))
+    }
+}
+
+fn render_commit_message(message: &str) -> String {
+    match message.split_once('\n') {
+        Some((subject, body)) => format!("{}\n{body}", style(subject).cyan().bold()),
+        None => style(message).cyan().bold().to_string(),
     }
 }
 
@@ -261,13 +269,23 @@ fn approve_shared_generation(repository: &Repository, config: &EffectiveConfig) 
 
 #[cfg(test)]
 mod tests {
-    use super::trim_git_margin;
+    use console::strip_ansi_codes;
+
+    use super::{render_commit_message, trim_git_margin};
 
     #[test]
     fn trims_the_git_output_margin_from_each_line() {
         assert_eq!(
             trim_git_margin("first\n second\n  third"),
             "first\nsecond\n third"
+        );
+    }
+
+    #[test]
+    fn renders_a_bold_subject_without_styling_the_body() {
+        assert_eq!(
+            strip_ansi_codes(&render_commit_message("feat: subject\n\nbody")),
+            "feat: subject\n\nbody"
         );
     }
 }
