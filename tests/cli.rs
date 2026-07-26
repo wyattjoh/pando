@@ -1800,6 +1800,9 @@ fn commit_generates_message_from_global_configuration() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Staging changes…"), "{stderr}");
+    assert!(stderr.contains("Generating commit message…"), "{stderr}");
     let message = Command::new("git")
         .args(["log", "-1", "--format=%B"])
         .current_dir(&repo.main)
@@ -1814,10 +1817,12 @@ fn commit_generates_message_from_global_configuration() {
 #[test]
 fn commit_generator_trust_commands_distinguish_absent_and_user_controlled_settings() {
     let repo = Repository::new();
+    let absent_xdg = tempfile::tempdir().unwrap();
     let absent = Command::cargo_bin("worktrees")
         .unwrap()
         .args(["trust", "commit-status"])
         .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", absent_xdg.path())
         .output()
         .unwrap();
     assert!(absent.status.success());

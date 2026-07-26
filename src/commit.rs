@@ -43,6 +43,7 @@ pub fn run(message: Option<String>) -> Result<()> {
     let repository = git::repository(&cwd)?;
     ensure_worktree(&repository)?;
     if let Some(message) = message {
+        eprintln!("Staging changes…");
         git::stage_all(&repository.current().path)?;
         ensure_changes(&repository)?;
         return git::commit(&repository.current().path, &message);
@@ -60,9 +61,11 @@ pub fn run(message: Option<String>) -> Result<()> {
     validate_template(template)?;
     approve_shared_generation(&repository, &config)?;
 
+    eprintln!("Staging changes…");
     git::stage_all(&repository.current().path)?;
     ensure_changes(&repository)?;
     let prompt = render_prompt(&repository, template)?;
+    eprintln!("Generating commit message…");
     let generated = run_generator(&repository, &command.value, &prompt)?;
     git::commit(&repository.current().path, &generated)
 }
