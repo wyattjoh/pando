@@ -79,6 +79,7 @@ pub fn remove(branches: &[String], force: bool) -> Result<()> {
 }
 
 /// Integrates the current topic branch into the configured target branch.
+#[allow(clippy::too_many_lines)] // This is the explicit lifecycle state-machine boundary.
 ///
 /// # Errors
 ///
@@ -106,6 +107,9 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
     }
     let config = EffectiveConfig::load(&repository)?;
     if let Some(existing) = &journal {
+        if existing.version != 1 || existing.topic_path != repository.current().path {
+            bail!("lifecycle journal is unsupported or does not match the current topic worktree");
+        }
         if existing.topic_identity != identity {
             bail!(
                 "a different lifecycle operation is recorded for this topic worktree; inspect its journal before retrying"
@@ -170,6 +174,9 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
     )?;
     if git::is_dirty(&repository.current().path)? {
         bail!("pre-merge hooks left the topic worktree dirty; restore cleanliness before retrying");
+    }
+    if git::head_commit(&repository.current().path)? != refreshed {
+        return merge(no_rebase, no_remove);
     }
     if !git::is_ancestor(&repository.current().path, &target, &refreshed)? {
         bail!("the target advanced during validation; rerun merge to revalidate the new candidate");
@@ -237,9 +244,31 @@ fn select_removal_targets(
             bail!("the primary worktree cannot be removed");
         }
         check_removable(target, force)?;
+        reconcile_removal_state(repository, target)?;
         targets.push(target.clone());
     }
     Ok(targets)
+}
+
+fn reconcile_removal_state(repository: &Repository, target: &Worktree) -> Result<()> {
+    let identity = git::worktree_identity(&target.path)?;
+    let Some(state) = read_journal(&repository.common_dir, &identity)? else {
+        return Ok(());
+    };
+    if state.version != 1 || state.topic_identity != identity || state.topic_path != target.path {
+        bail!(
+            "lifecycle journal for {} is malformed or does not match its worktree identity",
+            target.path.display()
+        );
+    }
+    if state.cleanup_pending || git::rebase_in_progress(&target.path)? {
+        bail!(
+            "worktree {} has an active lifecycle operation; rerun worktrees merge to recover it before removal",
+            target.path.display()
+        );
+    }
+    remove_journal(&repository.common_dir, &identity)
+        .context("failed to clear a stale pre-integration lifecycle journal")
 }
 
 fn check_removable(target: &Worktree, force: bool) -> Result<()> {
@@ -256,7 +285,7 @@ fn check_removable(target: &Worktree, force: bool) -> Result<()> {
             target.state_label()
         );
     }
-    if !force && target.condition == Condition::Dirty {
+    if !force && git::is_dirty(&target.path)? {
         bail!(
             "worktree {} has local changes; rerun with --force to discard only worktree contents",
             target.path.display()
