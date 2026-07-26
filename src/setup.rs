@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{config::HookStep, trust};
+use crate::{config::HookStep, hash, trust};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HookOutcome {
@@ -38,7 +38,7 @@ pub fn marker_path(common_dir: &Path, worktree_identity: &Path) -> PathBuf {
     digest.update(worktree_identity.as_os_str().as_encoded_bytes());
     common_dir
         .join("worktrees-state/incomplete")
-        .join(format!("{:x}.json", digest.finalize()))
+        .join(format!("{}.json", hash::encode_hex(&digest.finalize())))
 }
 
 fn pending_path(common_dir: &Path, branch: &str) -> PathBuf {
@@ -46,7 +46,7 @@ fn pending_path(common_dir: &Path, branch: &str) -> PathBuf {
     digest.update(branch.as_bytes());
     common_dir
         .join("worktrees-state/pending")
-        .join(format!("{:x}.json", digest.finalize()))
+        .join(format!("{}.json", hash::encode_hex(&digest.finalize())))
 }
 
 /// Journals setup intent before Git mutation so a later marker-write failure

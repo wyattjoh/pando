@@ -1,5 +1,6 @@
 pub mod config;
 pub mod git;
+mod hash;
 pub mod install;
 pub mod render;
 pub mod setup;
