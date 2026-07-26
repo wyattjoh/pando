@@ -13,6 +13,12 @@ use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
+#[cfg(target_os = "linux")]
+use std::{
+    ffi::OsString,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+};
+
 struct Repository {
     temp: TempDir,
     main: std::path::PathBuf,
@@ -619,6 +625,1025 @@ fn installed_zsh_function_delegates_other_commands_unchanged() {
         String::from_utf8(output.stdout).unwrap(),
         "list\n--future\n"
     );
+}
+
+#[test]
+fn switch_explicitly_enters_an_existing_worktree() {
+    let repo = Repository::new();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["switch", "feature"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", repo.linked.canonicalize().unwrap().display()).as_bytes()
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn get_prints_exact_current_context_values_and_stable_ports() {
+    let repo = Repository::new();
+    let nested = repo.linked.join("nested");
+    fs::create_dir(&nested).unwrap();
+
+    for (property, expected) in [
+        ("branch", "feature".to_owned()),
+        (
+            "worktree-path",
+            repo.linked.canonicalize().unwrap().display().to_string(),
+        ),
+        (
+            "main-worktree-path",
+            repo.main.canonicalize().unwrap().display().to_string(),
+        ),
+        ("port", "13054".to_owned()),
+    ] {
+        let output = Command::cargo_bin("worktrees")
+            .unwrap()
+            .args(["get", property])
+            .current_dir(&nested)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{property}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            format!("{expected}\n").as_bytes(),
+            "{property}"
+        );
+        assert!(output.stderr.is_empty(), "{property}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn path_queries_preserve_non_utf8_unix_path_bytes() {
+    let repo = Repository::new();
+    let non_utf8_parent = repo
+        .temp
+        .path()
+        .join(OsString::from_vec(b"non-utf8-\xff".to_vec()));
+    fs::create_dir(&non_utf8_parent).unwrap();
+    let path = non_utf8_parent.join("linked");
+    let output = Command::new("git")
+        .args(["worktree", "add", "-b", "non-utf8-path"])
+        .arg(&path)
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let queried = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["get", "worktree-path"])
+        .current_dir(&path)
+        .output()
+        .unwrap();
+    let mut expected = path.canonicalize().unwrap().as_os_str().as_bytes().to_vec();
+    expected.push(b'\n');
+
+    assert!(
+        queried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&queried.stderr)
+    );
+    assert_eq!(queried.stdout, expected);
+}
+
+#[test]
+fn switch_creates_an_existing_branch_at_the_configured_root() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "topic/nested"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["switch", "topic/nested"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+    let destination = root.join("topic/nested");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", destination.canonicalize().unwrap().display()).as_bytes()
+    );
+    assert!(destination.join(".git").exists());
+}
+
+#[test]
+fn failed_post_create_hook_preserves_destination_and_nonzero_status() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "hooked"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - name: prepare\n      command: printf hook-output; exit 23\n",
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "hooked"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = run_pty_command(command, b"y\r");
+    let destination = root.join("hooked");
+
+    assert!(!output.status.success());
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", destination.canonicalize().unwrap().display())
+    );
+    assert!(output.stderr.contains("prepare"), "{}", output.stderr);
+    assert!(
+        output.stderr.contains("printf hook-output; exit 23"),
+        "{}",
+        output.stderr
+    );
+    assert!(output.stderr.contains("hook-output"), "{}", output.stderr);
+    assert!(destination.exists());
+}
+
+#[test]
+fn detached_branch_queries_fail_without_stdout() {
+    let repo = Repository::new();
+    git(&repo.linked, ["checkout", "--detach"]);
+
+    for property in ["branch", "port"] {
+        let output = Command::cargo_bin("worktrees")
+            .unwrap()
+            .args(["get", property])
+            .current_dir(&repo.linked)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("detached"));
+    }
+}
+
+#[test]
+fn ignored_local_configuration_overrides_the_global_root() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let global_root = repo.temp.path().join("global");
+    let local_root = repo.temp.path().join("local");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", global_root.display()),
+    )
+    .unwrap();
+    fs::write(repo.main.join(".gitignore"), "/.worktrees.local.yaml\n").unwrap();
+    fs::write(
+        repo.main.join(".worktrees.local.yaml"),
+        format!("worktrees:\n  root: {}\n", local_root.display()),
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["get", "worktree-root"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        format!(
+            "{}\n",
+            repo.temp
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("local")
+                .display()
+        )
+        .as_bytes()
+    );
+}
+
+#[test]
+fn nonignored_local_configuration_is_rejected() {
+    let repo = Repository::new();
+    fs::write(
+        repo.main.join(".worktrees.local.yaml"),
+        "worktrees:\n  root: local\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["get", "worktree-root"])
+        .current_dir(&repo.main)
+        .env("HOME", repo.temp.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("must be Git-ignored"));
+}
+
+#[test]
+fn tracked_local_configuration_is_rejected_even_with_an_ignore_rule() {
+    let repo = Repository::new();
+    fs::write(
+        repo.main.join(".worktrees.local.yaml"),
+        "worktrees:\n  root: local\n",
+    )
+    .unwrap();
+    git(&repo.main, ["add", ".worktrees.local.yaml"]);
+    git(&repo.main, ["commit", "-m", "track unsafe local config"]);
+    fs::write(repo.main.join(".gitignore"), "/.worktrees.local.yaml\n").unwrap();
+
+    Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["get", "worktree-root"])
+        .current_dir(&repo.main)
+        .env("HOME", repo.temp.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must be Git-ignored"));
+}
+
+#[test]
+fn switch_creates_a_tracking_worktree_from_fetched_remote_state() {
+    let repo = Repository::new();
+    let remote = repo.temp.path().join("origin.git");
+    git(
+        repo.temp.path(),
+        ["init", "--bare", remote.to_str().unwrap()],
+    );
+    git(
+        &repo.main,
+        ["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&repo.main, ["branch", "collab"]);
+    git(&repo.main, ["push", "origin", "collab"]);
+    git(&repo.main, ["branch", "-D", "collab"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["switch", "collab"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let destination = root.join("collab");
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", destination.canonicalize().unwrap().display()).as_bytes()
+    );
+    let upstream = Command::new("git")
+        .args([
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ])
+        .current_dir(&destination)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(upstream.stdout).unwrap().trim(),
+        "origin/collab"
+    );
+}
+
+#[test]
+fn ambiguous_remote_branches_fail_noninteractively_before_mutation() {
+    let repo = Repository::new();
+    let origin = repo.temp.path().join("origin.git");
+    let upstream = repo.temp.path().join("upstream.git");
+    git(
+        repo.temp.path(),
+        ["init", "--bare", origin.to_str().unwrap()],
+    );
+    git(
+        repo.temp.path(),
+        ["init", "--bare", upstream.to_str().unwrap()],
+    );
+    git(
+        &repo.main,
+        ["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(
+        &repo.main,
+        ["remote", "add", "upstream", upstream.to_str().unwrap()],
+    );
+    git(&repo.main, ["branch", "ambiguous"]);
+    git(&repo.main, ["push", "origin", "ambiguous"]);
+    git(&repo.main, ["push", "upstream", "ambiguous"]);
+    git(&repo.main, ["branch", "-D", "ambiguous"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["switch", "ambiguous"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("origin/ambiguous"), "{stderr}");
+    assert!(stderr.contains("upstream/ambiguous"), "{stderr}");
+    assert!(!root.join("ambiguous").exists());
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "ambiguous"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let selected = run_pty_command(command, b"\x1b[B\r");
+    assert!(selected.status.success(), "{}", selected.stderr);
+    assert_eq!(
+        git_output(
+            &root.join("ambiguous"),
+            [
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}"
+            ],
+        ),
+        "upstream/ambiguous"
+    );
+}
+
+#[test]
+fn remote_matching_requires_the_complete_branch_name() {
+    let repo = Repository::new();
+    let remote = repo.temp.path().join("origin.git");
+    git(
+        repo.temp.path(),
+        ["init", "--bare", remote.to_str().unwrap()],
+    );
+    git(
+        &repo.main,
+        ["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&repo.main, ["branch", "team/foo"]);
+    git(&repo.main, ["push", "origin", "team/foo"]);
+    git(&repo.main, ["branch", "-D", "team/foo"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["switch", "foo"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!root.join("foo").exists());
+    let local = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/foo"])
+        .current_dir(&repo.main)
+        .status()
+        .unwrap();
+    assert!(!local.success());
+}
+
+#[test]
+fn new_branch_is_confirmed_and_created_from_invoking_head() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("feature.txt"), "feature\n").unwrap();
+    git(&repo.linked, ["add", "feature.txt"]);
+    git(&repo.linked, ["commit", "-m", "feature head"]);
+    fs::write(repo.linked.join("dirty.txt"), "left behind\n").unwrap();
+    let source_head = git_output(&repo.linked, ["rev-parse", "HEAD"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "stacked/new"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+
+    let output = run_pty_command(command, b"y\r");
+    let destination = root.join("stacked/new");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(
+        output.stderr.contains("remain in the source worktree"),
+        "{}",
+        output.stderr
+    );
+    assert_eq!(git_output(&destination, ["rev-parse", "HEAD"]), source_head);
+    assert!(!destination.join("dirty.txt").exists());
+}
+
+#[test]
+fn shared_and_local_hooks_run_in_order_and_unchanged_commands_reuse_trust() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "hook-one"]);
+    git(&repo.main, ["branch", "hook-two"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - name: shared\n      command: printf shared >> setup-order\n",
+    )
+    .unwrap();
+    fs::write(repo.main.join(".gitignore"), "/.worktrees.local.yaml\n").unwrap();
+    fs::write(
+        repo.main.join(".worktrees.local.yaml"),
+        "hooks:\n  post-create:\n    - name: local\n      command: printf local >> setup-order\n",
+    )
+    .unwrap();
+
+    let mut first = Command::cargo_bin("worktrees").unwrap();
+    first
+        .args(["switch", "hook-one"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let approved = run_pty_command(first, b"y\r");
+    assert!(approved.status.success(), "{}", approved.stderr);
+    assert_eq!(
+        fs::read_to_string(root.join("hook-one/setup-order")).unwrap(),
+        "sharedlocal"
+    );
+
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - name: renamed only\n      command: printf shared >> setup-order\n",
+    )
+    .unwrap();
+    let reused = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["switch", "hook-two"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+    assert!(
+        reused.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reused.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("hook-two/setup-order")).unwrap(),
+        "sharedlocal"
+    );
+}
+
+#[test]
+fn incomplete_setup_supports_enter_once_then_mark_complete() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "recover"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - command: exit 9\n",
+    )
+    .unwrap();
+
+    let run = |input: &[u8]| {
+        let mut command = Command::cargo_bin("worktrees").unwrap();
+        command
+            .args(["switch", "recover"])
+            .current_dir(&repo.main)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", repo.temp.path());
+        run_pty_command(command, input)
+    };
+    let failed = run(b"y\r");
+    assert!(!failed.status.success());
+    let moved = repo.temp.path().join("moved-recover");
+    git(
+        &repo.main,
+        [
+            "worktree",
+            "move",
+            root.join("recover").to_str().unwrap(),
+            moved.to_str().unwrap(),
+        ],
+    );
+    let once = run(b"\x1b[B\r");
+    assert!(!once.status.success());
+    assert_eq!(
+        once.stdout,
+        format!("{}\n", moved.canonicalize().unwrap().display())
+    );
+    assert!(
+        once.stderr.contains("remains incomplete"),
+        "{}",
+        once.stderr
+    );
+    let accepted = run(b"\x1b[B\x1b[B\r");
+    assert!(accepted.status.success(), "{}", accepted.stderr);
+    let final_switch = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["switch", "recover"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+    assert!(final_switch.status.success());
+}
+
+#[test]
+fn picker_branch_action_uses_the_shared_resolver_and_escape_cancels() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "picker-existing"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    let run = |input: &[u8]| {
+        let mut command = Command::cargo_bin("worktrees").unwrap();
+        command
+            .arg("switch")
+            .current_dir(&repo.main)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", repo.temp.path());
+        run_pty_command(command, input)
+    };
+
+    let created = run(b"\x1b[B\x1b[B\rpicker-existing\r");
+    assert!(created.status.success(), "{}", created.stderr);
+    assert!(root.join("picker-existing").exists());
+
+    let cancelled = run(b"\x1b[B\x1b[B\x1b[B\r\x1b");
+    assert!(!cancelled.status.success());
+    assert!(cancelled.stdout.is_empty());
+}
+
+#[test]
+fn malformed_incomplete_state_is_a_contextual_error() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "malformed-state"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - command: exit 7\n",
+    )
+    .unwrap();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "malformed-state"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    assert!(!run_pty_command(command, b"y\r").status.success());
+    let common = PathBuf::from(git_output(
+        &repo.main,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ));
+    let marker_dir = common.join("worktrees-state/incomplete");
+    let marker = fs::read_dir(marker_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(marker, "truncated").unwrap();
+
+    let retried = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["switch", "malformed-state"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+
+    assert!(!retried.status.success());
+    assert!(retried.stdout.is_empty());
+    assert!(
+        String::from_utf8(retried.stderr)
+            .unwrap()
+            .contains("failed to parse incomplete setup record")
+    );
+}
+
+#[test]
+fn detached_incomplete_worktree_can_retry_setup_from_the_picker() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "detached-retry"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - command: exit 8\n",
+    )
+    .unwrap();
+    let mut create = Command::cargo_bin("worktrees").unwrap();
+    create
+        .args(["switch", "detached-retry"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    assert!(!run_pty_command(create, b"y\r").status.success());
+    let destination = root.join("detached-retry");
+    git(&destination, ["checkout", "--detach"]);
+    let mut retry = Command::cargo_bin("worktrees").unwrap();
+    retry
+        .arg("switch")
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+
+    let retried = run_pty_command(retry, b"\x1b[B\r\r");
+
+    assert!(
+        !retried.status.success(),
+        "stdout={} stderr={}",
+        retried.stdout,
+        retried.stderr
+    );
+    assert_eq!(
+        retried.stdout,
+        format!("{}\n", destination.canonicalize().unwrap().display())
+    );
+    assert!(
+        retried.stderr.contains("post-create setup failed"),
+        "{}",
+        retried.stderr
+    );
+}
+
+#[test]
+fn recovery_retry_uses_current_commands_and_rechecks_trust() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "retry"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - command: exit 9\n",
+    )
+    .unwrap();
+    let run = |input: &[u8]| {
+        let mut command = Command::cargo_bin("worktrees").unwrap();
+        command
+            .args(["switch", "retry"])
+            .current_dir(&repo.main)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", repo.temp.path());
+        run_pty_command(command, input)
+    };
+    assert!(!run(b"y\r").status.success());
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - command: printf repaired > repaired.txt\n",
+    )
+    .unwrap();
+
+    let retried = run(b"\ry\r");
+
+    assert!(retried.status.success(), "{}", retried.stderr);
+    assert!(
+        retried.stderr.contains("repaired.txt"),
+        "{}",
+        retried.stderr
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("retry/repaired.txt")).unwrap(),
+        "repaired"
+    );
+}
+
+#[test]
+fn interrupted_setup_emits_no_destination_and_empty_hooks_clear_its_record() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "interrupted"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - command: kill -INT $$\n",
+    )
+    .unwrap();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "interrupted"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+
+    let interrupted = run_pty_command(command, b"y\r");
+
+    assert!(!interrupted.status.success());
+    assert!(interrupted.stdout.is_empty());
+    assert!(root.join("interrupted").exists());
+    fs::remove_file(repo.main.join(".worktrees.yaml")).unwrap();
+    let cleared = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["switch", "interrupted"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+    assert!(
+        cleared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cleared.stderr)
+    );
+    assert!(!cleared.stdout.is_empty());
+}
+
+#[test]
+fn installed_zsh_enters_destination_but_preserves_hook_failure_status() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        eprintln!("skipping: zsh is not installed");
+        return;
+    }
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "zsh-hook"]);
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let installed = run_install(home.path(), xdg.path(), None, b"y\r");
+    assert!(installed.status.success(), "{}", installed.stderr);
+    let root = repo.temp.path().join("created");
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - command: exit 17\n",
+    )
+    .unwrap();
+    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let binary = PathBuf::from(
+        Command::cargo_bin("worktrees")
+            .unwrap()
+            .get_program()
+            .to_owned(),
+    );
+    let script = format!(
+        "source {}; worktrees switch zsh-hook; rc=$?; builtin pwd -P; exit $rc",
+        shell_quote(&integration)
+    );
+    let path = format!(
+        "{}:{}",
+        binary.parent().unwrap().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let output = run_pty_command(
+        {
+            let mut command = Command::new("zsh");
+            command
+                .args(["-f", "-c", &script])
+                .current_dir(&repo.main)
+                .env("PATH", path)
+                .env("HOME", home.path())
+                .env("XDG_CONFIG_HOME", xdg.path());
+            command
+        },
+        b"y\r",
+    );
+
+    assert!(!output.status.success());
+    assert_eq!(
+        output.stdout,
+        format!(
+            "{}\n",
+            root.join("zsh-hook").canonicalize().unwrap().display()
+        )
+    );
+}
+
+#[test]
+fn trust_status_reset_and_reapproval_follow_the_current_command_hash() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "trusted-one"]);
+    git(&repo.main, ["branch", "trusted-two"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - command: 'true'\n",
+    )
+    .unwrap();
+    let command = |args: &[&str]| {
+        Command::cargo_bin("worktrees")
+            .unwrap()
+            .args(args)
+            .current_dir(&repo.main)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", repo.temp.path())
+            .output()
+            .unwrap()
+    };
+    let untrusted = command(&["trust", "status"]);
+    assert!(
+        String::from_utf8(untrusted.stdout)
+            .unwrap()
+            .contains("not trusted")
+    );
+
+    let mut approve = Command::cargo_bin("worktrees").unwrap();
+    approve
+        .args(["switch", "trusted-one"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    assert!(run_pty_command(approve, b"y\r").status.success());
+    let trusted = command(&["trust", "status"]);
+    assert!(
+        String::from_utf8(trusted.stdout)
+            .unwrap()
+            .contains("are trusted")
+    );
+
+    let reset = command(&["trust", "reset"]);
+    assert!(String::from_utf8(reset.stdout).unwrap().contains("Reset"));
+    let reset_again = command(&["trust", "reset"]);
+    assert!(
+        String::from_utf8(reset_again.stdout)
+            .unwrap()
+            .contains("No saved")
+    );
+    let trust_json = fs::read(xdg.path().join("worktrees/trust.json")).unwrap();
+    serde_json::from_slice::<serde_json::Value>(&trust_json).unwrap();
+
+    let refused = command(&["switch", "trusted-two"]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8(refused.stderr)
+            .unwrap()
+            .contains("no interactive terminal")
+    );
+    assert!(!root.join("trusted-two").exists());
+}
+
+#[test]
+fn trust_status_rejects_malformed_storage_even_without_commands() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(xdg.path().join("worktrees/trust.json"), "not-json").unwrap();
+
+    Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["trust", "status"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("failed to parse trust storage"));
+}
+
+fn git_output<const N: usize>(dir: &Path, args: [&str; N]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn run_install(home: &Path, xdg: &Path, zdotdir: Option<&Path>, input: &[u8]) -> PtyOutput {

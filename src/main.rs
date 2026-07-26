@@ -1,13 +1,11 @@
-use std::{
-    env,
-    io::{self, Write},
-    os::unix::ffi::OsStrExt,
-};
+use std::env;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use dialoguer::{Select, theme::ColorfulTheme};
-use worktrees::{git, install, render};
+use worktrees::{
+    git, install, render,
+    smart::{self, GetProperty, TrustCommand},
+};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -20,8 +18,21 @@ struct Cli {
 enum Commands {
     /// List worktrees belonging to the current repository.
     List,
-    /// Interactively choose a worktree and print its path.
-    Switch,
+    /// Choose, create, or switch to a worktree and print its path.
+    Switch {
+        /// Branch to switch to; omit it to use the interactive picker.
+        branch: Option<String>,
+    },
+    /// Print one current-worktree property.
+    Get {
+        #[arg(value_enum)]
+        property: GetProperty,
+    },
+    /// Inspect or revoke post-create hook approval.
+    Trust {
+        #[command(subcommand)]
+        command: TrustCommand,
+    },
     /// Install the managed zsh integration.
     Install,
 }
@@ -36,7 +47,9 @@ fn main() {
 fn run() -> Result<()> {
     match Cli::parse().command {
         Commands::List => list(),
-        Commands::Switch => switch(),
+        Commands::Switch { branch } => smart::switch(branch),
+        Commands::Get { property } => smart::get(property),
+        Commands::Trust { command } => smart::trust_command(command),
         Commands::Install => install::run(),
     }
 }
@@ -45,41 +58,5 @@ fn list() -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let worktrees = git::discover(&cwd)?;
     print!("{}", render::table(&worktrees));
-    Ok(())
-}
-
-fn switch() -> Result<()> {
-    let cwd = env::current_dir().context("failed to read the current directory")?;
-    let worktrees = git::discover(&cwd)?;
-    let choices: Vec<_> = worktrees
-        .iter()
-        .filter(|worktree| worktree.navigable())
-        .collect();
-    if choices.is_empty() {
-        bail!("the current repository has no navigable worktrees");
-    }
-    let labels = render::menu_labels(&choices);
-    let default = choices
-        .iter()
-        .position(|worktree| worktree.current)
-        .unwrap_or(0);
-    let selection = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Choose a worktree")
-        .items(&labels)
-        .default(default)
-        .max_length(20)
-        .interact_opt()
-        .context("failed to read worktree selection from the terminal")?;
-    if let Some(index) = selection {
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(choices[index].path.as_os_str().as_bytes())
-            .context("failed to write the selected worktree path")?;
-        stdout
-            .write_all(b"\n")
-            .context("failed to terminate the selected worktree path")?;
-    } else {
-        return Err(io::Error::new(io::ErrorKind::Interrupted, "selection cancelled").into());
-    }
     Ok(())
 }

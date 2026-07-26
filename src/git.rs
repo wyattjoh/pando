@@ -1,5 +1,5 @@
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
@@ -10,14 +10,42 @@ use anyhow::{Context, Result, bail};
 
 use crate::{Condition, Worktree, WorktreeKind};
 
+#[derive(Debug)]
+pub struct Repository {
+    pub worktrees: Vec<Worktree>,
+    pub current_index: usize,
+    pub primary: Option<PathBuf>,
+    pub common_dir: PathBuf,
+}
+
+impl Repository {
+    #[must_use]
+    pub fn current(&self) -> &Worktree {
+        &self.worktrees[self.current_index]
+    }
+
+    /// Returns the canonical primary-worktree path used as repository identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when there is no primary worktree or its path cannot be resolved.
+    pub fn identity(&self) -> Result<PathBuf> {
+        let primary = self
+            .primary
+            .as_ref()
+            .context("the current repository has no primary worktree")?;
+        canonical_or_normalized(primary)
+            .with_context(|| format!("failed to resolve repository path {}", primary.display()))
+    }
+}
+
 /// Discovers and enriches the worktrees for the repository containing `cwd`.
 ///
 /// # Errors
 ///
-/// Returns an error when Git cannot be started, Git rejects the repository
-/// context, or its stable porcelain output cannot be parsed.
+/// Returns an error when Git cannot run or its worktree output is invalid.
 pub fn discover(cwd: &Path) -> Result<Vec<Worktree>> {
-    let output = run_git(cwd, &["worktree", "list", "--porcelain", "-z"])
+    let output = run_git(cwd, ["worktree", "list", "--porcelain", "-z"])
         .context("failed to list Git worktrees for the current repository")?;
     ensure_success(&output, "git worktree list")?;
 
@@ -28,6 +56,298 @@ pub fn discover(cwd: &Path) -> Result<Vec<Worktree>> {
         worktree.condition = inspect_condition(worktree);
     }
     Ok(worktrees)
+}
+
+/// Resolves repository-level worktree and common-directory context.
+///
+/// # Errors
+///
+/// Returns an error when Git context or a required path cannot be resolved.
+pub fn repository(cwd: &Path) -> Result<Repository> {
+    let worktrees = discover(cwd)?;
+    let current_index = worktrees
+        .iter()
+        .position(|worktree| worktree.current)
+        .context("the current directory is not inside a registered Git worktree")?;
+    let primary = worktrees
+        .first()
+        .filter(|worktree| !worktree.is_bare())
+        .map(|worktree| canonical_or_normalized(&worktree.path))
+        .transpose()?;
+    let common = git_stdout(
+        cwd,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .context("failed to resolve Git's common directory")?;
+    let common_dir = canonical_or_normalized(Path::new(&common))?;
+    Ok(Repository {
+        worktrees,
+        current_index,
+        primary,
+        common_dir,
+    })
+}
+
+/// Returns the current named branch.
+///
+/// # Errors
+///
+/// Returns an error for detached, bare, or unknown current worktree states.
+pub fn current_branch(repository: &Repository) -> Result<&str> {
+    match &repository.current().kind {
+        WorktreeKind::Branch(branch) => Ok(branch),
+        WorktreeKind::Detached => bail!(
+            "the current worktree at {} is detached; this query requires a named branch",
+            repository.current().path.display()
+        ),
+        WorktreeKind::Bare => {
+            bail!("the current repository is bare; this query requires a worktree")
+        }
+        WorktreeKind::Unknown => {
+            bail!("Git did not report a named branch for the current worktree")
+        }
+    }
+}
+
+/// Asks Git to validate a proposed branch name.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot run or rejects the name.
+pub fn validate_branch(cwd: &Path, branch: &str) -> Result<()> {
+    if branch.is_empty() {
+        bail!("branch name cannot be empty");
+    }
+    let output = run_git(cwd, ["check-ref-format", "--branch", branch])
+        .context("failed to ask Git to validate the branch name")?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "Git rejected branch name {branch:?}: {}",
+            stderr_detail(&output)
+        )
+    }
+}
+
+/// Reports whether an exact local branch exists.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot inspect local refs.
+pub fn local_branch_exists(cwd: &Path, branch: &str) -> Result<bool> {
+    let reference = format!("refs/heads/{branch}");
+    let output = run_git(cwd, ["show-ref", "--verify", "--quiet", &reference])
+        .context("failed to inspect local branches")?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!(
+            "failed to inspect local branch {branch:?}: {}",
+            stderr_detail(&output)
+        ),
+    }
+}
+
+/// Returns already-fetched remote-tracking refs matching a branch name.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot inspect remote refs.
+pub fn remote_matches(cwd: &Path, branch: &str) -> Result<Vec<String>> {
+    let output = run_git(cwd, ["remote"]).context("failed to inspect configured remotes")?;
+    ensure_success(&output, "git remote")?;
+    let mut matches = Vec::new();
+    for remote in String::from_utf8_lossy(&output.stdout).lines() {
+        let short_name = format!("{remote}/{branch}");
+        let reference = format!("refs/remotes/{short_name}");
+        let output = run_git(cwd, ["show-ref", "--verify", "--quiet", &reference])
+            .context("failed to inspect remote-tracking branches")?;
+        match output.status.code() {
+            Some(0) => matches.push(short_name),
+            Some(1) => {}
+            _ => bail!(
+                "failed to inspect remote-tracking branch {reference:?}: {}",
+                stderr_detail(&output)
+            ),
+        }
+    }
+    matches.sort();
+    Ok(matches)
+}
+
+/// Resolves the stable Git administrative directory for one worktree.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot resolve the worktree's administrative directory.
+pub fn worktree_identity(cwd: &Path) -> Result<PathBuf> {
+    let git_dir = git_stdout(cwd, ["rev-parse", "--path-format=absolute", "--git-dir"])
+        .context("failed to resolve the worktree's Git administrative directory")?;
+    canonical_or_normalized(Path::new(&git_dir))
+}
+
+/// Resolves the invoking worktree's committed `HEAD`.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot resolve `HEAD`.
+pub fn head_commit(cwd: &Path) -> Result<String> {
+    git_stdout(cwd, ["rev-parse", "--verify", "HEAD"])
+        .context("failed to resolve the invoking worktree's HEAD")
+}
+
+/// Reports whether the invoking worktree has staged, unstaged, or untracked changes.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot inspect status.
+pub fn is_dirty(cwd: &Path) -> Result<bool> {
+    let output = run_git(cwd, ["status", "--porcelain", "--untracked-files=normal"])
+        .context("failed to inspect invoking worktree changes")?;
+    ensure_success(&output, "git status")?;
+    Ok(!output.stdout.is_empty())
+}
+
+/// Reports whether Git ignores an existing, untracked path.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot inspect ignore rules.
+pub fn is_ignored(cwd: &Path, path: &Path) -> Result<bool> {
+    check_ignored(cwd, path, false)
+}
+
+/// Reports whether Git would ignore a path that may not exist yet.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot inspect ignore rules.
+pub fn would_be_ignored(cwd: &Path, path: &Path) -> Result<bool> {
+    check_ignored(cwd, path, true)
+}
+
+fn check_ignored(cwd: &Path, path: &Path, no_index: bool) -> Result<bool> {
+    let mut command = Command::new("git");
+    command.args([OsStr::new("check-ignore"), OsStr::new("--quiet")]);
+    if no_index {
+        command.arg("--no-index");
+    }
+    let output = command
+        .arg(path)
+        .current_dir(cwd)
+        .output()
+        .context("failed to ask Git whether the path is ignored")?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!(
+            "git check-ignore failed for {}: {}",
+            path.display(),
+            stderr_detail(&output)
+        ),
+    }
+}
+
+/// Adds a worktree for an existing local branch.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot create the worktree.
+pub fn add_existing_worktree(cwd: &Path, destination: &Path, branch: &str) -> Result<()> {
+    run_worktree_add(
+        cwd,
+        [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            destination.as_os_str(),
+            OsStr::new(branch),
+        ],
+        branch,
+        destination,
+    )
+}
+
+/// Adds a local tracking branch and its worktree.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot create the branch or worktree.
+pub fn add_tracking_worktree(
+    cwd: &Path,
+    destination: &Path,
+    branch: &str,
+    remote: &str,
+) -> Result<()> {
+    run_worktree_add(
+        cwd,
+        [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("--track"),
+            OsStr::new("-b"),
+            OsStr::new(branch),
+            destination.as_os_str(),
+            OsStr::new(remote),
+        ],
+        branch,
+        destination,
+    )
+}
+
+/// Adds a new branch at `head` and its worktree.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot create the branch or worktree.
+pub fn add_new_worktree(cwd: &Path, destination: &Path, branch: &str, head: &str) -> Result<()> {
+    run_worktree_add(
+        cwd,
+        [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("-b"),
+            OsStr::new(branch),
+            destination.as_os_str(),
+            OsStr::new(head),
+        ],
+        branch,
+        destination,
+    )
+}
+
+fn run_worktree_add<const N: usize>(
+    cwd: &Path,
+    args: [&OsStr; N],
+    branch: &str,
+    destination: &Path,
+) -> Result<()> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to start Git while creating worktree for {branch:?} at {}",
+                destination.display()
+            )
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "Git failed to create worktree for {branch:?} at {}: {}",
+            destination.display(),
+            stderr_detail(&output)
+        )
+    }
+}
+
+fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String> {
+    let operation = format!("git {}", args.join(" "));
+    let output = run_git(cwd, args).with_context(|| format!("failed to start {operation}"))?;
+    ensure_success(&output, &operation)?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 fn current_record(worktrees: &[Worktree], cwd: &Path) -> Option<usize> {
@@ -53,15 +373,13 @@ fn inspect_condition(worktree: &Worktree) -> Condition {
     }
     match fs::metadata(&worktree.path) {
         Ok(metadata) if metadata.is_dir() => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Condition::Missing;
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Condition::Missing,
         Ok(_) | Err(_) => return Condition::Inaccessible,
     }
 
     match run_git(
         &worktree.path,
-        &["status", "--porcelain", "--untracked-files=normal"],
+        ["status", "--porcelain", "--untracked-files=normal"],
     ) {
         Ok(output) if output.status.success() && output.stdout.is_empty() => Condition::Clean,
         Ok(output) if output.status.success() => Condition::Dirty,
@@ -73,28 +391,58 @@ fn inspect_condition(worktree: &Worktree) -> Condition {
     }
 }
 
-fn run_git(cwd: &Path, args: &[&str]) -> std::io::Result<Output> {
+fn run_git<const N: usize>(cwd: &Path, args: [&str; N]) -> std::io::Result<Output> {
     Command::new("git").args(args).current_dir(cwd).output()
+}
+
+fn stderr_detail(output: &Output) -> String {
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if detail.is_empty() {
+        output.status.to_string()
+    } else {
+        detail
+    }
 }
 
 fn ensure_success(output: &Output, operation: &str) -> Result<()> {
     if output.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let detail = stderr.trim();
-    if detail.is_empty() {
-        bail!("{operation} failed with {}", output.status);
+    bail!("{operation} failed: {}", stderr_detail(output));
+}
+
+/// Canonicalizes the longest existing path prefix while preserving missing suffixes.
+///
+/// # Errors
+///
+/// Returns an error when no existing ancestor or canonical path can be resolved.
+pub fn canonical_or_normalized(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return path.canonicalize().map_err(Into::into);
     }
-    bail!("{operation} failed: {detail}");
+    let mut missing = Vec::<OsString>::new();
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        let name = ancestor
+            .file_name()
+            .context("configured path has no existing ancestor")?;
+        missing.push(name.to_os_string());
+        ancestor = ancestor
+            .parent()
+            .context("configured path has no existing ancestor")?;
+    }
+    let mut normalized = ancestor.canonicalize()?;
+    for component in missing.iter().rev() {
+        normalized.push(component);
+    }
+    Ok(normalized)
 }
 
 /// Parses NUL-delimited `git worktree list --porcelain -z` output.
 ///
 /// # Errors
 ///
-/// Returns an error when attributes appear outside a worktree record or no
-/// worktree records are present.
+/// Returns an error for malformed or empty Git output.
 pub fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>> {
     let mut records = Vec::new();
     let mut current: Option<Worktree> = None;
@@ -106,7 +454,6 @@ pub fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>> {
             }
             continue;
         }
-
         if let Some(path) = field.strip_prefix(b"worktree ") {
             if let Some(record) = current.take() {
                 records.push(record);
@@ -122,7 +469,6 @@ pub fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>> {
             });
             continue;
         }
-
         let Some(record) = current.as_mut() else {
             bail!("invalid Git worktree output: attribute before worktree record");
         };
@@ -150,7 +496,6 @@ pub fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>> {
             record.prunable = Some(String::from_utf8_lossy(value).into_owned());
         }
     }
-
     if let Some(record) = current {
         records.push(record);
     }
@@ -162,9 +507,8 @@ pub fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::WorktreeKind;
-
     use super::parse_porcelain;
+    use crate::WorktreeKind;
 
     #[test]
     fn parses_optional_porcelain_attributes() {
