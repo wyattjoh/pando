@@ -81,7 +81,7 @@ fn list_shows_current_repository_worktrees_from_nested_directory() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("BRANCH"));
-    assert!(stderr.contains("STATE"));
+    assert!(!stderr.contains("STATE"));
     assert!(stderr.contains("PATH"));
     assert!(stderr.contains("* main"));
     assert!(stderr.contains(repo.main.to_str().unwrap()));
@@ -93,6 +93,7 @@ fn list_shows_current_repository_worktrees_from_nested_directory() {
         "{stderr}"
     );
     assert!(!stderr.contains("clean"));
+    assert!(stderr.contains("2 worktrees"), "{stderr}");
 }
 
 #[test]
@@ -138,7 +139,11 @@ fn list_labels_staged_unstaged_and_untracked_changes_dirty() {
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(stderr.matches("dirty").count(), 3, "{stderr}");
+    assert!(stderr.contains("* main *"), "{stderr}");
+    assert!(stderr.contains("feature *"), "{stderr}");
+    assert!(stderr.contains("untracked-branch *"), "{stderr}");
+    assert_eq!(stderr.matches("dirty").count(), 1, "{stderr}");
+    assert!(stderr.contains("3 worktrees, 3 dirty"), "{stderr}");
 }
 
 #[test]
@@ -183,9 +188,9 @@ fn list_preserves_detached_locked_prunable_and_bare_records() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("(detached)"), "{stderr}");
-    assert!(stderr.contains("locked: maintenance"), "{stderr}");
-    assert!(stderr.contains("missing"), "{stderr}");
-    assert!(stderr.contains("prunable"), "{stderr}");
+    assert!(stderr.contains("feature"), "{stderr}");
+    assert!(stderr.contains("missing-branch"), "{stderr}");
+    assert!(stderr.contains("1 locked, 1 prunable"), "{stderr}");
 
     let bare_output = Command::cargo_bin("worktrees")
         .unwrap()
@@ -258,7 +263,8 @@ fn list_reports_unknown_when_git_status_fails() {
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(stderr.matches("unknown").count(), 2, "{stderr}");
+    assert_eq!(stderr.matches("unknown").count(), 1, "{stderr}");
+    assert!(stderr.contains("2 worktrees, 2 unknown"), "{stderr}");
 }
 
 #[test]
@@ -311,6 +317,20 @@ fn switch_defaults_to_current_worktree_and_keeps_stdout_pure() {
 }
 
 #[test]
+fn switch_ctrl_a_number_selects_the_numbered_worktree() {
+    let repo = Repository::new();
+    let second = repo.add_worktree("second-shortcut", "second-shortcut");
+
+    let output = run_switch(&repo.main, b"\x012\x1b");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", second.canonicalize().unwrap().display())
+    );
+}
+
+#[test]
 fn switch_filter_mode_filters_choices_and_selects_the_match() {
     let repo = Repository::new();
     let filtered = repo.add_worktree("filtered-choice", "needle-filter");
@@ -326,12 +346,13 @@ fn switch_filter_mode_filters_choices_and_selects_the_match() {
 }
 
 #[test]
-fn switch_picker_keeps_long_worktree_paths_out_of_the_initial_display() {
+fn switch_picker_marks_dirty_branches_and_shows_paths() {
     let repo = Repository::new();
     let long = repo.add_worktree(
         &format!("worktree-{}", "very-long-path-segment-".repeat(8)),
         "long-path-choice",
     );
+    fs::write(long.join("dirty.txt"), "dirty\n").unwrap();
 
     let output = run_switch(&repo.main, b"\r");
 
@@ -340,17 +361,30 @@ fn switch_picker_keeps_long_worktree_paths_out_of_the_initial_display() {
         output.stdout,
         format!("{}\n", repo.main.canonicalize().unwrap().display())
     );
+    let picker = console::strip_ansi_codes(&output.stderr);
     assert!(output.stderr.contains("main"), "{}", output.stderr);
     assert!(
-        !output.stderr.contains(repo.main.to_str().unwrap()),
+        output.stderr.contains(repo.main.to_str().unwrap()),
         "{}",
         output.stderr
     );
     assert!(
-        !output.stderr.contains(long.to_str().unwrap()),
+        output.stderr.contains(long.to_str().unwrap()),
         "{}",
         output.stderr
     );
+    assert!(picker.contains("* main"), "{}", output.stderr);
+    assert!(
+        output.stderr.contains("long-path-choice *"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        !output.stderr.contains("current, clean"),
+        "{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("dirty"), "{}", output.stderr);
 }
 
 #[test]
@@ -681,7 +715,11 @@ fn switch_explicitly_enters_an_existing_worktree() {
         output.stdout,
         format!("{}\n", repo.linked.canonicalize().unwrap().display()).as_bytes()
     );
-    assert!(output.stderr.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("Worktree destination printed.")
+    );
 }
 
 #[test]
@@ -718,7 +756,8 @@ fn get_prints_exact_current_context_values_and_stable_ports() {
             format!("{expected}\n").as_bytes(),
             "{property}"
         );
-        assert!(output.stderr.is_empty(), "{property}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("printed."), "{property}: {stderr}");
     }
 }
 
@@ -1308,6 +1347,17 @@ fn picker_branch_action_uses_the_shared_resolver_and_escape_cancels() {
 
     let created = run(b"Create\rpicker-existing\r");
     assert!(created.status.success(), "{}", created.stderr);
+    assert!(
+        created.stderr.contains(
+            &console::style("Branch name:")
+                .green()
+                .bold()
+                .force_styling(true)
+                .to_string()
+        ),
+        "{}",
+        created.stderr
+    );
     assert!(root.join("picker-existing").exists(), "{}", created.stderr);
 
     let cancelled = run(b"\x1b");

@@ -54,7 +54,7 @@ pub fn run() -> Result<()> {
 
     if !integration_changed && !zshrc_changed {
         ui::info("The worktrees zsh integration is already current; no changes are required.")?;
-        return Ok(());
+        return ui::finish("Zsh integration is already current.");
     }
 
     ui::info("Planned zsh integration changes:")?;
@@ -71,7 +71,7 @@ pub fn run() -> Result<()> {
         .context("failed to read installation confirmation")?;
     if !confirmed {
         ui::warning("Installation cancelled; no files were changed.")?;
-        return Ok(());
+        return ui::finish("Zsh integration installation cancelled.");
     }
 
     if integration_changed {
@@ -88,7 +88,7 @@ pub fn run() -> Result<()> {
         "Restart zsh or run: source {}",
         zshrc_path.display()
     ))?;
-    Ok(())
+    ui::finish("Zsh integration installed.")
 }
 
 fn config_home() -> Result<PathBuf> {

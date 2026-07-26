@@ -2,6 +2,7 @@ use std::env;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use console::style;
 use worktrees::{
     commit, git, install, render,
     smart::{self, GetProperty, TrustCommand},
@@ -68,17 +69,33 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    ui::install_theme();
     match Cli::parse().command {
         Commands::List => list(),
-        Commands::Switch { branch } => smart::switch(branch),
-        Commands::Get { property } => smart::get(property),
+        Commands::Switch { branch } => {
+            smart::switch(branch)?;
+            ui::finish(style("Worktree destination printed.").green().bold())
+        }
+        Commands::Get { property } => {
+            smart::get(property)?;
+            ui::finish(style(format!("{property:?} printed.")).dim())
+        }
         Commands::Commit { message } => commit::run(message),
         Commands::Remove { force, branches } => worktrees::lifecycle::remove(&branches, force),
         Commands::Merge {
             no_rebase,
             no_remove,
         } => worktrees::lifecycle::merge(no_rebase, no_remove),
-        Commands::Trust { command } => smart::trust_command(command),
+        Commands::Trust { command } => {
+            smart::trust_command(command)?;
+            let summary = match command {
+                TrustCommand::Status => "Hook trust status checked.",
+                TrustCommand::Reset => "Hook trust reset checked.",
+                TrustCommand::CommitStatus => "Commit generator trust status checked.",
+                TrustCommand::CommitReset => "Commit generator trust reset checked.",
+            };
+            ui::finish(style(summary).dim())
+        }
         Commands::Install => install::run(),
     }
 }
@@ -86,5 +103,80 @@ fn run() -> Result<()> {
 fn list() -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let worktrees = git::discover(&cwd)?;
-    ui::info(format!("Worktrees\n{}", render::table(&worktrees)))
+    ui::info(format!(
+        "{}\n{}",
+        ui::header_style().apply_to("Worktrees"),
+        render::table(&worktrees)
+    ))?;
+    ui::finish(list_summary(&worktrees))
+}
+
+fn list_summary(worktrees: &[worktrees::Worktree]) -> String {
+    use worktrees::Condition;
+
+    let mut summary = vec![format!(
+        "{} worktree{}",
+        worktrees.len(),
+        plural(worktrees.len())
+    )];
+    for (label, count) in [
+        (
+            "dirty",
+            worktrees
+                .iter()
+                .filter(|worktree| worktree.condition == Condition::Dirty)
+                .count(),
+        ),
+        (
+            "unknown",
+            worktrees
+                .iter()
+                .filter(|worktree| worktree.condition == Condition::Unknown)
+                .count(),
+        ),
+        (
+            "missing",
+            worktrees
+                .iter()
+                .filter(|worktree| worktree.condition == Condition::Missing)
+                .count(),
+        ),
+        (
+            "inaccessible",
+            worktrees
+                .iter()
+                .filter(|worktree| worktree.condition == Condition::Inaccessible)
+                .count(),
+        ),
+        (
+            "bare",
+            worktrees
+                .iter()
+                .filter(|worktree| worktree.is_bare())
+                .count(),
+        ),
+        (
+            "locked",
+            worktrees
+                .iter()
+                .filter(|worktree| worktree.locked.is_some())
+                .count(),
+        ),
+        (
+            "prunable",
+            worktrees
+                .iter()
+                .filter(|worktree| worktree.prunable.is_some())
+                .count(),
+        ),
+    ] {
+        if count > 0 {
+            summary.push(format!("{count} {label}"));
+        }
+    }
+    style(summary.join(", ")).dim().to_string()
+}
+
+const fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
 }
