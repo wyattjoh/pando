@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use cliclack::{confirm, spinner};
+use console::style;
 use minijinja::{Environment, context};
 
 use crate::{
@@ -45,7 +46,7 @@ pub fn run(message: Option<String>) -> Result<()> {
     ensure_worktree(&repository)?;
     if let Some(message) = message {
         stage_changes(&repository)?;
-        return git::commit(&repository.current().path, &message);
+        return commit_with_feedback(&repository, &message, "Created commit");
     }
 
     let config = EffectiveConfig::load(&repository)?;
@@ -73,7 +74,7 @@ pub fn run(message: Option<String>) -> Result<()> {
     let generated = match run_generator(&repository, &command.value, &prompt) {
         Ok(generated) => {
             if let Some(spinner) = &spinner {
-                spinner.stop("Generated commit message");
+                spinner.clear();
             }
             generated
         }
@@ -84,7 +85,17 @@ pub fn run(message: Option<String>) -> Result<()> {
             return Err(error);
         }
     };
-    git::commit(&repository.current().path, &generated)
+    commit_with_feedback(&repository, &generated, "Generated commit message")
+}
+
+fn commit_with_feedback(repository: &Repository, message: &str, status: &str) -> Result<()> {
+    let output = git::commit(&repository.current().path, message)?;
+    let status = style(status).green().bold();
+    if output.is_empty() {
+        ui::step(status)
+    } else {
+        ui::step(format!("{status}\n{output}"))
+    }
 }
 
 fn ensure_worktree(repository: &Repository) -> Result<()> {
@@ -95,13 +106,21 @@ fn ensure_worktree(repository: &Repository) -> Result<()> {
 }
 
 fn stage_changes(repository: &Repository) -> Result<()> {
-    ui::info("Staging changes…")?;
     git::stage_all(&repository.current().path)?;
     ensure_changes(repository)?;
-    ui::step(format!(
-        "Staged changes:\n{}",
-        git::staged_diff_stat(&repository.current().path)?
-    ))
+    let diffstat = git::staged_diff_stat(&repository.current().path)?;
+    ui::info(format!("Staged changes:\n{}", colorize_diffstat(&diffstat)))
+}
+
+fn colorize_diffstat(diffstat: &str) -> String {
+    diffstat
+        .lines()
+        .map(|line| match line.split_once(" | ") {
+            Some((path, stat)) => format!("{} | {stat}", style(path).cyan()),
+            None => style(line).dim().to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn ensure_changes(repository: &Repository) -> Result<()> {
