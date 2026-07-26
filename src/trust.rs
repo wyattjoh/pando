@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    config::{self, HookStep},
+    config::{self, EffectiveGeneration, GenerationSource, HookStep},
     git::Repository,
     hash,
 };
@@ -21,6 +21,8 @@ use crate::{
 struct TrustFile {
     #[serde(default)]
     repositories: BTreeMap<String, String>,
+    #[serde(default)]
+    commit_generators: BTreeMap<String, String>,
 }
 
 /// Returns the deterministic executable identity of an ordered command list.
@@ -62,7 +64,79 @@ pub fn approve(repository: &Repository, steps: &[HookStep]) -> Result<()> {
     write_trust(&trust)
 }
 
-/// Removes this clone's trust record and reports whether one existed.
+/// Returns the approval identity for effective shared generation fields.
+#[must_use]
+pub fn generation_hash(generation: &EffectiveGeneration) -> Option<String> {
+    let mut digest = Sha256::new();
+    digest.update(b"worktrees-commit-generation-v1\0");
+    let mut has_shared = false;
+    for (name, value) in [
+        (b"command".as_slice(), generation.command.as_ref()),
+        (b"template".as_slice(), generation.template.as_ref()),
+    ] {
+        if let Some(value) = value.filter(|value| value.source == GenerationSource::Shared) {
+            has_shared = true;
+            digest.update((name.len() as u64).to_be_bytes());
+            digest.update(name);
+            digest.update((value.value.len() as u64).to_be_bytes());
+            digest.update(value.value.as_bytes());
+        }
+    }
+    has_shared.then(|| hash::encode_hex(&digest.finalize()))
+}
+
+/// Reports whether the effective shared generator values are approved for this clone.
+///
+/// # Errors
+///
+/// Returns an error when repository identity or trust storage cannot be resolved.
+pub fn is_generation_trusted(
+    repository: &Repository,
+    generation: &EffectiveGeneration,
+) -> Result<bool> {
+    let Some(hash) = generation_hash(generation) else {
+        return Ok(true);
+    };
+    Ok(read_trust()?
+        .commit_generators
+        .get(&repository_key(repository)?)
+        == Some(&hash))
+}
+
+/// Saves approval for effective shared generator values.
+///
+/// # Errors
+///
+/// Returns an error when repository identity or trust storage cannot be updated.
+pub fn approve_generation(repository: &Repository, generation: &EffectiveGeneration) -> Result<()> {
+    let Some(hash) = generation_hash(generation) else {
+        return Ok(());
+    };
+    let mut trust = read_trust()?;
+    trust
+        .commit_generators
+        .insert(repository_key(repository)?, hash);
+    write_trust(&trust)
+}
+
+/// Removes generator approval for this clone and reports whether one existed.
+///
+/// # Errors
+///
+/// Returns an error when repository identity or trust storage cannot be updated.
+pub fn reset_generation(repository: &Repository) -> Result<bool> {
+    let mut trust = read_trust()?;
+    let removed = trust
+        .commit_generators
+        .remove(&repository_key(repository)?)
+        .is_some();
+    if removed {
+        write_trust(&trust)?;
+    }
+    Ok(removed)
+}
+
+/// Removes post-create approval for this clone and reports whether one existed.
 ///
 /// # Errors
 ///

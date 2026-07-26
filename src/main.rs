@@ -3,7 +3,7 @@ use std::env;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use worktrees::{
-    git, install, render,
+    commit, git, install, render,
     smart::{self, GetProperty, TrustCommand},
 };
 
@@ -28,7 +28,13 @@ enum Commands {
         #[arg(value_enum)]
         property: GetProperty,
     },
-    /// Inspect or revoke post-create hook approval.
+    /// Stage all changes and create a commit.
+    Commit {
+        /// Commit message; omit to use the configured generator.
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// Inspect or revoke post-create hook or commit-generation approval.
     Trust {
         #[command(subcommand)]
         command: TrustCommand,
@@ -49,6 +55,7 @@ fn run() -> Result<()> {
         Commands::List => list(),
         Commands::Switch { branch } => smart::switch(branch),
         Commands::Get { property } => smart::get(property),
+        Commands::Commit { message } => commit::run(message),
         Commands::Trust { command } => smart::trust_command(command),
         Commands::Install => install::run(),
     }
