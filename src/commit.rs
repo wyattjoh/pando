@@ -3,6 +3,7 @@ use std::{
     io::{self, IsTerminal, Read, Write},
     process::{Command, Stdio},
     thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -46,7 +47,7 @@ pub fn run(message: Option<String>) -> Result<()> {
     ensure_worktree(&repository)?;
     if let Some(message) = message {
         stage_changes(&repository)?;
-        return commit_with_feedback(&repository, &message, "Created commit");
+        return commit_with_feedback(&repository, &message, "Created commit", None);
     }
 
     let config = EffectiveConfig::load(&repository)?;
@@ -63,13 +64,14 @@ pub fn run(message: Option<String>) -> Result<()> {
 
     stage_changes(&repository)?;
     let prompt = render_prompt(&repository, template)?;
+    let generation_started = Instant::now();
     let spinner = io::stderr().is_terminal().then(|| {
-        let spinner = spinner().with_template("{msg} [{elapsed_precise}]");
-        spinner.start("Generating commit message…");
+        let spinner = spinner().with_template("{msg} \x1b[38;5;244m{elapsed}\x1b[0m");
+        spinner.start(style("Generating commit message...").green().bold());
         spinner
     });
     if spinner.is_none() {
-        ui::info("Generating commit message…")?;
+        ui::info(style("Generating commit message...").green().bold())?;
     }
     let generated = match run_generator(&repository, &command.value, &prompt) {
         Ok(generated) => {
@@ -85,12 +87,22 @@ pub fn run(message: Option<String>) -> Result<()> {
             return Err(error);
         }
     };
-    commit_with_feedback(&repository, &generated, "Generated commit message:")
+    commit_with_feedback(
+        &repository,
+        &generated,
+        "Generated commit message:",
+        Some(generation_started.elapsed()),
+    )
 }
 
-fn commit_with_feedback(repository: &Repository, message: &str, status: &str) -> Result<()> {
+fn commit_with_feedback(
+    repository: &Repository,
+    message: &str,
+    status: &str,
+    elapsed: Option<Duration>,
+) -> Result<()> {
     git::commit(&repository.current().path, message)?;
-    let status = style(status).green().bold();
+    let status = render_commit_status(status, elapsed);
     let message = render_commit_message(message);
     ui::step(format!("{status}\n{message}"))?;
     let hash = git::head_commit(&repository.current().path)?;
@@ -100,6 +112,18 @@ fn commit_with_feedback(repository: &Repository, message: &str, status: &str) ->
         style("Committed changes @").green().bold(),
         style(hash).color256(244)
     ))
+}
+
+fn render_commit_status(status: &str, elapsed: Option<Duration>) -> String {
+    let status = style(status).green().bold();
+    match elapsed {
+        Some(elapsed) => format!("{status} {}", muted_elapsed(elapsed)),
+        None => status.to_string(),
+    }
+}
+
+fn muted_elapsed(elapsed: Duration) -> impl std::fmt::Display {
+    style(format!("{}s", elapsed.as_secs())).color256(244)
 }
 
 fn render_commit_message(message: &str) -> String {
