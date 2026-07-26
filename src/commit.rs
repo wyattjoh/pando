@@ -89,7 +89,7 @@ pub fn run(message: Option<String>) -> Result<()> {
 }
 
 fn commit_with_feedback(repository: &Repository, message: &str, status: &str) -> Result<()> {
-    let output = git::commit(&repository.current().path, message)?;
+    let output = trim_git_margin(&git::commit(&repository.current().path, message)?);
     let status = style(status).green().bold();
     if output.is_empty() {
         ui::step(status)
@@ -113,12 +113,20 @@ fn stage_changes(repository: &Repository) -> Result<()> {
 }
 
 fn colorize_diffstat(diffstat: &str) -> String {
-    diffstat
+    trim_git_margin(diffstat)
         .lines()
         .map(|line| match line.split_once(" | ") {
             Some((path, stat)) => format!("{} | {stat}", style(path).cyan()),
             None => style(line).dim().to_string(),
         })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn trim_git_margin(output: &str) -> String {
+    output
+        .lines()
+        .map(|line| line.strip_prefix(' ').unwrap_or(line))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -249,4 +257,17 @@ fn approve_shared_generation(repository: &Repository, config: &EffectiveConfig) 
         bail!("commit generator approval declined; no changes were staged");
     }
     trust::approve_generation(repository, &config.generation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_git_margin;
+
+    #[test]
+    fn trims_the_git_output_margin_from_each_line() {
+        assert_eq!(
+            trim_git_margin("first\n second\n  third"),
+            "first\nsecond\n third"
+        );
+    }
 }
