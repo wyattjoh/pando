@@ -8,6 +8,7 @@ pub mod render;
 pub mod setup;
 pub mod smart;
 pub mod trust;
+pub mod ui;
 
 use std::path::PathBuf;
 

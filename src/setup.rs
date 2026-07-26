@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     config::{HookPhase, HookStep},
-    hash, trust,
+    hash, trust, ui,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,8 +171,12 @@ fn remove_record(path: &Path) -> Result<()> {
 /// Returns an error when a command cannot start, stream output, or be awaited.
 pub fn run_steps(phase: HookPhase, steps: &[HookStep], destination: &Path) -> Result<HookOutcome> {
     for (index, step) in steps.iter().enumerate() {
-        eprintln!("Running {} {}:", phase.key(), step.label(index));
-        eprintln!("{}", step.command);
+        ui::step(format!(
+            "Running {} {}:\n{}",
+            phase.key(),
+            step.label(index),
+            step.command
+        ))?;
         let hook_stdout = fs::OpenOptions::new()
             .write(true)
             .open("/dev/stderr")

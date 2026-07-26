@@ -10,6 +10,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use cliclack::confirm;
 
+use crate::ui;
+
 const START_MARKER: &[u8] = b"# >>> worktrees shell integration >>>";
 const END_MARKER: &[u8] = b"# <<< worktrees shell integration <<<";
 
@@ -51,16 +53,16 @@ pub fn run() -> Result<()> {
     let zshrc_changed = existing_zshrc != desired_zshrc;
 
     if !integration_changed && !zshrc_changed {
-        println!("The worktrees zsh integration is already current; no changes are required.");
+        ui::info("The worktrees zsh integration is already current; no changes are required.")?;
         return Ok(());
     }
 
-    println!("Planned zsh integration changes:");
+    ui::info("Planned zsh integration changes:")?;
     if integration_changed {
-        println!("  write {}", integration_path.display());
+        ui::step(format!("write {}", integration_path.display()))?;
     }
     if zshrc_changed {
-        println!("  update {}", zshrc_path.display());
+        ui::step(format!("update {}", zshrc_path.display()))?;
     }
 
     let confirmed = confirm("Apply these changes?")
@@ -68,7 +70,7 @@ pub fn run() -> Result<()> {
         .interact()
         .context("failed to read installation confirmation")?;
     if !confirmed {
-        println!("Installation cancelled; no files were changed.");
+        ui::warning("Installation cancelled; no files were changed.")?;
         return Ok(());
     }
 
@@ -81,8 +83,11 @@ pub fn run() -> Result<()> {
             .with_context(|| format!("failed to update {}", zshrc_path.display()))?;
     }
 
-    println!("Installed zsh integration.");
-    println!("Restart zsh or run: source {}", zshrc_path.display());
+    ui::success("Installed zsh integration.")?;
+    ui::info(format!(
+        "Restart zsh or run: source {}",
+        zshrc_path.display()
+    ))?;
     Ok(())
 }
 

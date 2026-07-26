@@ -15,7 +15,7 @@ use crate::{
     config::{EffectiveConfig, HookPhase, HookStep},
     git::{self, Repository},
     setup::{self, HookOutcome},
-    trust,
+    trust, ui,
 };
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -115,38 +115,38 @@ pub fn trust_command(command: TrustCommand) -> Result<()> {
                 let steps = config.hooks(phase);
                 let trusted = trust::is_trusted(&repository, phase, steps)?;
                 if steps.is_empty() {
-                    println!("No {} are configured.", phase.key());
+                    ui::info(format!("No {} are configured.", phase.key()))?;
                 } else if trusted {
-                    println!("The current {} are trusted.", phase.key());
+                    ui::success(format!("The current {} are trusted.", phase.key()))?;
                 } else {
-                    println!("The current {} are not trusted.", phase.key());
+                    ui::warning(format!("The current {} are not trusted.", phase.key()))?;
                 }
             }
         }
         TrustCommand::Reset => {
             if trust::reset(&repository)? {
-                println!("Reset hook trust for this repository.");
+                ui::success("Reset hook trust for this repository.")?;
             } else {
-                println!("No saved hook trust existed for this repository.");
+                ui::info("No saved hook trust existed for this repository.")?;
             }
         }
         TrustCommand::CommitStatus => {
             let config = EffectiveConfig::load(&repository)?;
             if config.generation.command.is_none() {
-                println!("No commit generator is configured.");
+                ui::info("No commit generator is configured.")?;
             } else if trust::generation_hash(&config.generation).is_none() {
-                println!("The effective commit generator is user-controlled.");
+                ui::info("The effective commit generator is user-controlled.")?;
             } else if trust::is_generation_trusted(&repository, &config.generation)? {
-                println!("The effective shared commit generator is trusted.");
+                ui::success("The effective shared commit generator is trusted.")?;
             } else {
-                println!("The effective shared commit generator is not trusted.");
+                ui::warning("The effective shared commit generator is not trusted.")?;
             }
         }
         TrustCommand::CommitReset => {
             if trust::reset_generation(&repository)? {
-                println!("Reset commit generator trust for this repository.");
+                ui::success("Reset commit generator trust for this repository.")?;
             } else {
-                println!("No saved commit generator trust existed for this repository.");
+                ui::info("No saved commit generator trust existed for this repository.")?;
             }
         }
     }
@@ -375,14 +375,12 @@ fn confirm_new_branch(
         WorktreeKind::Detached => format!("detached commit {head}"),
         _ => format!("commit {head}"),
     };
-    eprintln!(
+    ui::info(format!(
         "Create branch {branch:?} from {source} at {}?",
         destination.display()
-    );
+    ))?;
     if git::is_dirty(&repository.current().path)? {
-        eprintln!(
-            "Warning: staged, unstaged, and untracked changes remain in the source worktree."
-        );
+        ui::warning("Staged, unstaged, and untracked changes remain in the source worktree.")?;
     }
     let confirmed = confirm("Create this branch and worktree?")
         .initial_value(false)
@@ -403,9 +401,9 @@ pub(crate) fn approve_hooks(
         return Ok(());
     }
     ensure_interactive(&format!("{} require approval", phase.plural_name()))?;
-    eprintln!("The repository requests these {}:", phase.plural_name());
+    ui::info(format!("The repository requests these {}:", phase.plural_name()))?;
     for (index, step) in steps.iter().enumerate() {
-        eprintln!("  {}: {}", step.label(index), step.command);
+        ui::step(format!("{}: {}", step.label(index), step.command))?;
     }
     let confirmed = confirm("Trust and run these commands for this repository?")
         .initial_value(false)
@@ -451,7 +449,7 @@ fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&s
             )
         }
         1 => {
-            eprintln!("Warning: entering once while setup remains incomplete.");
+            ui::warning("Entering once while setup remains incomplete.")?;
             write_destination(&destination)?;
             bail!("setup remains incomplete for {}", destination.display())
         }
