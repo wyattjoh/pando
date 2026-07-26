@@ -94,9 +94,11 @@ fn commit_with_feedback(repository: &Repository, message: &str, status: &str) ->
     let message = render_commit_message(message);
     ui::step(format!("{status}\n{message}"))?;
     let hash = git::head_commit(&repository.current().path)?;
+    let hash = hash.get(..7).unwrap_or(&hash);
     ui::finish(format!(
-        "Committed changes @ {}",
-        hash.get(..7).unwrap_or(&hash)
+        "{} {}",
+        style("Committed changes @").green().bold(),
+        style(hash).color256(22)
     ))
 }
 
