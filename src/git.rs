@@ -369,12 +369,12 @@ pub fn recent_subjects(cwd: &Path) -> Result<Vec<String>> {
     bail!("git log failed: {}", stderr_detail(&output))
 }
 
-/// Commits using the supplied message and returns Git's status output.
+/// Commits using the supplied message while capturing Git's status output.
 ///
 /// # Errors
 ///
 /// Returns an error when Git cannot create the commit.
-pub fn commit(cwd: &Path, message: &str) -> Result<String> {
+pub fn commit(cwd: &Path, message: &str) -> Result<()> {
     let output = Command::new("git")
         .args(["commit", "-m", message])
         .current_dir(cwd)
@@ -382,9 +382,7 @@ pub fn commit(cwd: &Path, message: &str) -> Result<String> {
         .output()
         .context("failed to start git commit")?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_owned())
+        Ok(())
     } else {
         bail!("git commit failed: {}", stderr_detail(&output))
     }

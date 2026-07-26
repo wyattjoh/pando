@@ -89,14 +89,15 @@ pub fn run(message: Option<String>) -> Result<()> {
 }
 
 fn commit_with_feedback(repository: &Repository, message: &str, status: &str) -> Result<()> {
-    let output = trim_git_margin(&git::commit(&repository.current().path, message)?);
+    git::commit(&repository.current().path, message)?;
     let status = style(status).green().bold();
     let message = render_commit_message(message);
-    if output.is_empty() {
-        ui::step(format!("{status}\n{message}"))
-    } else {
-        ui::step(format!("{status}\n{message}\n{output}"))
-    }
+    ui::step(format!("{status}\n{message}"))?;
+    let hash = git::head_commit(&repository.current().path)?;
+    ui::finish(format!(
+        "Committed changes @ {}",
+        hash.get(..7).unwrap_or(&hash)
+    ))
 }
 
 fn render_commit_message(message: &str) -> String {
