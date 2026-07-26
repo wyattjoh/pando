@@ -3,15 +3,16 @@ use std::{
     fmt::Write as FmtWrite,
     fs,
     hash::{Hash, Hasher},
-    io::{self, IsTerminal, Write},
+    io::{self, Write},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 use cliclack::{confirm, input, select};
-use console::{Key, Term, strip_ansi_codes};
+use console::{Key, Term, strip_ansi_codes, truncate_str};
 use siphasher::sip::SipHasher13;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     WorktreeKind,
@@ -199,7 +200,8 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
         })
         .chain(std::iter::once("create switch branches".to_owned()))
         .collect();
-    let selection = prompt_result(
+    ui::ensure_interactive("worktree selection requires an interactive terminal")?;
+    let selection = ui::prompt_result(
         WorktreePicker::new(labels, filters, current, shortcuts, default).interact(),
         "selection cancelled",
         "failed to read worktree selection from the terminal",
@@ -219,6 +221,17 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
 }
 
 const PICKER_FRAME_ROWS: usize = 5;
+const STANDARD_SELECTION_FRAME_ROWS: usize = 3;
+const STANDARD_SELECTION_MAX_ROWS: usize = 10;
+
+fn standard_selection_viewport_rows(terminal_rows: u16) -> usize {
+    if terminal_rows == 0 {
+        return STANDARD_SELECTION_MAX_ROWS;
+    }
+    usize::from(terminal_rows)
+        .saturating_sub(STANDARD_SELECTION_FRAME_ROWS)
+        .clamp(1, STANDARD_SELECTION_MAX_ROWS)
+}
 
 fn picker_viewport_rows(terminal_rows: u16) -> usize {
     usize::from(terminal_rows)
@@ -234,6 +247,7 @@ struct WorktreePicker {
     selected: usize,
     number_start: usize,
     viewport_rows: usize,
+    terminal_columns: Option<usize>,
     filter: String,
 }
 
@@ -253,6 +267,7 @@ impl WorktreePicker {
             selected,
             number_start: selected.saturating_add(1),
             viewport_rows: 20,
+            terminal_columns: None,
             filter: String::new(),
         }
     }
@@ -262,7 +277,6 @@ impl WorktreePicker {
         if !term.is_term() {
             return Err(io::ErrorKind::NotConnected.into());
         }
-        self.viewport_rows = picker_viewport_rows(term.size().0);
         term.hide_cursor()?;
         let result = self.interact_inner(&term);
         term.show_cursor()?;
@@ -270,9 +284,12 @@ impl WorktreePicker {
     }
 
     fn interact_inner(&mut self, mut term: &Term) -> io::Result<usize> {
-        let mut previous_lines = 0;
+        let mut previous_frame = String::new();
         let mut shortcut_prefix = false;
         loop {
+            let (rows, columns) = term.size();
+            self.viewport_rows = picker_viewport_rows(rows);
+            self.terminal_columns = (columns > 0).then_some(usize::from(columns));
             let visible = self.visible();
             if self.selected >= visible.len() {
                 self.selected = 0;
@@ -280,10 +297,13 @@ impl WorktreePicker {
             let displayed_start = self.displayed_start(&visible);
             let displayed = self.displayed(&visible, displayed_start);
             let frame = self.render(displayed, displayed_start, visible.len());
-            term.clear_last_lines(previous_lines)?;
+            term.clear_last_lines(rendered_physical_rows(
+                &previous_frame,
+                self.terminal_columns,
+            ))?;
             term.write_all(frame.as_bytes())?;
             term.flush()?;
-            previous_lines = frame.lines().count();
+            previous_frame = frame;
             let key = term.read_key_raw()?;
             if let Some(selection) = self.shortcut_selection(&key) {
                 return Ok(selection);
@@ -325,7 +345,7 @@ impl WorktreePicker {
                         action.saturating_sub(8)
                     };
                 }
-                Key::Enter => return Ok(visible[self.selected]),
+                Key::Enter if !visible.is_empty() => return Ok(visible[self.selected]),
                 Key::Escape | Key::CtrlC => return Err(io::ErrorKind::Interrupted.into()),
                 Key::Backspace => {
                     self.filter.pop();
@@ -388,7 +408,8 @@ impl WorktreePicker {
             .iter()
             .copied()
             .filter(|index| {
-                self.shortcuts[*index] && (pinned_at_bottom || *index != visible[selected])
+                self.shortcuts[*index]
+                    && (pinned_at_bottom || visible.get(selected).copied() != Some(*index))
             })
             .take(9)
             .enumerate()
@@ -397,18 +418,8 @@ impl WorktreePicker {
     }
 
     fn render(&self, visible: &[usize], displayed_start: usize, visible_len: usize) -> String {
-        let filter = if self.filter.is_empty() {
-            "type to filter".to_owned()
-        } else {
-            self.filter.clone()
-        };
-        let mut output = format!(
-            "{}  {}\n{}  {}\n",
-            ui::interactive(ui::accent_style()).apply_to("◆"),
-            ui::interactive(ui::heading_style()).apply_to("Choose a worktree"),
-            ui::interactive(ui::accent_style()).apply_to("│"),
-            ui::interactive(ui::muted_style()).apply_to(filter)
-        );
+        let mut output = String::new();
+        self.render_header(&mut output);
         let numbered = self.numbered(
             visible,
             self.selected.saturating_sub(displayed_start),
@@ -416,77 +427,170 @@ impl WorktreePicker {
             self.number_start + 8 == self.shortcuts.len() - 1,
         );
         let pinned_at_bottom = self.number_start + 8 == self.shortcuts.len() - 1;
-        if displayed_start > 0 {
-            writeln!(
-                output,
-                "{}  {}",
-                ui::interactive(ui::accent_style()).apply_to("│"),
-                ui::interactive(ui::muted_style())
-                    .apply_to(format!("↑ {displayed_start} more above"))
-            )
-            .expect("writing to a string cannot fail");
+        if visible_len == 0 {
+            self.render_hint(&mut output, "No worktrees match this filter".to_owned());
+        } else if displayed_start > 0 {
+            self.render_hint(&mut output, format!("↑ {displayed_start} more above"));
         }
         for (position, index) in visible.iter().enumerate() {
-            let marker = if self.current[*index] {
-                ui::interactive(ui::accent_style().bold())
-                    .apply_to("*")
-                    .to_string()
-            } else if displayed_start + position == self.selected && !pinned_at_bottom {
-                " ".to_owned()
-            } else {
-                numbered
-                    .iter()
-                    .find_map(|(numbered_index, number)| {
-                        (numbered_index == index).then_some(number)
-                    })
-                    .map_or_else(
-                        || " ".to_owned(),
-                        |number| {
-                            ui::interactive(ui::shortcut_style())
-                                .apply_to(number)
-                                .to_string()
-                        },
-                    )
-            };
-            let is_selected = displayed_start + position == self.selected;
-            let selected = if is_selected {
-                ui::interactive(ui::accent_style()).apply_to("●")
-            } else {
-                ui::interactive(ui::muted_style()).apply_to("○")
-            };
-            let label = if is_selected {
-                ui::interactive(ui::selected_style())
-                    .apply_to(strip_ansi_codes(&self.labels[*index]))
-                    .to_string()
-            } else {
-                self.labels[*index].clone()
-            };
-            writeln!(
-                output,
-                "{}  {selected} {marker} {label}",
-                ui::interactive(ui::accent_style()).apply_to("│"),
-            )
-            .expect("writing to a string cannot fail");
+            self.render_choice(
+                &mut output,
+                *index,
+                displayed_start + position,
+                pinned_at_bottom,
+                &numbered,
+            );
         }
         let more_below = visible_len.saturating_sub(displayed_start + visible.len());
         if more_below > 0 {
-            writeln!(
-                output,
-                "{}  {}",
-                ui::interactive(ui::accent_style()).apply_to("│"),
-                ui::interactive(ui::muted_style()).apply_to(format!("↓ {more_below} more below"))
-            )
-            .expect("writing to a string cannot fail");
+            self.render_hint(&mut output, format!("↓ {more_below} more below"));
         }
+        self.render_footer(&mut output);
+        output
+    }
+
+    fn render_header(&self, output: &mut String) {
+        let heading_prefix = format!("{}  ", ui::interactive(ui::accent_style()).apply_to("◆"));
+        let heading = ui::interactive(ui::heading_style())
+            .apply_to("Choose a worktree")
+            .to_string();
+        self.write_fitted_line(output, &heading_prefix, &heading);
+
+        let filter_prefix = format!("{}  ", ui::interactive(ui::accent_style()).apply_to("│"));
+        let filter = if self.filter.is_empty() {
+            "type to filter"
+        } else {
+            &self.filter
+        };
+        let filter = ui::interactive(ui::muted_style())
+            .apply_to(filter)
+            .to_string();
+        self.write_fitted_line(output, &filter_prefix, &filter);
+    }
+
+    fn render_hint(&self, output: &mut String, message: String) {
+        let prefix = format!("{}  ", ui::interactive(ui::accent_style()).apply_to("│"));
+        let message = ui::interactive(ui::muted_style())
+            .apply_to(message)
+            .to_string();
+        self.write_fitted_line(output, &prefix, &message);
+    }
+
+    fn render_choice(
+        &self,
+        output: &mut String,
+        index: usize,
+        position: usize,
+        pinned_at_bottom: bool,
+        numbered: &[(usize, usize)],
+    ) {
+        let marker = if self.current[index] {
+            ui::interactive(ui::accent_style().bold())
+                .apply_to("*")
+                .to_string()
+        } else if position == self.selected && !pinned_at_bottom {
+            " ".to_owned()
+        } else {
+            numbered
+                .iter()
+                .find_map(|(numbered_index, number)| (*numbered_index == index).then_some(number))
+                .map_or_else(
+                    || " ".to_owned(),
+                    |number| {
+                        ui::interactive(ui::shortcut_style())
+                            .apply_to(number)
+                            .to_string()
+                    },
+                )
+        };
+        let is_selected = position == self.selected;
+        let selected = if is_selected {
+            ui::interactive(ui::accent_style()).apply_to("●")
+        } else {
+            ui::interactive(ui::muted_style()).apply_to("○")
+        };
+        let label = if is_selected {
+            ui::interactive(ui::selected_style())
+                .apply_to(strip_ansi_codes(&self.labels[index]))
+                .to_string()
+        } else {
+            self.labels[index].clone()
+        };
+        let prefix = format!(
+            "{}  {selected} {marker} ",
+            ui::interactive(ui::accent_style()).apply_to("│"),
+        );
+        let prefix_width = UnicodeWidthStr::width(strip_ansi_codes(&prefix).as_ref());
+        if self
+            .terminal_columns
+            .is_some_and(|columns| prefix_width >= columns)
+        {
+            let marker = (!strip_ansi_codes(&marker).trim().is_empty()).then_some(marker);
+            let compact = format!("{selected}{}{label}", marker.as_deref().unwrap_or(""));
+            self.write_compact_line(output, &compact);
+        } else {
+            self.write_fitted_line(output, &prefix, &label);
+        }
+    }
+
+    fn render_footer(&self, output: &mut String) {
         writeln!(
             output,
-            "{}\n{}  {}",
-            ui::interactive(ui::accent_style()).apply_to("│"),
-            ui::interactive(ui::accent_style()).apply_to("└"),
-            picker_help()
+            "{}",
+            ui::interactive(ui::accent_style()).apply_to("│")
         )
         .expect("writing to a string cannot fail");
-        output
+        let prefix = format!("{}  ", ui::interactive(ui::accent_style()).apply_to("└"));
+        let help = picker_help();
+        self.write_fitted_line(output, &prefix, &help);
+    }
+
+    fn write_fitted_line(&self, output: &mut String, prefix: &str, content: &str) {
+        writeln!(output, "{}", self.fit_line(prefix, content))
+            .expect("writing to a string cannot fail");
+    }
+
+    fn write_compact_line(&self, output: &mut String, content: &str) {
+        let content = self.terminal_columns.map_or_else(
+            || content.to_owned(),
+            |columns| truncate_styled(content, columns),
+        );
+        writeln!(output, "{content}").expect("writing to a string cannot fail");
+    }
+
+    fn fit_line(&self, prefix: &str, content: &str) -> String {
+        let Some(terminal_columns) = self.terminal_columns else {
+            return format!("{prefix}{content}");
+        };
+        let plain_prefix = strip_ansi_codes(prefix);
+        let prefix_width = UnicodeWidthStr::width(plain_prefix.as_ref());
+        if prefix_width >= terminal_columns {
+            return truncate_styled(content, terminal_columns);
+        }
+        let available_width = terminal_columns - prefix_width;
+        format!("{prefix}{}", truncate_styled(content, available_width))
+    }
+}
+
+fn rendered_physical_rows(frame: &str, terminal_columns: Option<usize>) -> usize {
+    let Some(terminal_columns) = terminal_columns.filter(|columns| *columns > 0) else {
+        return frame.lines().count();
+    };
+    frame
+        .lines()
+        .map(|line| {
+            let plain = strip_ansi_codes(line);
+            let width = UnicodeWidthStr::width(plain.as_ref());
+            width.saturating_sub(1) / terminal_columns + 1
+        })
+        .sum()
+}
+
+fn truncate_styled(value: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        String::new()
+    } else {
+        truncate_str(value, max_width, "…").into_owned()
     }
 }
 
@@ -546,7 +650,7 @@ fn shortcut_number(key: &Key) -> Option<usize> {
 }
 
 fn read_branch_name() -> Result<String> {
-    let value: String = prompt_result(
+    let value: String = ui::prompt_result(
         input("Branch name:")
             .validate(|value: &String| {
                 if value.trim().is_empty() {
@@ -600,17 +704,17 @@ fn resolve_and_switch(repository: &Repository, branch: &str) -> Result<()> {
 }
 
 fn choose_remote(remotes: &[String], branch: &str) -> Result<String> {
-    if !io::stdin().is_terminal() {
-        bail!(
-            "multiple remote-tracking branches match {branch:?}; choose in a terminal: {}",
-            remotes.join(", ")
-        );
-    }
-    let mut prompt = select(format!("Choose the upstream for {branch}")).initial_value(0);
+    ui::ensure_interactive(&format!(
+        "multiple remote-tracking branches match {branch:?}; choose in a terminal: {}",
+        remotes.join(", ")
+    ))?;
+    let mut prompt = select(format!("Choose the upstream for {branch}"))
+        .initial_value(0)
+        .max_rows(standard_selection_viewport_rows(Term::stderr().size().0));
     for (index, remote) in remotes.iter().enumerate() {
         prompt = prompt.item(index, remote, "");
     }
-    let selection = prompt_result(
+    let selection = ui::prompt_result(
         prompt.interact(),
         "remote selection cancelled",
         "failed to read remote selection",
@@ -711,7 +815,7 @@ fn confirm_new_branch(
     head: &str,
     destination: &Path,
 ) -> Result<()> {
-    ensure_interactive("new branch creation requires confirmation")?;
+    ui::ensure_interactive("new branch creation requires confirmation")?;
     let source = match &repository.current().kind {
         WorktreeKind::Branch(source) => format!("branch {source:?} at {head}"),
         WorktreeKind::Detached => format!("detached commit {head}"),
@@ -724,12 +828,17 @@ fn confirm_new_branch(
     if git::is_dirty(&repository.current().path)? {
         ui::warning("Staged, unstaged, and untracked changes remain in the source worktree.")?;
     }
-    let confirmed = confirm("Create this branch and worktree?")
-        .initial_value(false)
-        .interact()
-        .context("failed to read new-branch confirmation")?;
+    let confirmed = ui::prompt_result(
+        confirm("Create this branch and worktree?")
+            .initial_value(false)
+            .interact(),
+        "branch creation cancelled",
+        "failed to read new-branch confirmation",
+    )?;
     if !confirmed {
-        bail!("branch creation declined");
+        return Err(ui::declined(
+            "branch creation declined; no worktree was created",
+        ));
     }
     Ok(())
 }
@@ -742,7 +851,7 @@ pub(crate) fn approve_hooks(
     if steps.is_empty() || trust::is_trusted(repository, phase, steps)? {
         return Ok(());
     }
-    ensure_interactive(&format!("{} require approval", phase.plural_name()))?;
+    ui::ensure_interactive(&format!("{} require approval", phase.plural_name()))?;
     ui::info(format!(
         "The repository requests these {}:",
         phase.plural_name()
@@ -750,12 +859,18 @@ pub(crate) fn approve_hooks(
     for (index, step) in steps.iter().enumerate() {
         ui::step(format!("{}: {}", step.label(index), step.command))?;
     }
-    let confirmed = confirm("Trust and run these commands for this repository?")
-        .initial_value(false)
-        .interact()
-        .context("failed to read hook approval")?;
+    let confirmed = ui::prompt_result(
+        confirm("Trust and run these commands for this repository?")
+            .initial_value(false)
+            .interact(),
+        &format!("{} approval cancelled", phase.plural_name()),
+        "failed to read hook approval",
+    )?;
     if !confirmed {
-        bail!("{} approval declined", phase.plural_name());
+        return Err(ui::declined(format!(
+            "{} approval declined; no commands were run",
+            phase.plural_name()
+        )));
     }
     trust::approve(repository, phase, steps)
 }
@@ -771,13 +886,13 @@ fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&s
         setup::clear(&repository.common_dir, &worktree_identity, branch)?;
         return write_destination(&destination);
     }
-    ensure_interactive("incomplete setup requires a recovery choice")?;
+    ui::ensure_interactive("incomplete setup requires a recovery choice")?;
     let choices = ["Retry setup", "Enter once", "Mark setup complete and enter"];
     let mut prompt = select("Setup did not complete for this worktree").initial_value(0);
     for (index, choice) in choices.iter().enumerate() {
         prompt = prompt.item(index, choice, "");
     }
-    let choice = prompt_result(
+    let choice = ui::prompt_result(
         prompt.interact(),
         "setup recovery cancelled",
         "failed to read setup recovery choice",
@@ -828,24 +943,6 @@ fn finish_setup(
     }
 }
 
-fn prompt_result<T>(result: io::Result<T>, cancelled: &str, failure: &str) -> Result<T> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-            Err(io::Error::new(io::ErrorKind::Interrupted, cancelled.to_owned()).into())
-        }
-        Err(error) => Err(error).context(failure.to_owned()),
-    }
-}
-
-fn ensure_interactive(reason: &str) -> Result<()> {
-    if io::stdin().is_terminal() && io::stderr().is_terminal() {
-        Ok(())
-    } else {
-        bail!("{reason}, but no interactive terminal is available")
-    }
-}
-
 fn write_destination(destination: &Path) -> Result<()> {
     let mut stdout = io::stdout().lock();
     stdout
@@ -873,8 +970,9 @@ pub fn port_for_branch(branch: &str) -> u16 {
 #[cfg(test)]
 mod tests {
     use console::{Key, strip_ansi_codes};
+    use unicode_width::UnicodeWidthStr;
 
-    use super::{WorktreePicker, picker_viewport_rows, port_for_branch};
+    use super::{WorktreePicker, picker_viewport_rows, port_for_branch, rendered_physical_rows};
     use crate::ui;
 
     #[test]
@@ -950,6 +1048,95 @@ mod tests {
         );
         assert!(rendered.contains(&second));
         assert!(strip_ansi_codes(&rendered).contains("Shift-Tab create"));
+    }
+
+    #[test]
+    fn picker_renders_a_no_match_state_without_a_selection() {
+        let mut picker = WorktreePicker::new(
+            vec!["main".to_owned()],
+            vec!["main".to_owned()],
+            vec![true],
+            vec![false],
+            0,
+        );
+        picker.filter = "missing".to_owned();
+
+        let rendered = picker.render(&[], 0, 0);
+
+        assert!(rendered.contains("No worktrees match this filter"));
+    }
+
+    #[test]
+    fn picker_truncates_lines_to_the_terminal_width() {
+        let label = ui::interactive(ui::worktree_data_style())
+            .apply_to("feature/with-a-very-long-name  ~/a/path/that-is-too-wide")
+            .to_string();
+        let mut picker = WorktreePicker::new(
+            vec![label],
+            vec!["feature".to_owned()],
+            vec![true],
+            vec![false],
+            0,
+        );
+        let terminal_columns = 48;
+        picker.terminal_columns = Some(terminal_columns);
+        let rendered = picker.render(&[0], 0, 1);
+
+        assert!(rendered.lines().all(|line| {
+            let plain = strip_ansi_codes(line);
+            UnicodeWidthStr::width(plain.as_ref()) <= terminal_columns
+        }));
+    }
+
+    #[test]
+    fn picker_compacts_markers_when_structural_chrome_does_not_fit() {
+        let mut picker = WorktreePicker::new(
+            vec!["main".to_owned(), "feature".to_owned()],
+            vec!["main".to_owned(), "feature".to_owned()],
+            vec![true, false],
+            vec![false, true],
+            0,
+        );
+        picker.terminal_columns = Some(4);
+
+        let rendered = picker.render(&[0, 1], 0, 2);
+        let plain = strip_ansi_codes(&rendered);
+
+        assert!(rendered.lines().all(|line| {
+            let plain = strip_ansi_codes(line);
+            UnicodeWidthStr::width(plain.as_ref()) <= 4
+        }));
+        assert!(plain.contains("●*m…"), "{plain}");
+        assert!(plain.contains("○1f…"), "{plain}");
+    }
+
+    #[test]
+    fn picker_preserves_semantic_styles_when_truncating() {
+        let branch_style = ui::worktree_data_style().bold().force_styling(true);
+        let warning_style = ui::warning_style().force_styling(true);
+        let dirty_label = format!(
+            "{} {} suffix",
+            branch_style.apply_to("dirty"),
+            warning_style.apply_to("*")
+        );
+        let mut picker = WorktreePicker::new(
+            vec!["first".to_owned(), dirty_label],
+            vec!["first".to_owned(), "dirty".to_owned()],
+            vec![true, false],
+            vec![false, true],
+            0,
+        );
+        picker.terminal_columns = Some(15);
+
+        let rendered = picker.render(&[0, 1], 0, 2);
+
+        assert!(rendered.contains(&branch_style.apply_to("dirty").to_string()));
+        assert!(rendered.contains(&warning_style.apply_to("*").to_string()));
+    }
+
+    #[test]
+    fn picker_counts_wrapped_physical_rows_at_the_current_width() {
+        assert_eq!(rendered_physical_rows("12345\n12\n", Some(4)), 3);
     }
 
     #[test]

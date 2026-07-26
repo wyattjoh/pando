@@ -1,7 +1,10 @@
 use std::{
     fs,
     io::{Read, Write},
-    os::unix::fs::{PermissionsExt, symlink},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{PermissionsExt, symlink},
+    },
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     thread,
@@ -378,10 +381,37 @@ fn switch_defaults_to_current_worktree_and_keeps_stdout_pure() {
 }
 
 #[test]
+fn switch_picker_preflights_stdin_before_rendering() {
+    let repo = Repository::new();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command.arg("switch").current_dir(&repo.main);
+
+    let output = run_terminal_command(command);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.contains("no interactive terminal"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        !output.stderr.contains("Choose a worktree"),
+        "{}",
+        output.stderr
+    );
+}
+
+#[test]
 fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
     let repo = Repository::new();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .arg("switch")
+        .current_dir(&repo.main)
+        .env("CLICOLOR_FORCE", "1");
 
-    let output = run_switch(&repo.main, b"\r");
+    let output = run_pty_command(command, b"\r");
 
     assert!(output.status.success(), "{}", output.stderr);
     assert_eq!(
@@ -432,13 +462,43 @@ fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
 }
 
 #[test]
+fn switch_picker_honors_disabled_color_without_polluting_stdout() {
+    let repo = Repository::new();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .arg("switch")
+        .current_dir(&repo.main)
+        .env("NO_COLOR", "1")
+        .env_remove("CLICOLOR_FORCE");
+
+    let output = run_pty_command(command, b"\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", repo.main.canonicalize().unwrap().display())
+    );
+    assert!(!output.stdout.contains('\u{1b}'));
+    assert!(!contains_sgr(&output.stderr), "{}", output.stderr);
+    assert!(
+        output.stderr.contains("Choose a worktree"),
+        "{}",
+        output.stderr
+    );
+    assert!(output.stderr.contains("* main"), "{}", output.stderr);
+}
+
+#[test]
 fn switch_pagination_hint_uses_muted_semantic_style() {
     let repo = Repository::new();
     for index in 0..8 {
         repo.add_worktree(&format!("page-{index}"), &format!("page-{index}"));
     }
     let mut command = Command::cargo_bin("worktrees").unwrap();
-    command.arg("switch").current_dir(&repo.main);
+    command
+        .arg("switch")
+        .current_dir(&repo.main)
+        .env("CLICOLOR_FORCE", "1");
 
     let output = run_pty_command_with_rows(command, b"\r", 10);
 
@@ -459,6 +519,50 @@ fn switch_pagination_hint_uses_muted_semantic_style() {
         "{}",
         output.stderr
     );
+}
+
+#[test]
+fn switch_picker_redraws_for_a_narrower_terminal() {
+    let repo = Repository::new();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .arg("switch")
+        .current_dir(&repo.main)
+        .env("NO_COLOR", "1");
+
+    let terminal_columns = 18;
+    let output = run_resized_pty_command(command, (24, 80), (10, terminal_columns), b"m\x1b");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let frame_start = output
+        .stderr
+        .rfind("◆  Choose")
+        .expect("the resized frame should retain its header");
+    let frame_end = output.stderr[frame_start..]
+        .find("\x1b[?25h")
+        .map_or(output.stderr.len(), |offset| frame_start + offset);
+    let frame = &output.stderr[frame_start..frame_end];
+    assert!(
+        frame.lines().any(|line| line.trim_end() == "│  m"),
+        "{frame}"
+    );
+    assert!(frame.contains("● * main"), "{frame}");
+    assert!(frame.contains("└"), "{frame}");
+    assert!(frame.lines().all(|line| {
+        unicode_width::UnicodeWidthStr::width(console::strip_ansi_codes(line).as_ref())
+            <= usize::from(terminal_columns)
+    }));
+    assert!(
+        frame.lines().count() <= 10,
+        "resized frame exceeded terminal rows: {frame}"
+    );
+    assert!(
+        output.stderr.contains("selection cancelled"),
+        "{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("panicked"), "{}", output.stderr);
 }
 
 #[test]
@@ -488,6 +592,41 @@ fn switch_filter_mode_filters_choices_and_selects_the_match() {
         format!("{}\n", filtered.canonicalize().unwrap().display())
     );
     assert!(output.stderr.contains("needle-filter"), "{}", output.stderr);
+}
+
+#[test]
+fn switch_empty_filter_can_be_recovered_with_backspace() {
+    let repo = Repository::new();
+
+    let output = run_switch(&repo.main, b"mainx\x7f\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", repo.main.canonicalize().unwrap().display())
+    );
+    assert!(!output.stderr.contains("panicked"), "{}", output.stderr);
+}
+
+#[test]
+fn switch_empty_filter_can_be_cancelled_without_panicking() {
+    let repo = Repository::new();
+
+    let output = run_switch(&repo.main, b"no-such-worktree\r\x1b");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.contains("No worktrees match this filter"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("selection cancelled"),
+        "{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("panicked"), "{}", output.stderr);
 }
 
 #[test]
@@ -565,6 +704,12 @@ fn switch_escape_cancels_without_a_destination() {
     assert!(output.stdout.is_empty());
     assert!(
         output.stderr.contains("selection cancelled"),
+        "{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("error:"), "{}", output.stderr);
+    assert!(
+        !output.stderr.contains("failed to read"),
         "{}",
         output.stderr
     );
@@ -656,11 +801,11 @@ fn install_decline_makes_no_filesystem_changes() {
     let output = run_install(home.path(), xdg.path(), Some(zdot.path()), b"n\r");
     assert!(output.status.success(), "{}", output.stderr);
     assert!(output.stdout.is_empty());
-    assert!(output.stderr.contains("cancelled"), "{}", output.stderr);
+    assert!(output.stderr.contains("declined"), "{}", output.stderr);
     assert!(
         output.stderr.contains(&forced_style(
             worktrees::ui::warning_style(),
-            "Installation cancelled; no files were changed."
+            "Installation declined; no files were changed."
         )),
         "{}",
         output.stderr
@@ -668,6 +813,48 @@ fn install_decline_makes_no_filesystem_changes() {
 
     assert_eq!(fs::read(&zshrc).unwrap(), b"export KEEP=yes\n");
     assert!(!xdg.path().join("worktrees/worktrees.zsh").exists());
+}
+
+#[test]
+fn install_escape_reports_cancellation_without_filesystem_changes() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+
+    let output = run_install(home.path(), xdg.path(), Some(zdot.path()), b"\x1b");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.contains("installation cancelled"),
+        "{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("error:"), "{}", output.stderr);
+    assert!(!xdg.path().join("worktrees/worktrees.zsh").exists());
+    assert!(!zdot.path().join(".zshrc").exists());
+}
+
+#[test]
+fn install_rejects_a_noninteractive_confirmation_before_rendering_a_prompt() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+
+    let output = install_command(home.path(), xdg.path(), Some(zdot.path()))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("no interactive terminal"), "{stderr}");
+    assert!(
+        !stderr.contains("Planned zsh integration changes"),
+        "{stderr}"
+    );
+    assert!(!xdg.path().join("worktrees/worktrees.zsh").exists());
+    assert!(!zdot.path().join(".zshrc").exists());
 }
 
 #[test]
@@ -1382,6 +1569,47 @@ fn ambiguous_remote_branches_fail_noninteractively_before_mutation() {
 }
 
 #[test]
+fn remote_selection_caps_long_lists_to_a_scrollable_viewport() {
+    let repo = Repository::new();
+    for index in 0..12 {
+        let remote = format!("remote-{index:02}");
+        git(
+            &repo.main,
+            [
+                "remote",
+                "add",
+                remote.as_str(),
+                repo.main.to_str().unwrap(),
+            ],
+        );
+        let reference = format!("refs/remotes/{remote}/many");
+        git(&repo.main, ["update-ref", reference.as_str(), "HEAD"]);
+    }
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command.args(["switch", "many"]).current_dir(&repo.main);
+    let output = run_pty_command_with_rows(command, b"\x1b", 8);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.contains("remote-04/many"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        !output.stderr.contains("remote-05/many"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("remote selection cancelled"),
+        "{}",
+        output.stderr
+    );
+}
+
+#[test]
 fn remote_matching_requires_the_complete_branch_name() {
     let repo = Repository::new();
     let remote = repo.temp.path().join("origin.git");
@@ -1462,6 +1690,37 @@ fn new_branch_is_confirmed_and_created_from_invoking_head() {
 }
 
 #[test]
+fn new_branch_confirmation_escape_is_reported_as_cancellation() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "cancelled-branch"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+
+    let output = run_pty_command(command, b"\x1b");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.contains("branch creation cancelled"),
+        "{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("error:"), "{}", output.stderr);
+    assert!(!root.join("cancelled-branch").exists());
+}
+
+#[test]
 fn shared_and_local_hooks_run_in_order_and_unchanged_commands_reuse_trust() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "hook-one"]);
@@ -1524,6 +1783,86 @@ fn shared_and_local_hooks_run_in_order_and_unchanged_commands_reuse_trust() {
 }
 
 #[test]
+fn declining_hook_approval_is_a_warning_without_mutation() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "declined-hook"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - command: touch should-not-exist\n",
+    )
+    .unwrap();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "declined-hook"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .env("CLICOLOR_FORCE", "1");
+
+    let output = run_pty_command(command, b"n\r");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.contains(&forced_style(
+            worktrees::ui::warning_style(),
+            "post-create commands approval declined; no commands were run"
+        )),
+        "{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("error:"), "{}", output.stderr);
+    assert!(!root.join("declined-hook").exists());
+}
+
+#[test]
+fn hook_approval_escape_reports_cancellation_without_mutation() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "cancelled-hook"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - command: touch should-not-exist\n",
+    )
+    .unwrap();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "cancelled-hook"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+
+    let output = run_pty_command(command, b"\x1b");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output
+            .stderr
+            .contains("post-create commands approval cancelled"),
+        "{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("error:"), "{}", output.stderr);
+    assert!(!root.join("cancelled-hook").exists());
+}
+
+#[test]
 fn incomplete_setup_supports_enter_once_then_mark_complete() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "recover"]);
@@ -1552,6 +1891,15 @@ fn incomplete_setup_supports_enter_once_then_mark_complete() {
     };
     let failed = run(b"y\r");
     assert!(!failed.status.success());
+    let cancelled = run(b"\x1b");
+    assert!(!cancelled.status.success());
+    assert!(cancelled.stdout.is_empty());
+    assert!(
+        cancelled.stderr.contains("setup recovery cancelled"),
+        "{}",
+        cancelled.stderr
+    );
+    assert!(!cancelled.stderr.contains("error:"), "{}", cancelled.stderr);
     let moved = repo.temp.path().join("moved-recover");
     git(
         &repo.main,
@@ -1587,7 +1935,7 @@ fn incomplete_setup_supports_enter_once_then_mark_complete() {
 }
 
 #[test]
-fn picker_branch_action_uses_the_shared_resolver_and_escape_cancels() {
+fn picker_branch_action_uses_the_shared_resolver_and_branch_entry_cancels() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "picker-existing"]);
     let xdg = tempfile::tempdir().unwrap();
@@ -1621,9 +1969,15 @@ fn picker_branch_action_uses_the_shared_resolver_and_escape_cancels() {
     );
     assert!(root.join("picker-existing").exists(), "{}", created.stderr);
 
-    let cancelled = run(b"\x1b");
+    let cancelled = run(b"\x1b[Z\x1b");
     assert!(!cancelled.status.success());
     assert!(cancelled.stdout.is_empty());
+    assert!(
+        cancelled.stderr.contains("branch entry cancelled"),
+        "{}",
+        cancelled.stderr
+    );
+    assert!(!cancelled.stderr.contains("error:"), "{}", cancelled.stderr);
 }
 
 #[test]
@@ -2029,6 +2383,17 @@ fn forced_style(style: console::Style, value: impl std::fmt::Display) -> String 
     style.force_styling(true).apply_to(value).to_string()
 }
 
+fn contains_sgr(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (0..bytes.len().saturating_sub(2)).any(|start| {
+        bytes[start..].starts_with(b"\x1b[")
+            && bytes[start + 2..]
+                .iter()
+                .find(|byte| byte.is_ascii_alphabetic())
+                .is_some_and(|terminator| *terminator == b'm')
+    })
+}
+
 fn run_switch(cwd: &Path, input: &[u8]) -> PtyOutput {
     let mut command = Command::cargo_bin("worktrees").unwrap();
     command.arg("switch").current_dir(cwd);
@@ -2068,23 +2433,26 @@ fn run_terminal_command(mut command: Command) -> PtyOutput {
 }
 
 fn run_pty_command(command: Command, input: &[u8]) -> PtyOutput {
-    run_pty_command_with_rows(command, input, 0)
+    run_pty_command_with_rows(command, input, 24)
 }
 
-fn run_pty_command_with_rows(mut command: Command, input: &[u8], rows: u16) -> PtyOutput {
-    let window = (rows > 0).then_some(Winsize {
-        ws_row: rows,
-        ws_col: 120,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    });
-    let pty = openpty(window.as_ref(), None).unwrap();
+fn run_pty_command_with_rows(command: Command, input: &[u8], rows: u16) -> PtyOutput {
+    run_pty_command_with_size(command, input, rows, 600)
+}
+
+struct PtySession {
+    child: std::process::Child,
+    master_writer: fs::File,
+    master_reader: fs::File,
+}
+
+fn start_pty_command(mut command: Command, window: Winsize) -> PtySession {
+    let pty = openpty(Some(&window), None).unwrap();
     let stdin_fd = dup(&pty.slave).unwrap();
     let stderr_fd = dup(&pty.slave).unwrap();
-    let mut master_writer = fs::File::from(dup(&pty.master).unwrap());
-    let mut master_reader = fs::File::from(pty.master);
-
-    let mut child = command
+    let master_writer = fs::File::from(dup(&pty.master).unwrap());
+    let master_reader = fs::File::from(pty.master);
+    let child = command
         .env("TERM", "xterm-256color")
         .stdin(Stdio::from(stdin_fd))
         .stdout(Stdio::piped())
@@ -2093,16 +2461,17 @@ fn run_pty_command_with_rows(mut command: Command, input: &[u8], rows: u16) -> P
         .unwrap();
     drop(command);
     drop(pty.slave);
+    PtySession {
+        child,
+        master_writer,
+        master_reader,
+    }
+}
 
-    let reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = master_reader.read_to_end(&mut bytes);
-        bytes
-    });
-    master_writer.write_all(input).unwrap();
-    master_writer.flush().unwrap();
-    drop(master_writer);
-
+fn finish_pty_command(
+    mut child: std::process::Child,
+    reader: thread::JoinHandle<Vec<u8>>,
+) -> PtyOutput {
     let status = child.wait().unwrap();
     let mut stdout = String::new();
     child
@@ -2117,6 +2486,93 @@ fn run_pty_command_with_rows(mut command: Command, input: &[u8], rows: u16) -> P
         stdout,
         stderr,
     }
+}
+
+fn run_pty_command_with_size(command: Command, input: &[u8], rows: u16, columns: u16) -> PtyOutput {
+    let window = Winsize {
+        ws_row: rows,
+        ws_col: columns,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let PtySession {
+        child,
+        mut master_writer,
+        mut master_reader,
+    } = start_pty_command(command, window);
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = master_reader.read_to_end(&mut bytes);
+        bytes
+    });
+    master_writer.write_all(input).unwrap();
+    master_writer.flush().unwrap();
+    drop(master_writer);
+    finish_pty_command(child, reader)
+}
+
+fn run_resized_pty_command(
+    command: Command,
+    initial_size: (u16, u16),
+    resized: (u16, u16),
+    input: &[u8],
+) -> PtyOutput {
+    let initial_window = Winsize {
+        ws_row: initial_size.0,
+        ws_col: initial_size.1,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let PtySession {
+        child,
+        mut master_writer,
+        mut master_reader,
+    } = start_pty_command(command, initial_window);
+    let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 1024];
+        let mut ready_sender = Some(ready_sender);
+        loop {
+            match master_reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    bytes.extend_from_slice(&buffer[..read]);
+                    if bytes
+                        .windows("Choose a worktree".len())
+                        .any(|window| window == b"Choose a worktree")
+                        && let Some(sender) = ready_sender.take()
+                    {
+                        sender.send(()).unwrap();
+                    }
+                }
+            }
+        }
+        bytes
+    });
+    ready_receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("picker did not render before the resize");
+    let resized_window = Winsize {
+        ws_row: resized.0,
+        ws_col: resized.1,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `master_writer` owns a valid PTY descriptor and the ioctl only
+    // reads the fully initialized window-size value for this call.
+    let resized = unsafe {
+        nix::libc::ioctl(
+            master_writer.as_raw_fd(),
+            nix::libc::TIOCSWINSZ,
+            &raw const resized_window,
+        )
+    };
+    assert_eq!(resized, 0);
+    master_writer.write_all(input).unwrap();
+    master_writer.flush().unwrap();
+    drop(master_writer);
+    finish_pty_command(child, reader)
 }
 
 fn find_executable(name: &str) -> PathBuf {
@@ -2181,6 +2637,83 @@ fn commit_with_explicit_message_stages_all_change_kinds() {
         changed.contains("README.md")
             && changed.contains("added.txt")
             && changed.contains("deleted.txt")
+    );
+}
+
+#[test]
+fn shared_commit_generator_approval_cancellation_is_not_an_operational_error() {
+    let repo = Repository::new();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "commit:\n  generation:\n    command: printf\n",
+    )
+    .unwrap();
+    fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .arg("commit")
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path());
+
+    let output = run_pty_command(command, b"\x1b");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output
+            .stderr
+            .contains("commit generator approval cancelled"),
+        "{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("error:"), "{}", output.stderr);
+    assert_eq!(
+        Command::new("git")
+            .args(["diff", "--cached", "--quiet"])
+            .current_dir(&repo.main)
+            .status()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
+}
+
+#[test]
+fn shared_commit_generator_approval_preflights_noninteractive_terminals() {
+    let repo = Repository::new();
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "commit:\n  generation:\n    command: printf\n",
+    )
+    .unwrap();
+    fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .arg("commit")
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("no interactive terminal"), "{stderr}");
+    assert!(
+        !stderr.contains("repository requests these commit generation settings"),
+        "{stderr}"
+    );
+    assert_eq!(
+        Command::new("git")
+            .args(["diff", "--cached", "--quiet"])
+            .current_dir(&repo.main)
+            .status()
+            .unwrap()
+            .code(),
+        Some(0)
     );
 }
 
@@ -2254,6 +2787,42 @@ fn commit_generates_message_from_global_configuration() {
     assert_eq!(
         String::from_utf8(message.stdout).unwrap(),
         "feat: generated\n\n- first change\n- second change\n\n"
+    );
+}
+
+#[test]
+fn commit_generator_failure_finishes_the_spinner_with_an_error_state() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        "commit:\n  generation:\n    command: exit 23\n",
+    )
+    .unwrap();
+    fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .arg("commit")
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("CLICOLOR_FORCE", "1");
+
+    let output = run_terminal_command(command);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.contains("Failed to generate commit message"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output
+            .stderr
+            .contains("commit generator failed with status"),
+        "{}",
+        output.stderr
     );
 }
 
