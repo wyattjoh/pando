@@ -31,6 +31,10 @@ struct MergeJournal {
     no_remove: bool,
     #[serde(default)]
     cleanup_pending: bool,
+    #[serde(default)]
+    validated_source: Option<String>,
+    #[serde(default)]
+    validated_target: Option<String>,
 }
 
 /// Removes selected topic worktrees and emits a destination only if the current
@@ -148,6 +152,8 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
             no_rebase,
             no_remove,
             cleanup_pending: false,
+            validated_source: None,
+            validated_target: None,
         };
         write_journal(&repository.common_dir, &state)?;
         journal = Some(state);
@@ -165,24 +171,34 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
         git::rebase_onto(&repository.current().path, &target)?;
     }
     let refreshed = git::head_commit(&repository.current().path)?;
-    let config = EffectiveConfig::load(&repository)?;
-    approve_hooks(&repository, HookPhase::PreMerge, &config.pre_merge)?;
-    run_hooks(
-        HookPhase::PreMerge,
-        &config.pre_merge,
-        &repository.current().path,
-    )?;
-    if git::is_dirty(&repository.current().path)? {
-        bail!("pre-merge hooks left the topic worktree dirty; restore cleanliness before retrying");
-    }
-    if git::head_commit(&repository.current().path)? != refreshed {
-        return merge(no_rebase, no_remove);
+    let target_commit = git::head_commit(primary)?;
+    let mut state = journal.context("lifecycle journal was not recorded before integration")?;
+    if state.validated_source.as_deref() != Some(&refreshed)
+        || state.validated_target.as_deref() != Some(&target_commit)
+    {
+        let config = EffectiveConfig::load(&repository)?;
+        approve_hooks(&repository, HookPhase::PreMerge, &config.pre_merge)?;
+        run_hooks(
+            HookPhase::PreMerge,
+            &config.pre_merge,
+            &repository.current().path,
+        )?;
+        if git::is_dirty(&repository.current().path)? {
+            bail!(
+                "pre-merge hooks left the topic worktree dirty; restore cleanliness before retrying"
+            );
+        }
+        if git::head_commit(&repository.current().path)? != refreshed {
+            return merge(no_rebase, no_remove);
+        }
+        state.validated_source = Some(refreshed.clone());
+        state.validated_target = Some(target_commit);
+        write_journal(&repository.common_dir, &state)?;
     }
     if !git::is_ancestor(&repository.current().path, &target, &refreshed)? {
         bail!("the target advanced during validation; rerun merge to revalidate the new candidate");
     }
     git::merge_ff_only(primary, &source)?;
-    let mut state = journal.context("lifecycle journal was not recorded before integration")?;
     if state.no_remove {
         remove_journal(&repository.common_dir, &state.topic_identity)?;
         return Ok(());
