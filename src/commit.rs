@@ -85,7 +85,7 @@ pub fn run(message: Option<String>) -> Result<()> {
             return Err(error);
         }
     };
-    commit_with_feedback(&repository, &generated, "Generated commit message")
+    commit_with_feedback(&repository, &generated, "Generated commit message:")
 }
 
 fn commit_with_feedback(repository: &Repository, message: &str, status: &str) -> Result<()> {
@@ -120,7 +120,11 @@ fn stage_changes(repository: &Repository) -> Result<()> {
     git::stage_all(&repository.current().path)?;
     ensure_changes(repository)?;
     let diffstat = git::staged_diff_stat(&repository.current().path)?;
-    ui::info(format!("Staged changes:\n{}", colorize_diffstat(&diffstat)))
+    ui::info(format!(
+        "{}\n{}",
+        style("Staged changes:").green().bold(),
+        colorize_diffstat(&diffstat)
+    ))
 }
 
 fn colorize_diffstat(diffstat: &str) -> String {
