@@ -98,7 +98,7 @@ fn commit_with_feedback(repository: &Repository, message: &str, status: &str) ->
     ui::finish(format!(
         "{} {}",
         style("Committed changes @").green().bold(),
-        style(hash).color256(22)
+        style(hash).color256(244)
     ))
 }
 
