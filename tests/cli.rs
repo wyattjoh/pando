@@ -1792,6 +1792,15 @@ fn commit_with_explicit_message_stages_all_change_kinds() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("feat: commit every change"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Staged changes:"), "{stderr}");
+    assert!(stderr.contains("README.md"), "{stderr}");
+    assert!(stderr.contains("added.txt"), "{stderr}");
+    assert!(stderr.contains("deleted.txt"), "{stderr}");
+    assert!(
+        stderr.contains("insertions(+)") && stderr.contains("deletions(-)"),
+        "{stderr}"
+    );
     let subject = Command::new("git")
         .args(["log", "-1", "--format=%s"])
         .current_dir(&repo.main)

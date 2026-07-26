@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use cliclack::confirm;
+use cliclack::{confirm, spinner};
 use minijinja::{Environment, context};
 
 use crate::{
@@ -44,9 +44,7 @@ pub fn run(message: Option<String>) -> Result<()> {
     let repository = git::repository(&cwd)?;
     ensure_worktree(&repository)?;
     if let Some(message) = message {
-        ui::info("Staging changes…")?;
-        git::stage_all(&repository.current().path)?;
-        ensure_changes(&repository)?;
+        stage_changes(&repository)?;
         return git::commit(&repository.current().path, &message);
     }
 
@@ -62,12 +60,30 @@ pub fn run(message: Option<String>) -> Result<()> {
     validate_template(template)?;
     approve_shared_generation(&repository, &config)?;
 
-    ui::info("Staging changes…")?;
-    git::stage_all(&repository.current().path)?;
-    ensure_changes(&repository)?;
+    stage_changes(&repository)?;
     let prompt = render_prompt(&repository, template)?;
-    ui::info("Generating commit message…")?;
-    let generated = run_generator(&repository, &command.value, &prompt)?;
+    let spinner = io::stderr().is_terminal().then(|| {
+        let spinner = spinner().with_template("{msg} [{elapsed_precise}]");
+        spinner.start("Generating commit message…");
+        spinner
+    });
+    if spinner.is_none() {
+        ui::info("Generating commit message…")?;
+    }
+    let generated = match run_generator(&repository, &command.value, &prompt) {
+        Ok(generated) => {
+            if let Some(spinner) = &spinner {
+                spinner.stop("Generated commit message");
+            }
+            generated
+        }
+        Err(error) => {
+            if let Some(spinner) = &spinner {
+                spinner.error("Failed to generate commit message");
+            }
+            return Err(error);
+        }
+    };
     git::commit(&repository.current().path, &generated)
 }
 
@@ -76,6 +92,16 @@ fn ensure_worktree(repository: &Repository) -> Result<()> {
         bail!("the current repository is bare; commit requires a worktree");
     }
     Ok(())
+}
+
+fn stage_changes(repository: &Repository) -> Result<()> {
+    ui::info("Staging changes…")?;
+    git::stage_all(&repository.current().path)?;
+    ensure_changes(repository)?;
+    ui::step(format!(
+        "Staged changes:\n{}",
+        git::staged_diff_stat(&repository.current().path)?
+    ))
 }
 
 fn ensure_changes(repository: &Repository) -> Result<()> {
