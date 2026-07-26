@@ -169,19 +169,19 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
         .iter()
         .position(|worktree| worktree.current)
         .unwrap_or(0);
-    let mut prompt = select("Choose a worktree")
-        .initial_value(default)
-        .max_rows(20);
-    for (index, label) in labels.iter().enumerate() {
-        prompt = prompt.item(index, label, "");
-    }
-    let selection = prompt_result(
-        prompt.interact(),
+    let selection: String = prompt_result(
+        input("Choose a worktree")
+            .default_input(&labels[default])
+            .autocomplete(labels.clone())
+            .interact(),
         "selection cancelled",
         "failed to read worktree selection from the terminal",
     )?;
-    if selection < choices.len() {
-        let chosen = choices[selection];
+    if let Some(index) = labels[..choices.len()]
+        .iter()
+        .position(|label| label == &selection)
+    {
+        let chosen = choices[index];
         let branch = match &chosen.kind {
             WorktreeKind::Branch(branch) => Some(branch.as_str()),
             _ => None,
@@ -189,6 +189,9 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
         return enter_existing(repository, &chosen.path, branch);
     }
 
+    if selection != *labels.last().expect("branch action was added") {
+        bail!("choose a worktree or the branch creation action from the suggestions");
+    }
     let branch = read_branch_name()?;
     resolve_and_switch(repository, &branch)
 }
