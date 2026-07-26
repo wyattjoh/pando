@@ -1,6 +1,10 @@
+pub mod config;
 pub mod git;
 pub mod install;
 pub mod render;
+pub mod setup;
+pub mod smart;
+pub mod trust;
 
 use std::path::PathBuf;
 
