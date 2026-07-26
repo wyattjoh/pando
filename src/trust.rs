@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     config::{self, HookStep},
     git::Repository,
+    hash,
 };
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -32,7 +33,7 @@ pub fn command_hash(steps: &[HookStep]) -> String {
         digest.update((bytes.len() as u64).to_be_bytes());
         digest.update(bytes);
     }
-    format!("{:x}", digest.finalize())
+    hash::encode_hex(&digest.finalize())
 }
 
 /// Reports whether the current ordered commands are trusted for this clone.
