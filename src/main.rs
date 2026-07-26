@@ -2,7 +2,6 @@ use std::env;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use console::style;
 use worktrees::{
     commit, git, install, render,
     smart::{self, GetProperty, TrustCommand},
@@ -74,11 +73,11 @@ fn run() -> Result<()> {
         Commands::List => list(),
         Commands::Switch { branch } => {
             smart::switch(branch)?;
-            ui::finish(style("Worktree destination printed.").green().bold())
+            ui::finish(ui::success_style().apply_to("Worktree destination printed."))
         }
         Commands::Get { property } => {
             smart::get(property)?;
-            ui::finish(style(format!("{property:?} printed.")).dim())
+            ui::finish(ui::muted_style().apply_to(format!("{property:?} printed.")))
         }
         Commands::Commit { message } => commit::run(message),
         Commands::Remove { force, branches } => worktrees::lifecycle::remove(&branches, force),
@@ -94,7 +93,7 @@ fn run() -> Result<()> {
                 TrustCommand::CommitStatus => "Commit generator trust status checked.",
                 TrustCommand::CommitReset => "Commit generator trust reset checked.",
             };
-            ui::finish(style(summary).dim())
+            ui::finish(ui::muted_style().apply_to(summary))
         }
         Commands::Install => install::run(),
     }
@@ -105,7 +104,7 @@ fn list() -> Result<()> {
     let worktrees = git::discover(&cwd)?;
     ui::info(format!(
         "{}\n{}",
-        ui::header_style().apply_to("Worktrees"),
+        ui::heading_style().apply_to("Worktrees"),
         render::table(&worktrees)
     ))?;
     ui::finish(list_summary(&worktrees))
@@ -174,7 +173,7 @@ fn list_summary(worktrees: &[worktrees::Worktree]) -> String {
             summary.push(format!("{count} {label}"));
         }
     }
-    style(summary.join(", ")).dim().to_string()
+    ui::muted_style().apply_to(summary.join(", ")).to_string()
 }
 
 const fn plural(count: usize) -> &'static str {

@@ -8,7 +8,6 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use cliclack::{confirm, spinner};
-use console::style;
 use minijinja::{Environment, context};
 
 use crate::{
@@ -66,12 +65,14 @@ pub fn run(message: Option<String>) -> Result<()> {
     let prompt = render_prompt(&repository, template)?;
     let generation_started = Instant::now();
     let spinner = io::stderr().is_terminal().then(|| {
-        let spinner = spinner().with_template("{msg} \x1b[38;5;244m{elapsed}\x1b[0m");
-        spinner.start(style("Generating commit message...").green().bold());
+        let elapsed = ui::muted_style().apply_to("{elapsed}");
+        let template = format!("{{msg}} {elapsed}");
+        let spinner = spinner().with_template(&template);
+        spinner.start(ui::heading_style().apply_to("Generating commit message..."));
         spinner
     });
     if spinner.is_none() {
-        ui::info(style("Generating commit message...").green().bold())?;
+        ui::info(ui::heading_style().apply_to("Generating commit message..."))?;
     }
     let generated = match run_generator(&repository, &command.value, &prompt) {
         Ok(generated) => {
@@ -109,13 +110,13 @@ fn commit_with_feedback(
     let hash = hash.get(..7).unwrap_or(&hash);
     ui::finish(format!(
         "{} {}",
-        style("Committed changes @").green().bold(),
-        style(hash).color256(244)
+        ui::success_style().apply_to("Committed changes @"),
+        ui::muted_style().apply_to(hash)
     ))
 }
 
 fn render_commit_status(status: &str, elapsed: Option<Duration>) -> String {
-    let status = style(status).green().bold();
+    let status = ui::heading_style().apply_to(status);
     match elapsed {
         Some(elapsed) => format!("{status} {}", muted_elapsed(elapsed)),
         None => status.to_string(),
@@ -123,13 +124,19 @@ fn render_commit_status(status: &str, elapsed: Option<Duration>) -> String {
 }
 
 fn muted_elapsed(elapsed: Duration) -> impl std::fmt::Display {
-    style(format!("{}s", elapsed.as_secs())).color256(244)
+    ui::muted_style().apply_to(format!("{}s", elapsed.as_secs()))
 }
 
 fn render_commit_message(message: &str) -> String {
     match message.split_once('\n') {
-        Some((subject, body)) => format!("{}\n{body}", style(subject).cyan().bold()),
-        None => style(message).cyan().bold().to_string(),
+        Some((subject, body)) => format!(
+            "{}\n{body}",
+            ui::worktree_data_style().bold().apply_to(subject)
+        ),
+        None => ui::worktree_data_style()
+            .bold()
+            .apply_to(message)
+            .to_string(),
     }
 }
 
@@ -146,7 +153,7 @@ fn stage_changes(repository: &Repository) -> Result<()> {
     let diffstat = git::staged_diff_stat(&repository.current().path)?;
     ui::info(format!(
         "{}\n{}",
-        style("Staged changes:").green().bold(),
+        ui::heading_style().apply_to("Staged changes:"),
         colorize_diffstat(&diffstat)
     ))
 }
@@ -155,8 +162,10 @@ fn colorize_diffstat(diffstat: &str) -> String {
     trim_git_margin(diffstat)
         .lines()
         .map(|line| match line.split_once(" | ") {
-            Some((path, stat)) => format!("{} | {stat}", style(path).cyan()),
-            None => style(line).dim().to_string(),
+            Some((path, stat)) => {
+                format!("{} | {stat}", ui::worktree_data_style().apply_to(path))
+            }
+            None => ui::muted_style().apply_to(line).to_string(),
         })
         .collect::<Vec<_>>()
         .join("\n")
