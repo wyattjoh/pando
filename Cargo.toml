@@ -10,6 +10,7 @@ rust-version = "1.85"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+cliclack = "0.5.5"
 console = "0.16"
 dialoguer = "0.12"
 minijinja = "2.10"
