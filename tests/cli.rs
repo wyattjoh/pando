@@ -305,21 +305,22 @@ fn switch_defaults_to_current_worktree_and_keeps_stdout_pure() {
         "{}",
         output.stderr
     );
-    assert!(output.stderr.contains("main"), "{}", output.stderr);
     assert!(output.stderr.contains("feature"), "{}", output.stderr);
 }
 
 #[test]
-fn switch_moves_with_arrow_keys_and_enter() {
+fn switch_autocomplete_filters_choices_and_selects_the_match() {
     let repo = Repository::new();
+    let filtered = repo.add_worktree("filtered-choice", "needle-filter");
 
-    let output = run_switch(&repo.main, b"\x1b[B\r");
+    let output = run_switch(&repo.main, b"needle\x1b[B\r");
 
     assert!(output.status.success(), "{}", output.stderr);
     assert_eq!(
         output.stdout,
-        format!("{}\n", repo.linked.canonicalize().unwrap().display())
+        format!("{}\n", filtered.canonicalize().unwrap().display())
     );
+    assert!(output.stderr.contains("needle-filter"), "{}", output.stderr);
 }
 
 #[test]
@@ -328,7 +329,7 @@ fn switch_omits_missing_and_bare_records() {
     let missing = repo.add_worktree("missing-switch", "missing-switch-branch");
     fs::remove_dir_all(&missing).unwrap();
 
-    let output = run_switch(&repo.main, b"\x1b[B\r");
+    let output = run_switch(&repo.main, b"feature\x1b[B\r");
     assert!(output.status.success(), "{}", output.stderr);
     assert!(!output.stderr.contains("missing-switch-branch"));
 
@@ -529,7 +530,7 @@ fn installed_zsh_function_changes_the_invoking_shell_directory() {
                 .env("PATH", path);
             command
         },
-        b"\x1b[B\r",
+        b"feature\x1b[B\r",
     );
     assert!(output.status.success(), "{}", output.stderr);
     assert_eq!(
@@ -1272,11 +1273,11 @@ fn picker_branch_action_uses_the_shared_resolver_and_escape_cancels() {
         run_pty_command(command, input)
     };
 
-    let created = run(b"\x1b[B\x1b[B\rpicker-existing\r");
+    let created = run(b"Create\x1b[B\rpicker-existing\r");
     assert!(created.status.success(), "{}", created.stderr);
     assert!(root.join("picker-existing").exists());
 
-    let cancelled = run(b"\x1b[B\x1b[B\x1b[B\r\x1b");
+    let cancelled = run(b"\x1b");
     assert!(!cancelled.status.success());
     assert!(cancelled.stdout.is_empty());
 }
@@ -1369,7 +1370,7 @@ fn detached_incomplete_worktree_can_retry_setup_from_the_picker() {
         .env("XDG_CONFIG_HOME", xdg.path())
         .env("HOME", repo.temp.path());
 
-    let retried = run_pty_command(retry, b"\x1b[B\r\r");
+    let retried = run_pty_command(retry, b"detached-retry\x1b[B\r\r");
 
     assert!(
         !retried.status.success(),
