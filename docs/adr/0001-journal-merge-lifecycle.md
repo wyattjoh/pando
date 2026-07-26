@@ -1,0 +1,3 @@
+# Journal the merge lifecycle
+
+`worktrees merge` is a crash-recoverable, multi-invocation operation. Before its first Git mutation it records the topic worktree and branch, the configured target branch, and the initial rebase and cleanup policies under Git’s common state directory; later invocations resume only that matching operation, keep its target and policies pinned, and can continue through rebase conflicts or retry cleanup after integration. This repository-owned journal was chosen over blindly resuming any Git rebase or requiring users to complete the whole pipeline manually because Worktrees must distinguish its own operation while preserving a predictable shell destination and cleanup outcome.
