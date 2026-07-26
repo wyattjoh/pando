@@ -14,7 +14,6 @@ use crate::{
     WorktreeKind,
     config::{EffectiveConfig, HookPhase, HookStep},
     git::{self, Repository},
-    render,
     setup::{self, HookOutcome},
     trust,
 };
@@ -163,25 +162,26 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
     if choices.is_empty() {
         bail!("the current repository has no navigable worktrees");
     }
-    let mut labels = render::menu_labels(&choices);
-    labels.push("Create or switch branch…".to_owned());
     let default = choices
         .iter()
         .position(|worktree| worktree.current)
         .unwrap_or(0);
-    let selection: String = prompt_result(
-        input("Choose a worktree")
-            .default_input(&labels[default])
-            .autocomplete(labels.clone())
-            .interact(),
+    let mut prompt = select("Choose a worktree")
+        .initial_value(default)
+        .filter_mode()
+        .max_rows(20);
+    for (index, worktree) in choices.iter().enumerate() {
+        prompt = prompt.item(index, worktree.branch_label(), picker_hint(worktree));
+    }
+    let branch_action = choices.len();
+    prompt = prompt.item(branch_action, "Create or switch branch…", "");
+    let selection = prompt_result(
+        prompt.interact(),
         "selection cancelled",
         "failed to read worktree selection from the terminal",
     )?;
-    if let Some(index) = labels[..choices.len()]
-        .iter()
-        .position(|label| label == &selection)
-    {
-        let chosen = choices[index];
+    if selection < choices.len() {
+        let chosen = choices[selection];
         let branch = match &chosen.kind {
             WorktreeKind::Branch(branch) => Some(branch.as_str()),
             _ => None,
@@ -189,11 +189,18 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
         return enter_existing(repository, &chosen.path, branch);
     }
 
-    if selection != *labels.last().expect("branch action was added") {
-        bail!("choose a worktree or the branch creation action from the suggestions");
-    }
+    debug_assert_eq!(selection, branch_action);
     let branch = read_branch_name()?;
     resolve_and_switch(repository, &branch)
+}
+
+fn picker_hint(worktree: &crate::Worktree) -> String {
+    let state = worktree.state_label();
+    match (worktree.current, state.is_empty()) {
+        (true, true) => "current".to_owned(),
+        (true, false) => format!("current, {state}"),
+        (false, _) => state,
+    }
 }
 
 fn read_branch_name() -> Result<String> {
