@@ -78,20 +78,21 @@ fn list_shows_current_repository_worktrees_from_nested_directory() {
     let output = command.arg("list").current_dir(&nested).output().unwrap();
 
     assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.lines().next().unwrap().contains("BRANCH"));
-    assert!(stdout.lines().next().unwrap().contains("STATE"));
-    assert!(stdout.lines().next().unwrap().contains("PATH"));
-    assert!(stdout.contains("* main"));
-    assert!(stdout.contains(repo.main.to_str().unwrap()));
-    assert!(stdout.contains("feature"));
-    assert!(stdout.contains(repo.linked.to_str().unwrap()));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("BRANCH"));
+    assert!(stderr.contains("STATE"));
+    assert!(stderr.contains("PATH"));
+    assert!(stderr.contains("* main"));
+    assert!(stderr.contains(repo.main.to_str().unwrap()));
+    assert!(stderr.contains("feature"));
+    assert!(stderr.contains(repo.linked.to_str().unwrap()));
     assert!(
-        stdout.find(repo.main.to_str().unwrap()).unwrap()
-            < stdout.find(repo.linked.to_str().unwrap()).unwrap(),
-        "{stdout}"
+        stderr.find(repo.main.to_str().unwrap()).unwrap()
+            < stderr.find(repo.linked.to_str().unwrap()).unwrap(),
+        "{stderr}"
     );
-    assert!(!stdout.contains("clean"));
+    assert!(!stderr.contains("clean"));
 }
 
 #[test]
@@ -106,13 +107,9 @@ fn current_worktree_paths_with_trailing_spaces_are_marked_and_defaulted() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout
-            .lines()
-            .any(|line| line.starts_with("* trailing-branch")),
-        "{stdout}"
-    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("* trailing-branch"), "{stderr}");
 
     let switched = run_switch(&trailing, b"\r");
     assert!(switched.status.success(), "{}", switched.stderr);
@@ -139,8 +136,9 @@ fn list_labels_staged_unstaged_and_untracked_changes_dirty() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(stdout.matches("dirty").count(), 3, "{stdout}");
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.matches("dirty").count(), 3, "{stderr}");
 }
 
 #[test]
@@ -182,11 +180,12 @@ fn list_preserves_detached_locked_prunable_and_bare_records() {
         .current_dir(&repo.main)
         .output()
         .unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("(detached)"), "{stdout}");
-    assert!(stdout.contains("locked: maintenance"), "{stdout}");
-    assert!(stdout.contains("missing"), "{stdout}");
-    assert!(stdout.contains("prunable"), "{stdout}");
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("(detached)"), "{stderr}");
+    assert!(stderr.contains("locked: maintenance"), "{stderr}");
+    assert!(stderr.contains("missing"), "{stderr}");
+    assert!(stderr.contains("prunable"), "{stderr}");
 
     let bare_output = Command::cargo_bin("worktrees")
         .unwrap()
@@ -194,9 +193,10 @@ fn list_preserves_detached_locked_prunable_and_bare_records() {
         .current_dir(&bare_linked)
         .output()
         .unwrap();
-    let bare_stdout = String::from_utf8(bare_output.stdout).unwrap();
-    assert!(bare_stdout.contains("(bare)"), "{bare_stdout}");
-    assert!(bare_stdout.contains("bare"), "{bare_stdout}");
+    assert!(bare_output.stdout.is_empty());
+    let bare_stderr = String::from_utf8(bare_output.stderr).unwrap();
+    assert!(bare_stderr.contains("(bare)"), "{bare_stderr}");
+    assert!(bare_stderr.contains("bare"), "{bare_stderr}");
 }
 
 #[test]
@@ -226,8 +226,9 @@ fn inaccessible_worktrees_are_labeled_and_not_selectable_when_permissions_allow(
     fs::set_permissions(&repo.linked, original_permissions).unwrap();
 
     assert!(listed.status.success());
-    let stdout = String::from_utf8(listed.stdout).unwrap();
-    assert!(stdout.contains("inaccessible"), "{stdout}");
+    assert!(listed.stdout.is_empty());
+    let stderr = String::from_utf8(listed.stderr).unwrap();
+    assert!(stderr.contains("inaccessible"), "{stderr}");
     assert!(switched.status.success(), "{}", switched.stderr);
     assert!(!switched.stderr.contains("feature"), "{}", switched.stderr);
 }
@@ -255,8 +256,9 @@ fn list_reports_unknown_when_git_status_fails() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(stdout.matches("unknown").count(), 2, "{stdout}");
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.matches("unknown").count(), 2, "{stderr}");
 }
 
 #[test]
@@ -419,7 +421,8 @@ fn install_decline_makes_no_filesystem_changes() {
 
     let output = run_install(home.path(), xdg.path(), Some(zdot.path()), b"n\r");
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.contains("cancelled"), "{}", output.stdout);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.contains("cancelled"), "{}", output.stderr);
 
     assert_eq!(fs::read(&zshrc).unwrap(), b"export KEEP=yes\n");
     assert!(!xdg.path().join("worktrees/worktrees.zsh").exists());
@@ -436,10 +439,11 @@ fn install_preserves_zshrc_and_is_idempotent() {
 
     let installed = run_install(home.path(), xdg.path(), Some(zdot.path()), b"y\r");
     assert!(installed.status.success(), "{}", installed.stderr);
+    assert!(installed.stdout.is_empty());
     assert!(
-        installed.stdout.contains("Installed zsh integration"),
+        installed.stderr.contains("Installed zsh integration"),
         "{}",
-        installed.stdout
+        installed.stderr
     );
 
     let integration = xdg.path().join("worktrees/worktrees.zsh");
@@ -464,8 +468,9 @@ fn install_preserves_zshrc_and_is_idempotent() {
         .output()
         .unwrap();
     assert!(current.status.success());
+    assert!(current.stdout.is_empty());
     assert!(
-        String::from_utf8(current.stdout)
+        String::from_utf8(current.stderr)
             .unwrap()
             .contains("already current")
     );
@@ -1602,8 +1607,9 @@ fn trust_status_reset_and_reapproval_follow_the_current_command_hash() {
             .unwrap()
     };
     let untrusted = command(&["trust", "status"]);
+    assert!(untrusted.stdout.is_empty());
     assert!(
-        String::from_utf8(untrusted.stdout)
+        String::from_utf8(untrusted.stderr)
             .unwrap()
             .contains("not trusted")
     );
@@ -1616,17 +1622,20 @@ fn trust_status_reset_and_reapproval_follow_the_current_command_hash() {
         .env("HOME", repo.temp.path());
     assert!(run_pty_command(approve, b"y\r").status.success());
     let trusted = command(&["trust", "status"]);
+    assert!(trusted.stdout.is_empty());
     assert!(
-        String::from_utf8(trusted.stdout)
+        String::from_utf8(trusted.stderr)
             .unwrap()
             .contains("are trusted")
     );
 
     let reset = command(&["trust", "reset"]);
-    assert!(String::from_utf8(reset.stdout).unwrap().contains("Reset"));
+    assert!(reset.stdout.is_empty());
+    assert!(String::from_utf8(reset.stderr).unwrap().contains("Reset"));
     let reset_again = command(&["trust", "reset"]);
+    assert!(reset_again.stdout.is_empty());
     assert!(
-        String::from_utf8(reset_again.stdout)
+        String::from_utf8(reset_again.stderr)
             .unwrap()
             .contains("No saved")
     );

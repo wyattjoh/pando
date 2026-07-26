@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use worktrees::{
     commit, git, install, render,
     smart::{self, GetProperty, TrustCommand},
+    ui,
 };
 
 #[derive(Debug, Parser)]
@@ -58,7 +59,10 @@ enum Commands {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("error: {error:#}");
+        let message = format!("error: {error:#}");
+        if ui::error(&message).is_err() {
+            eprintln!("{message}");
+        }
         std::process::exit(1);
     }
 }
@@ -82,6 +86,5 @@ fn run() -> Result<()> {
 fn list() -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let worktrees = git::discover(&cwd)?;
-    print!("{}", render::table(&worktrees));
-    Ok(())
+    ui::info(format!("Worktrees\n{}", render::table(&worktrees)))
 }

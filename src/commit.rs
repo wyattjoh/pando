@@ -6,13 +6,14 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use cliclack::confirm;
 use minijinja::{Environment, context};
 
 use crate::{
     WorktreeKind,
     config::{EffectiveConfig, GenerationSource},
     git::{self, Repository},
-    trust,
+    trust, ui,
 };
 
 const BUILTIN_TEMPLATE: &str = r"Write a factual conventional commit message for this staged change.
@@ -43,7 +44,7 @@ pub fn run(message: Option<String>) -> Result<()> {
     let repository = git::repository(&cwd)?;
     ensure_worktree(&repository)?;
     if let Some(message) = message {
-        eprintln!("Staging changes…");
+        ui::info("Staging changes…")?;
         git::stage_all(&repository.current().path)?;
         ensure_changes(&repository)?;
         return git::commit(&repository.current().path, &message);
@@ -61,11 +62,11 @@ pub fn run(message: Option<String>) -> Result<()> {
     validate_template(template)?;
     approve_shared_generation(&repository, &config)?;
 
-    eprintln!("Staging changes…");
+    ui::info("Staging changes…")?;
     git::stage_all(&repository.current().path)?;
     ensure_changes(&repository)?;
     let prompt = render_prompt(&repository, template)?;
-    eprintln!("Generating commit message…");
+    ui::info("Generating commit message…")?;
     let generated = run_generator(&repository, &command.value, &prompt)?;
     git::commit(&repository.current().path, &generated)
 }
@@ -184,20 +185,19 @@ fn approve_shared_generation(repository: &Repository, config: &EffectiveConfig) 
             "shared commit generation settings require approval, but no interactive terminal is available"
         );
     }
-    eprintln!("The repository requests these commit generation settings:");
+    ui::info("The repository requests these commit generation settings:")?;
     if let Some(value) = &config.generation.command
         && value.source == GenerationSource::Shared
     {
-        eprintln!("  command: {}", value.value);
+        ui::step(format!("command: {}", value.value))?;
     }
     if let Some(value) = &config.generation.template
         && value.source == GenerationSource::Shared
     {
-        eprintln!("  template:\n{}", value.value);
+        ui::step(format!("template:\n{}", value.value))?;
     }
-    let approved = dialoguer::Confirm::new()
-        .with_prompt("Trust these settings for this repository?")
-        .default(false)
+    let approved = confirm("Trust these settings for this repository?")
+        .initial_value(false)
         .interact()
         .context("failed to read commit generator approval")?;
     if !approved {
