@@ -132,6 +132,68 @@ A later switch to that worktree offers:
 
 If the current effective hook list is empty, an obsolete record is cleared automatically.
 
+## Committing
+
+Stage every tracked, deleted, and untracked change and commit it directly when the message is known:
+
+```sh
+worktrees commit -m "feat: add commit support"
+worktrees commit --message "fix: preserve staged changes"
+```
+
+Without a message, `worktrees commit` renders the staged snapshot into a MiniJinja prompt and sends it on stdin to a configured generator. Its stdout becomes the complete commit message; its stderr remains visible. The generator runs from the worktree root through `/bin/sh -c`. Git's normal commit output, hooks, signing, and failures are forwarded unchanged. A generator failure leaves the all-changes snapshot staged for inspection or retry.
+
+Configure a personal generator globally:
+
+```yaml
+# ${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml
+commit:
+  generation:
+    command: pi --no-session --no-tools
+```
+
+A committed `.worktrees.yaml` and ignored `.worktrees.local.yaml` can each also contribute `commit.generation.command` and `commit.generation.template`:
+
+```yaml
+# .worktrees.yaml (committed; requires approval if it wins)
+commit:
+  generation:
+    template: "Use this repository's established commit style."
+```
+
+```yaml
+# .worktrees.local.yaml (Git-ignored)
+commit:
+  generation:
+    command: my-local-generator
+```
+
+Command and template resolve independently: local, then shared, then global. A local file must remain Git-ignored as described above.
+
+The optional template has MiniJinja variables `git_diff`, `git_diff_stat`, `branch`, `repo`, and `recent_commits` (up to ten newest subjects):
+
+```yaml
+commit:
+  generation:
+    template: |
+      Repository: {{ repo }}
+      Branch: {{ branch }}
+      {% for subject in recent_commits %}- {{ subject }}
+      {% endfor %}
+      {{ git_diff }}
+```
+
+When no template is configured, the built-in prompt requests a factual imperative conventional-commit subject under 50 characters, a blank line, and at least two concrete bullets. Empty generation values and invalid YAML or templates fail before staging.
+
+Committed shared generator fields are untrusted executable code or model instructions. Before staging, the CLI displays only the effective shared fields and asks for default-negative, per-clone approval; there is no noninteractive bypass. User-controlled global/local values require no approval. Manage this separately from post-create-hook trust:
+
+```sh
+worktrees trust commit-status
+worktrees trust commit-reset
+```
+
+`commit-reset` is idempotent and does not alter post-create approval. Supplying `-m`/`--message` bypasses all generator configuration, template validation, and generator trust.
+
 ## Context queries
 
 Every successful `get` command writes exactly one value and a newline:

@@ -1730,3 +1730,166 @@ fn find_executable(name: &str) -> PathBuf {
     assert!(output.status.success());
     PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
 }
+
+#[test]
+fn commit_with_explicit_message_stages_all_change_kinds() {
+    let repo = Repository::new();
+    fs::write(repo.main.join("README.md"), "updated\n").unwrap();
+    fs::write(repo.main.join("added.txt"), "added\n").unwrap();
+    fs::write(repo.main.join("deleted.txt"), "delete me\n").unwrap();
+    git(&repo.main, ["add", "deleted.txt"]);
+    git(&repo.main, ["commit", "-m", "add deletable file"]);
+    fs::remove_file(repo.main.join("deleted.txt")).unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["commit", "-m", "feat: commit every change"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("feat: commit every change"));
+    let subject = Command::new("git")
+        .args(["log", "-1", "--format=%s"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(subject.stdout).unwrap().trim(),
+        "feat: commit every change"
+    );
+    let changed = Command::new("git")
+        .args(["show", "--format=", "--name-only", "HEAD"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    let changed = String::from_utf8(changed.stdout).unwrap();
+    assert!(
+        changed.contains("README.md")
+            && changed.contains("added.txt")
+            && changed.contains("deleted.txt")
+    );
+}
+
+#[test]
+fn commit_generates_message_from_global_configuration() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        "commit:\n  generation:\n    command: \"printf 'feat: generated\\n\\n- first change\\n- second change\\n'\"\n",
+    ).unwrap();
+    fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .arg("commit")
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let message = Command::new("git")
+        .args(["log", "-1", "--format=%B"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(message.stdout).unwrap(),
+        "feat: generated\n\n- first change\n- second change\n\n"
+    );
+}
+
+#[test]
+fn commit_generator_trust_commands_distinguish_absent_and_user_controlled_settings() {
+    let repo = Repository::new();
+    let absent = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["trust", "commit-status"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    assert!(absent.status.success());
+    assert_eq!(
+        String::from_utf8(absent.stdout).unwrap(),
+        "No commit generator is configured.\n"
+    );
+
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        "commit:\n  generation:\n    command: printf\n",
+    )
+    .unwrap();
+    let controlled = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["trust", "commit-status"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(controlled.status.success());
+    assert_eq!(
+        String::from_utf8(controlled.stdout).unwrap(),
+        "The effective commit generator is user-controlled.\n"
+    );
+
+    let reset = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["trust", "commit-reset"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(reset.status.success());
+    assert_eq!(
+        String::from_utf8(reset.stdout).unwrap(),
+        "No saved commit generator trust existed for this repository.\n"
+    );
+}
+
+#[test]
+fn commit_renders_custom_template_with_staged_context() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let captured = xdg.path().join("prompt.txt");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        "commit:\n  generation:\n    command: 'cat > \"$CAPTURE\"; printf \"chore: generated\\n\\n- one\\n- two\\n\"'\n    template: |\n      repo={{ repo }} branch={{ branch }}\n      {% for subject in recent_commits %}history={{ subject }}\n      {% endfor %}{{ git_diff_stat }}\n      {{ git_diff }}\n",
+    ).unwrap();
+    fs::write(repo.main.join("custom.txt"), "content\n").unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .arg("commit")
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("CAPTURE", &captured)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let prompt = fs::read_to_string(captured).unwrap();
+    assert!(prompt.contains("repo=main branch=main"), "{prompt}");
+    assert!(
+        prompt.contains("history=initial") && prompt.contains("custom.txt"),
+        "{prompt}"
+    );
+}

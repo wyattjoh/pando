@@ -35,6 +35,10 @@ pub enum TrustCommand {
     Status,
     /// Revoke post-create approval for this repository clone.
     Reset,
+    /// Show approval state for the effective commit generator settings.
+    CommitStatus,
+    /// Revoke commit-generator approval for this repository clone.
+    CommitReset,
 }
 
 /// Resolves, creates when needed, and emits a switch destination.
@@ -123,6 +127,25 @@ pub fn trust_command(command: TrustCommand) -> Result<()> {
                 println!("Reset post-create trust for this repository.");
             } else {
                 println!("No saved post-create trust existed for this repository.");
+            }
+        }
+        TrustCommand::CommitStatus => {
+            let config = EffectiveConfig::load(&repository)?;
+            if config.generation.command.is_none() {
+                println!("No commit generator is configured.");
+            } else if trust::generation_hash(&config.generation).is_none() {
+                println!("The effective commit generator is user-controlled.");
+            } else if trust::is_generation_trusted(&repository, &config.generation)? {
+                println!("The effective shared commit generator is trusted.");
+            } else {
+                println!("The effective shared commit generator is not trusted.");
+            }
+        }
+        TrustCommand::CommitReset => {
+            if trust::reset_generation(&repository)? {
+                println!("Reset commit generator trust for this repository.");
+            } else {
+                println!("No saved commit generator trust existed for this repository.");
             }
         }
     }

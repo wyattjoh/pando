@@ -3,7 +3,7 @@ use std::{
     fs,
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 use anyhow::{Context, Result, bail};
@@ -195,6 +195,118 @@ pub fn worktree_identity(cwd: &Path) -> Result<PathBuf> {
 pub fn head_commit(cwd: &Path) -> Result<String> {
     git_stdout(cwd, ["rev-parse", "--verify", "HEAD"])
         .context("failed to resolve the invoking worktree's HEAD")
+}
+
+/// Reports whether the invoking worktree has staged, unstaged, or untracked changes.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot inspect status.
+/// Stages every tracked and untracked change in the worktree.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot stage the worktree changes.
+pub fn stage_all(cwd: &Path) -> Result<()> {
+    let output = run_git(cwd, ["add", "--all"]).context("failed to start git add --all")?;
+    ensure_success(&output, "git add --all")
+}
+
+/// Reports whether the Git index contains changes relative to `HEAD`.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot inspect the index.
+pub fn has_staged_changes(cwd: &Path) -> Result<bool> {
+    let output = run_git(cwd, ["diff", "--cached", "--quiet"])
+        .context("failed to inspect staged changes")?;
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => bail!(
+            "git diff --cached --quiet failed: {}",
+            stderr_detail(&output)
+        ),
+    }
+}
+
+/// Returns stable staged patch output without colour or external diff commands.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot produce the staged diff.
+pub fn staged_diff(cwd: &Path) -> Result<String> {
+    git_stdout(
+        cwd,
+        [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--cached",
+        ],
+    )
+}
+
+/// Returns stable staged diff statistics.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot produce staged diff statistics.
+pub fn staged_diff_stat(cwd: &Path) -> Result<String> {
+    git_stdout(
+        cwd,
+        [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--cached",
+            "--stat",
+        ],
+    )
+}
+
+/// Returns up to ten reachable commit subjects, newest first.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot read commit history other than an unborn `HEAD`.
+pub fn recent_subjects(cwd: &Path) -> Result<Vec<String>> {
+    let output =
+        run_git(cwd, ["log", "-10", "--format=%s"]).context("failed to read recent commits")?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect());
+    }
+    let verify = run_git(cwd, ["rev-parse", "--verify", "HEAD"])?;
+    if !verify.status.success() {
+        return Ok(Vec::new());
+    }
+    bail!("git log failed: {}", stderr_detail(&output))
+}
+
+/// Commits using the supplied message while inheriting Git's output streams.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot create the commit.
+pub fn commit(cwd: &Path, message: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to start git commit")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("git commit failed with status {status}")
+    }
 }
 
 /// Reports whether the invoking worktree has staged, unstaged, or untracked changes.

@@ -29,7 +29,7 @@ struct RootConfig {
     root: PathBuf,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HooksConfig {
     #[serde(default, rename = "post-create")]
@@ -41,6 +41,24 @@ struct HooksConfig {
 struct GlobalConfig {
     #[serde(default)]
     worktrees: Option<RootConfig>,
+    #[serde(default)]
+    commit: Option<CommitConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommitConfig {
+    #[serde(default)]
+    generation: Option<GenerationConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GenerationConfig {
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    template: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -48,6 +66,8 @@ struct GlobalConfig {
 struct SharedConfig {
     #[serde(default)]
     hooks: Option<HooksConfig>,
+    #[serde(default)]
+    commit: Option<CommitConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -57,12 +77,34 @@ struct LocalConfig {
     worktrees: Option<RootConfig>,
     #[serde(default)]
     hooks: Option<HooksConfig>,
+    #[serde(default)]
+    commit: Option<CommitConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GenerationSource {
+    Global,
+    Shared,
+    Local,
+}
+
+#[derive(Clone, Debug)]
+pub struct GenerationValue {
+    pub value: String,
+    pub source: GenerationSource,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EffectiveGeneration {
+    pub command: Option<GenerationValue>,
+    pub template: Option<GenerationValue>,
 }
 
 #[derive(Clone, Debug)]
 pub struct EffectiveConfig {
     pub root: Option<PathBuf>,
     pub steps: Vec<HookStep>,
+    pub generation: EffectiveGeneration,
 }
 
 impl EffectiveConfig {
@@ -77,8 +119,10 @@ impl EffectiveConfig {
 
         let shared_path = repository.current().path.join(".worktrees.yaml");
         let shared: SharedConfig = read_yaml_optional(&shared_path)?;
-        let shared_steps = shared.hooks.unwrap_or_default().post_create;
+        let shared_steps = shared.hooks.clone().unwrap_or_default().post_create;
         validate_steps(&shared_steps, &shared_path)?;
+        let shared_generation = shared.commit.and_then(|commit| commit.generation);
+        validate_generation(shared_generation.as_ref(), &shared_path)?;
 
         let local_path = repository
             .primary
@@ -101,6 +145,41 @@ impl EffectiveConfig {
             LocalConfig::default()
         };
 
+        let global_generation = global.commit.and_then(|commit| commit.generation);
+        validate_generation(global_generation.as_ref(), &global_path)?;
+        let local_generation = local
+            .commit
+            .as_ref()
+            .and_then(|commit| commit.generation.clone());
+        if let Some(path) = &local_path {
+            validate_generation(local_generation.as_ref(), path)?;
+        }
+
+        let generation = EffectiveGeneration {
+            command: resolve_generation_value(
+                local_generation
+                    .as_ref()
+                    .and_then(|value| value.command.clone()),
+                shared_generation
+                    .as_ref()
+                    .and_then(|value| value.command.clone()),
+                global_generation
+                    .as_ref()
+                    .and_then(|value| value.command.clone()),
+            ),
+            template: resolve_generation_value(
+                local_generation
+                    .as_ref()
+                    .and_then(|value| value.template.clone()),
+                shared_generation
+                    .as_ref()
+                    .and_then(|value| value.template.clone()),
+                global_generation
+                    .as_ref()
+                    .and_then(|value| value.template.clone()),
+            ),
+        };
+
         let configured_root = local
             .worktrees
             .map(|section| section.root)
@@ -115,7 +194,11 @@ impl EffectiveConfig {
         }
         let mut steps = shared_steps;
         steps.extend(local_steps);
-        Ok(Self { root, steps })
+        Ok(Self {
+            root,
+            steps,
+            generation,
+        })
     }
 
     /// Returns the configured, resolved worktree root.
@@ -128,6 +211,48 @@ impl EffectiveConfig {
             "no worktree root is configured; create ${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml with:\nworktrees:\n  root: ../worktrees",
         )
     }
+}
+
+fn validate_generation(generation: Option<&GenerationConfig>, source_hint: &Path) -> Result<()> {
+    let Some(generation) = generation else {
+        return Ok(());
+    };
+    for (name, value) in [
+        ("command", generation.command.as_deref()),
+        ("template", generation.template.as_deref()),
+    ] {
+        if value.is_some_and(|value| value.trim().is_empty()) {
+            bail!(
+                "commit.generation.{name} cannot be empty while loading configuration near {}",
+                source_hint.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn resolve_generation_value(
+    local: Option<String>,
+    shared: Option<String>,
+    global: Option<String>,
+) -> Option<GenerationValue> {
+    local
+        .map(|value| GenerationValue {
+            value,
+            source: GenerationSource::Local,
+        })
+        .or_else(|| {
+            shared.map(|value| GenerationValue {
+                value,
+                source: GenerationSource::Shared,
+            })
+        })
+        .or_else(|| {
+            global.map(|value| GenerationValue {
+                value,
+                source: GenerationSource::Global,
+            })
+        })
 }
 
 fn validate_steps(steps: &[HookStep], source_hint: &Path) -> Result<()> {
