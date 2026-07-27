@@ -1,0 +1,5 @@
+# Render typed command outcomes through human and JSON adapters
+
+Worktrees commands that support machine-readable operation return a typed command outcome before producing terminal output. The outcome separates mutually exclusive result and error values from shared repository context, effects, diagnostics, and recovery actions. Human Cliclack rendering and the versioned JSON envelope are adapters at this seam; they must not duplicate command planning or execution, and JSON must not be produced by capturing human-formatted text. Request and response JSON Schemas are derived from the same Rust types used at runtime.
+
+This shape makes command behavior the test surface, keeps human and agent semantics aligned, and lets JSON help accurately expose inputs, outputs, errors, and next steps. `commit` is the first adapter-backed command; globally requested JSON for commands not yet migrated returns a structured unsupported error rather than an untyped text wrapper. JSON mode is deterministic and noninteractive, while human adapters may resolve explicit confirmation requirements before executing the same typed plan.
