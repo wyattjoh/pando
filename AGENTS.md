@@ -78,3 +78,7 @@ Issues and specs are tracked as local markdown under `.scratch/<feature>/`. See 
 ### Domain docs
 
 This repository uses a single-context domain-doc layout. See `docs/agents/domain.md`.
+
+### CLI usage skill
+
+`skills/worktrees/` documents `worktrees`' own command surface, flags, config schema, and JSON contract for kickstarting usage (symlinked into `.claude/skills/worktrees` and `.agents/skills/worktrees`). Whenever a change touches the CLI's public surface, see `.claude/rules/cli-skill-sync.md` for which skill file to update alongside it.
