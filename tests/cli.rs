@@ -1038,6 +1038,55 @@ fn installed_zsh_function_changes_the_invoking_shell_directory() {
 }
 
 #[test]
+fn installed_zsh_function_passes_merge_help_through_without_changing_directory() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        eprintln!("skipping: zsh is not installed");
+        return;
+    }
+    let repo = Repository::new();
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let installed = run_install(home.path(), xdg.path(), None, b"y\r");
+    assert!(installed.status.success(), "{}", installed.stderr);
+    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let binary = PathBuf::from(
+        Command::cargo_bin("worktrees")
+            .unwrap()
+            .get_program()
+            .to_owned(),
+    );
+    let script = format!(
+        "source {}; before=$PWD; worktrees merge --help; rc=$?; [[ $PWD == $before ]] || exit 99; exit $rc",
+        shell_quote(&integration)
+    );
+    let path = format!(
+        "{}:{}",
+        binary.parent().unwrap().display(),
+        std::env::var("PATH").unwrap()
+    );
+
+    let output = run_pty_command(
+        {
+            let mut command = Command::new("zsh");
+            command
+                .args(["-f", "-i", "-c", &script])
+                .current_dir(&repo.main)
+                .env("PATH", path);
+            command
+        },
+        b"",
+    );
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.contains("Usage: worktrees merge [OPTIONS]"));
+    assert!(
+        !output.stderr.contains("file name too long"),
+        "{}",
+        output.stderr
+    );
+}
+
+#[test]
 fn installed_zsh_function_preserves_directory_and_status_on_cancellation() {
     if Command::new("zsh").arg("--version").output().is_err() {
         eprintln!("skipping: zsh is not installed");
