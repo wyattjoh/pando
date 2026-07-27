@@ -1,5 +1,11 @@
 # `remove`, `merge` — topic worktree lifecycle
 
+**Never use raw `git worktree remove` or `git merge`/`git rebase` for these
+operations.** `worktrees remove` keeps the local branch ref and runs
+`pre-remove` hooks; `worktrees merge` resolves the configured target
+branch, runs `pre-merge` hooks, and is crash-recoverable across
+invocations — a plain `git merge` skips all of that.
+
 ## `worktrees remove [OPTIONS] [BRANCHES...]`
 
 ```

@@ -1,5 +1,9 @@
 # `list`, `switch`, `get` — navigation
 
+**Never create or switch worktrees with raw `git worktree add` /
+`git checkout -b`.** Use `worktrees switch` so branch resolution, the
+configured root, and post-create hooks/trust all apply.
+
 ## `worktrees list`
 
 ```

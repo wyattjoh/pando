@@ -2,7 +2,7 @@
 name: worktrees
 description: 'Kickstart usage of the `worktrees` CLI — inspecting, creating, and navigating Git worktrees. Triggers on "worktrees", "worktrees switch", "worktrees commit", "worktrees get", "worktrees trust", "worktrees merge", "worktrees install", ".worktrees.yaml", ".worktrees.local.yaml", "worktrees config.yaml".'
 allowed-tools: Bash, Read
-effort: low
+effort: medium
 ---
 
 # worktrees
@@ -11,6 +11,23 @@ effort: low
 worktrees of the repository containing the current directory. Git is the
 source of truth — every fact comes from invoking the installed `git`
 executable; there is no libgit2, no cached registry, and no implicit fetch.
+
+## Use the CLI, not raw git — this is the point of the skill
+
+In a repository that uses `worktrees`, four operations are wrapped by a
+`worktrees` subcommand instead of being done with plain `git`. Use the
+subcommand, never the raw git equivalent, even though the raw command would
+often "work":
+
+| Don't | Do | Why the wrapper matters |
+|---|---|---|
+| `git worktree add ...` / `git checkout -b ...` | `worktrees switch [branch]` | Applies the branch-resolution order, the configured root, and post-create hooks/trust |
+| `git commit -m "<message you wrote>"` | `worktrees commit` (omit `-m` to let the **configured generator** write the message) | If the user didn't give you a message, do not invent one yourself — let `worktrees commit` run the configured generator. Only pass `-m` when the user supplied the exact message, or none is configured and you must ask them |
+| `git worktree remove ...` | `worktrees remove [--force] [branch...]` | Keeps the local branch ref; runs `pre-remove` hooks |
+| `git merge ...` / `git rebase ...` onto the target | `worktrees merge [--no-rebase] [--no-remove]` | Resolves the configured target branch, runs `pre-merge` hooks, and is crash-recoverable |
+
+`git add`/`git add --patch` are still the right tool for **staging** — only
+the four operations above must go through `worktrees`, not `git`.
 
 ## Local setup
 
@@ -82,20 +99,24 @@ worktrees switch                 # interactive picker
 ```
 Source: README.md ("Switching and creating")
 
-### Stage deliberately, then commit with an explicit message
+### Stage deliberately, then commit — let `worktrees commit` write the message
 ```sh
-git add README.md src/commit.rs   # selected paths
+git add README.md src/commit.rs   # selected paths, or:
 git add --patch                   # selected hunks
-worktrees commit -m "feat: add commit support"
+worktrees commit                  # no -m: runs the configured generator
 ```
 Bare `worktrees commit` (no `--stage-all`) only commits what is already
-staged in the index — it never stages for you.
+staged in the index — it never stages for you. If the user asked you to
+"commit" without giving an exact message, **do not compose one yourself and
+pass `-m`** — run bare `worktrees commit` so the configured generator (or,
+if none is configured, the CLI's own built-in prompt) produces it. Only pass
+`-m "<message>"` when the user gave you that literal message.
 Source: README.md ("Committing")
 
 ### Stage everything and commit, with or without a generated message
 ```sh
-worktrees commit --stage-all -m "chore: commit every change"
-worktrees commit --stage-all          # uses the configured generator
+worktrees commit --stage-all -m "chore: commit every change"   # user gave this exact message
+worktrees commit --stage-all          # no message given: uses the configured generator
 ```
 Source: README.md
 
