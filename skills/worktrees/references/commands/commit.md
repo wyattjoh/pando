@@ -1,5 +1,12 @@
 # `commit`
 
+**Never run `git commit` directly in a repo that uses `worktrees`.** The
+commit itself — staged-only or `--stage-all` — must go through `worktrees
+commit`. If the caller didn't give you an exact commit message, don't
+compose one yourself and pass it via `-m`: omit `-m` entirely and let
+`worktrees commit` invoke the configured generator (or its own built-in
+prompt if none is configured).
+
 ```
 Usage: worktrees commit [OPTIONS]
 ```
@@ -18,7 +25,9 @@ command (`docs/adr/0002-render-typed-command-outcomes.md`).
 
 - **Bare `worktrees commit`** commits only the existing Git index. Stage
   deliberately first with `git add <paths>` or `git add --patch`, then run
-  `worktrees commit -m "..."`.
+  `worktrees commit` (no `-m`, so the configured generator writes the
+  message) or `worktrees commit -m "..."` only if you were given that exact
+  message.
 - **`--stage-all`** opts into staging every tracked/deleted/untracked
   change before committing.
 - An interactive bare commit that finds a dirty worktree but an **empty**
