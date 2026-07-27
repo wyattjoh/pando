@@ -11,8 +11,7 @@ for every `commit` invocation. It replaces formatted terminal text with one
 parseable JSON document, a stable `error.code` instead of a free-text
 message, and (on the recoverable error above all) a `next_steps[]` array of
 ready-to-run recovery invocations — you don't have to guess what to try
-next. `commit` is the only command with JSON support; every other command
-returns `output.unsupported` under `--output json`.
+next. All executable leaves use the shared structured protocol.
 
 ```
 Usage: worktrees commit [OPTIONS]

@@ -21,10 +21,10 @@ often "work":
 
 | Don't | Do | Why the wrapper matters |
 |---|---|---|
-| `git worktree add ...` / `git checkout -b ...` | `worktrees switch [branch]` | Applies the branch-resolution order, the configured root, and post-create hooks/trust |
+| `git worktree add ...` / `git checkout -b ...` | `worktrees switch [--dry-run] [branch]` | Applies the branch-resolution order, the configured root, and post-create hooks/trust |
 | `git commit -m "<message you wrote>"` | `worktrees commit --input-output json` (omit a message in the request to let the **configured generator** write it) | If the user didn't give you a message, do not invent one yourself — let the generator write it. Only supply a literal message when the user gave you that exact text |
-| `git worktree remove ...` | `worktrees remove [--force] [branch...]` | Keeps the local branch ref; runs `pre-remove` hooks |
-| `git merge ...` / `git rebase ...` onto the target | `worktrees merge [--no-rebase] [--no-remove]` | Resolves the configured target branch, runs `pre-merge` hooks, and is crash-recoverable |
+| `git worktree remove ...` | `worktrees remove [--force] [--dry-run] [branch...]` | Keeps the local branch ref; runs `pre-remove` hooks |
+| `git merge ...` / `git rebase ...` onto the target | `worktrees merge [--no-rebase] [--no-remove] [--dry-run]` | Resolves the configured target branch, runs `pre-merge` hooks, and is crash-recoverable |
 
 `git add`/`git add --patch` are still the right tool for **staging** — only
 the four operations above must go through `worktrees`, not `git`.
@@ -53,23 +53,18 @@ the four operations above must go through `worktrees`, not `git`.
 | `XDG_CONFIG_HOME` | Base for `worktrees/config.yaml`, `trust.json`, generated zsh integration. Falls back to `$HOME/.config` |
 | `ZDOTDIR` | Where `worktrees install` writes/edits `.zshrc`. Falls back to `$HOME` |
 
-**Only `commit` supports `--output json` / `--input-output json`** today. Every
-other command returns a structured "unsupported" error under `--output json`
-— drive `list`/`switch`/`get`/`remove`/`merge`/`trust`/`install` normally
-and parse their plain stdout (most, like `get`, already print one
-unambiguous value).
+**Agents must use `--input-output json` for every normal operation.** Put the
+leaf command (and trust subcommand) in argv and the complete command input in
+the strict version-1 stdin envelope. Do not parse human tables, messages, or
+scalar stdout. Read `status`, typed `result`/`error`, `effects`, bounded
+`diagnostics`, and executable `next_steps` instead. Use human commands only
+when a returned next step explicitly requires a person's approval.
 
-**When you (an agent) run `worktrees commit`, default to `--input-output
-json`**, not the human/Cliclack mode. It gives you a single parsed JSON
-document instead of formatted terminal text, a stable `error.code` instead
-of a free-text message, and a `next_steps[]` array with ready-to-run
-recovery invocations (e.g. what to run if nothing is staged) instead of a
-prompt meant for a human. See `references/commands/commit.md` for the full
-request/response schema, every `error.code`, and worked examples for staged,
-generator-written, `--stage-all`, and dry-run commits. `--input-output json`
-requires the **entire** request (`selection`, `message`, `dry_run`) in the
-JSON body on stdin — it rejects `-m`/`--stage-all`/`--dry-run` passed as CLI
-flags alongside it.
+Requests reject unknown fields, trailing data, unsupported versions, and
+mixed command flags. Dry-run mutating requests use `input.dry_run:true`.
+Never construct a remove request with `force:true` without explicit user
+approval. JSON cannot grant hook or generator trust or authorize installer
+writes. See the command references for leaf contracts and approval rules.
 
 ## Anatomy
 
@@ -80,13 +75,13 @@ flags alongside it.
 | Command | Purpose | Reference |
 |---|---|---|
 | `list` | List worktrees belonging to the current repository | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
-| `switch [branch]` | Choose, create, or switch to a worktree and print its path | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
+| `switch [--dry-run] [branch]` | Choose, create, or switch to a worktree and print its path | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `get <property>` | Print one current-worktree property | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
-| `remove [--force] [branches...]` | Remove one or more topic worktrees while retaining their branches | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
-| `merge [--no-rebase] [--no-remove]` | Integrate the current topic into the configured target branch | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
+| `remove [--force] [--dry-run] [branches...]` | Remove one or more topic worktrees while retaining their branches | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
+| `merge [--no-rebase] [--no-remove] [--dry-run]` | Integrate the current topic into the configured target branch | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `commit [-m MSG] [--stage-all] [--dry-run]` | Commit the existing index, optionally staging every change first | [`references/commands/commit.md`](references/commands/commit.md) |
-| `trust <subcommand>` | Inspect, approve, or revoke hook-phase or commit-generation trust. Subcommands: `status`, `reset`, `commit-status`, `commit-reset`, `commit-approve` | [`references/commands/trust.md`](references/commands/trust.md) |
-| `install` | Install the managed zsh integration | [`references/commands/install.md`](references/commands/install.md) |
+| `trust [--dry-run] <subcommand>` | Inspect, approve, or revoke hook-phase or commit-generation trust. Subcommands: `status`, `reset`, `commit-status`, `commit-reset`, `commit-approve` | [`references/commands/trust.md`](references/commands/trust.md) |
+| `install [--dry-run]` | Install or preview the managed zsh integration | [`references/commands/install.md`](references/commands/install.md) |
 
 ## Common workflows
 
@@ -178,7 +173,7 @@ Source: README.md ("Shared project setup", "Trust")
 ```sh
 branch=$(worktrees get branch)
 path=$(worktrees get worktree-path)
-main=$(worktrees get main-worktree-path)
+primary=$(worktrees get primary-worktree-path)
 root=$(worktrees get worktree-root)
 port=$(worktrees get port)
 ```

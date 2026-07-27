@@ -4,6 +4,10 @@ paths:
   - "src/main.rs"
   - "src/smart.rs"
   - "src/commit.rs"
+  - "src/protocol.rs"
+  - "src/machine.rs"
+  - "src/install.rs"
+  - "src/lifecycle.rs"
   - "src/config.rs"
   - "README.md"
 alwaysApply: false
@@ -24,7 +28,7 @@ the same change:
 | Surface change | Update |
 |---|---|
 | A top-level command, subcommand, or flag is added, renamed, or removed (`src/main.rs`, `src/smart.rs`'s `GetProperty`/`TrustCommand` enums) | `skills/worktrees/SKILL.md`'s command table and the relevant file under `skills/worktrees/references/commands/` |
-| The JSON request/response envelope changes (`src/commit.rs`) | `skills/worktrees/references/commands/commit.md` |
+| The shared JSON protocol changes (`src/protocol.rs`, `src/machine.rs`, or a command-owning module) | `skills/worktrees/SKILL.md` and every affected command reference |
 | A config key, hook phase, or layering rule changes (`src/config.rs`) | `skills/worktrees/references/config.md` |
 | A documented workflow in `README.md` changes | the matching "Common workflows" entry in `skills/worktrees/SKILL.md` |
 

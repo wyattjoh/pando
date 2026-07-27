@@ -15,8 +15,7 @@ order, branch, absolute path, current `*` marker, dirty state, and
 exceptional detached, bare, locked, prunable, missing, inaccessible, or
 unknown states.
 
-`--output json` is **not supported** — returns a structured "unsupported"
-error.
+Both JSON modes are supported; agents use versioned request mode.
 
 ```sh
 worktrees list
@@ -58,7 +57,7 @@ registered worktrees are rejected; the tool never adopts, repairs, prunes,
 moves, backs up, or deletes them. Bare repositories can switch among
 existing linked worktrees but cannot create new ones.
 
-`--output json` is **not supported**.
+Both JSON modes are supported; agents use versioned request mode.
 
 ```zsh
 worktrees switch feature/login
@@ -78,19 +77,19 @@ Usage: worktrees get [OPTIONS] <PROPERTY>
 | `branch` | Full name of the branch checked out in the containing worktree |
 | `port` | Deterministic branch-only port in `10000..=19999` (pinned `SipHasher13`, compatible with Worktrunk v0.66.0 — golden values are asserted in tests; treat as a compatibility contract) |
 | `worktree-path` | Resolved absolute path of the containing worktree |
-| `main-worktree-path` | Resolved absolute path of the primary worktree |
+| `primary-worktree-path` | Resolved absolute path of the primary worktree |
 | `worktree-root` | Resolved absolute effective configured creation root |
 
 Each successful call writes exactly one value plus a trailing newline.
 Branch-dependent properties fail in detached worktrees; `worktree-root`
 fails when no root is configured. Works from nested directories.
 
-`--output json` is **not supported**.
+Both JSON modes are supported; agents use versioned request mode.
 
 ```sh
 branch=$(worktrees get branch)
 path=$(worktrees get worktree-path)
-main=$(worktrees get main-worktree-path)
+primary=$(worktrees get primary-worktree-path)
 root=$(worktrees get worktree-root)
 port=$(worktrees get port)
 ```
@@ -100,3 +99,9 @@ A common use is inside a `post-create` hook (see `../config.md`):
 ```sh
 echo "PORT=$(worktrees get port)" > .env.local
 ```
+
+## Structured JSON contract
+
+Agents use `--input-output json`. `list` accepts `{"schema_version":1,"request_id":"…"}` with omitted `input`, or an empty `input` object. `get` requires `input.property`; JSON names are `branch`, `port`, `worktree_path`, `primary_worktree_path`, and `worktree_root`. `switch` accepts `input.branch`, `input.remote`, and `input.dry_run`. Request mode rejects simultaneous command arguments or flags.
+
+Responses identify as `list`, `get`, or `switch`; paths are UTF-8/base64 tagged objects. Switch may return an existing destination, a creation plan, or typed selection/remote/approval errors with retry context. Dry runs perform no creation or hooks and report unattempted effects. Exact-leaf `--help --output json` returns runtime request/response schemas and complete error/action catalogs. JSON writes one document to stdout and no ordinary stderr.

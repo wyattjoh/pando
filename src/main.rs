@@ -3,7 +3,7 @@ use std::env;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use worktrees::{
-    commit, git, install, render,
+    commit, git, install, machine, render,
     smart::{self, GetProperty, TrustCommand},
     ui,
 };
@@ -36,16 +36,22 @@ enum Commands {
     Switch {
         /// Branch to switch to; omit it to use the interactive picker.
         branch: Option<String>,
+        /// Validate and preview without mutation.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Print one current-worktree property.
     Get {
         #[arg(value_enum)]
-        property: GetProperty,
+        property: Option<GetProperty>,
     },
     /// Remove one or more topic worktrees while retaining their branches.
     Remove {
         #[arg(long)]
         force: bool,
+        /// Validate and preview without mutation.
+        #[arg(long)]
+        dry_run: bool,
         branches: Vec<String>,
     },
     /// Integrate the current topic into the configured target branch.
@@ -54,6 +60,9 @@ enum Commands {
         no_rebase: bool,
         #[arg(long)]
         no_remove: bool,
+        /// Validate and preview without mutation.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Commit the existing index, optionally staging every change first.
     Commit {
@@ -69,11 +78,18 @@ enum Commands {
     },
     /// Inspect or revoke post-create hook or commit-generation approval.
     Trust {
+        /// Preview a reset or approval without writing trust.
+        #[arg(long)]
+        dry_run: bool,
         #[command(subcommand)]
         command: TrustCommand,
     },
     /// Install the managed zsh integration.
-    Install,
+    Install {
+        /// Preview installation without writing or prompting.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() {
@@ -84,6 +100,7 @@ fn main() {
         || args
             .iter()
             .any(|arg| arg == "--output=json" || arg == "--input-output=json");
+    let json_command = command_id(&args);
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(error) if json_requested => {
@@ -101,6 +118,16 @@ fn main() {
         Err(error) => error.exit(),
     };
     if let Err(error) = run(cli) {
+        if json_requested {
+            let response = worktrees::protocol::failure(
+                json_command.as_deref().unwrap_or("cli"),
+                None,
+                "command.execution_failed",
+                format!("{error:#}"),
+            );
+            let _ = worktrees::protocol::write(&response);
+            std::process::exit(1);
+        }
         let interaction = error.downcast_ref::<ui::InteractionError>();
         let rendered = match interaction {
             Some(interaction) if interaction.is_cancelled() => ui::cancel(interaction),
@@ -130,6 +157,23 @@ fn main() {
     }
 }
 
+fn command_id(args: &[std::ffi::OsString]) -> Option<String> {
+    let words: Vec<_> = args.iter().filter_map(|arg| arg.to_str()).collect();
+    for command in [
+        "list", "switch", "get", "remove", "merge", "commit", "install",
+    ] {
+        if words.contains(&command) {
+            return Some(command.into());
+        }
+    }
+    words
+        .iter()
+        .position(|word| *word == "trust")
+        .and_then(|index| words.get(index + 1))
+        .map(|leaf| format!("trust.{}", leaf.replace('-', "_")))
+}
+
+#[allow(clippy::too_many_lines)]
 fn run(cli: Cli) -> Result<()> {
     ui::install_theme();
     let json = cli.output == OutputFormat::Json || cli.input_output == Some(OutputFormat::Json);
@@ -138,15 +182,34 @@ fn run(cli: Cli) -> Result<()> {
         anyhow::bail!("--input-output only supports json");
     }
     match cli.command {
-        Commands::List if json => commit::render_unsupported("list"),
+        Commands::List if json => machine::list(request_mode),
         Commands::List => list(),
-        Commands::Switch { .. } if json => commit::render_unsupported("switch"),
-        Commands::Switch { branch } => {
+        Commands::Switch { branch, dry_run } if json => {
+            machine::switch(request_mode, branch, dry_run)
+        }
+        Commands::Switch {
+            branch,
+            dry_run: false,
+        } => {
             smart::switch(branch)?;
             ui::finish(ui::success_style().apply_to("Worktree destination printed."))
         }
-        Commands::Get { .. } if json => commit::render_unsupported("get"),
+        Commands::Switch {
+            branch,
+            dry_run: true,
+        } => smart::switch_dry_run(branch),
+        Commands::Get { property } if json => machine::get(
+            request_mode,
+            property.map(|p| match p {
+                GetProperty::Branch => "branch",
+                GetProperty::Port => "port",
+                GetProperty::WorktreePath => "worktree-path",
+                GetProperty::PrimaryWorktreePath => "primary-worktree-path",
+                GetProperty::WorktreeRoot => "worktree-root",
+            }),
+        ),
         Commands::Get { property } => {
+            let property = property.context("get requires a property")?;
             smart::get(property)?;
             ui::finish(ui::muted_style().apply_to(format!("{property:?} printed.")))
         }
@@ -161,15 +224,54 @@ fn run(cli: Cli) -> Result<()> {
             json,
             request_mode,
         }),
-        Commands::Remove { .. } if json => commit::render_unsupported("remove"),
-        Commands::Remove { force, branches } => worktrees::lifecycle::remove(&branches, force),
-        Commands::Merge { .. } if json => commit::render_unsupported("merge"),
+        Commands::Remove {
+            force,
+            dry_run,
+            branches,
+        } if json => machine::remove(request_mode, branches, force, dry_run),
+        Commands::Remove {
+            force,
+            dry_run: false,
+            branches,
+        } => worktrees::lifecycle::remove(&branches, force),
+        Commands::Remove {
+            force,
+            dry_run: true,
+            branches,
+        } => worktrees::lifecycle::remove_dry_run(&branches, force),
         Commands::Merge {
             no_rebase,
             no_remove,
+            dry_run,
+        } if json => machine::merge(request_mode, no_rebase, no_remove, dry_run),
+        Commands::Merge {
+            no_rebase,
+            no_remove,
+            dry_run: false,
         } => worktrees::lifecycle::merge(no_rebase, no_remove),
-        Commands::Trust { .. } if json => commit::render_unsupported("trust"),
-        Commands::Trust { command } => {
+        Commands::Merge {
+            no_rebase,
+            no_remove,
+            dry_run: true,
+        } => worktrees::lifecycle::merge_dry_run(no_rebase, no_remove),
+        Commands::Trust { command, dry_run } if json => {
+            let id = match command {
+                TrustCommand::Status => "trust.status",
+                TrustCommand::Reset => "trust.reset",
+                TrustCommand::CommitStatus => "trust.commit_status",
+                TrustCommand::CommitReset => "trust.commit_reset",
+                TrustCommand::CommitApprove => "trust.commit_approve",
+            };
+            machine::trust(id, request_mode, dry_run)
+        }
+        Commands::Trust {
+            command,
+            dry_run: true,
+        } => smart::trust_dry_run(command),
+        Commands::Trust {
+            command,
+            dry_run: false,
+        } => {
             smart::trust_command(command)?;
             let summary = match command {
                 TrustCommand::Status => "Hook trust status checked.",
@@ -180,8 +282,9 @@ fn run(cli: Cli) -> Result<()> {
             };
             ui::finish(ui::muted_style().apply_to(summary))
         }
-        Commands::Install if json => commit::render_unsupported("install"),
-        Commands::Install => install::run(),
+        Commands::Install { dry_run } if json => machine::install(request_mode, dry_run),
+        Commands::Install { dry_run: false } => install::run(),
+        Commands::Install { dry_run: true } => install::preview(),
     }
 }
 

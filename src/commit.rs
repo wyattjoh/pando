@@ -1,7 +1,7 @@
 use std::{
     env,
     ffi::OsString,
-    io::{self, Read, Write},
+    io::Write,
     os::unix::ffi::{OsStrExt, OsStringExt},
     path::Path,
     process::{Command, Output, Stdio},
@@ -19,6 +19,7 @@ use crate::{
     WorktreeKind,
     config::{EffectiveConfig, GenerationSource},
     git::{self, Repository},
+    protocol::{self, Diagnostic, Effect, ErrorBody, NextStep, Response},
     trust, ui,
 };
 
@@ -52,14 +53,7 @@ pub struct Invocation {
     pub request_mode: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CommitRequestEnvelope {
-    pub schema_version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-    pub input: CommitRequest,
-}
+pub type CommitRequestEnvelope = protocol::Request<CommitRequest>;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -82,49 +76,6 @@ pub enum Selection {
 pub enum MessageSource {
     Provided { value: String },
     ConfiguredGenerator,
-}
-
-#[derive(Clone, Debug, JsonSchema, Serialize)]
-pub struct Response {
-    schema_version: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    request_id: Option<String>,
-    command: String,
-    status: &'static str,
-    result: Option<Value>,
-    error: Option<ErrorBody>,
-    context: Value,
-    effects: Vec<Effect>,
-    diagnostics: Vec<Diagnostic>,
-    next_steps: Vec<NextStep>,
-}
-
-#[derive(Clone, Debug, JsonSchema, Serialize)]
-struct ErrorBody {
-    code: String,
-    message: String,
-}
-#[derive(Clone, Debug, JsonSchema, Serialize)]
-struct Effect {
-    action: String,
-    attempted: bool,
-    completed: bool,
-}
-#[derive(Clone, Debug, JsonSchema, Serialize)]
-struct Diagnostic {
-    source: String,
-    stream: String,
-    content: String,
-    original_size: usize,
-    truncated: bool,
-}
-#[derive(Clone, Debug, JsonSchema, Serialize)]
-struct NextStep {
-    action: String,
-    description: String,
-    mutation: String,
-    requires_human_approval: bool,
-    invocation: Value,
 }
 
 #[derive(Debug)]
@@ -196,20 +147,7 @@ pub fn run(mut invocation: Invocation) -> Result<()> {
 }
 
 fn read_request() -> std::result::Result<CommitRequestEnvelope, String> {
-    let mut input = Vec::new();
-    io::stdin()
-        .read_to_end(&mut input)
-        .map_err(|error| format!("failed to read JSON request: {error}"))?;
-    if input.iter().all(u8::is_ascii_whitespace) {
-        return Err("JSON request stdin is empty".into());
-    }
-    let mut deserializer = serde_json::Deserializer::from_slice(&input);
-    let request = CommitRequestEnvelope::deserialize(&mut deserializer)
-        .map_err(|error| format!("invalid JSON request: {error}"))?;
-    deserializer
-        .end()
-        .map_err(|error| format!("trailing JSON data: {error}"))?;
-    Ok(request)
+    protocol::read_request()
 }
 
 fn run_human(invocation: &Invocation, source: &MessageSource) -> Result<()> {
@@ -388,6 +326,7 @@ fn run_json(
             action: "git.stage_all".into(),
             attempted: true,
             completed: false,
+            details: None,
         });
         if let Err(error) = git::stage_all(&repository.current().path) {
             return emit_failure_with_context(
@@ -405,6 +344,7 @@ fn run_json(
         action: "commit.create".into(),
         attempted: false,
         completed: false,
+        details: None,
     });
     let (message, mut diagnostics) =
         match resolve_message_json(&repository, source, config.as_ref()) {
@@ -832,9 +772,7 @@ fn response(
     }
 }
 fn print_response(value: &Response) -> Result<()> {
-    serde_json::to_writer(io::stdout().lock(), value)?;
-    println!();
-    Ok(())
+    protocol::write(value)
 }
 fn emit_success(
     request_id: Option<String>,
@@ -963,44 +901,38 @@ fn recovery_steps(request_mode: bool, request_id: Option<&str>) -> Vec<NextStep>
     ]
 }
 
-/// Emits JSON for an unsupported command.
-/// # Errors
-/// Returns only if stdout cannot be written.
-pub fn render_unsupported(command: &str) -> Result<()> {
-    let mut value = response(
-        None,
-        "error",
-        None,
-        Some(ErrorBody {
-            code: "output.unsupported".into(),
-            message: format!("JSON output is not yet supported for {command}"),
-        }),
-        json!({"repository":{},"changes":{}}),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    );
-    value.command = command.into();
-    print_response(&value)?;
-    std::process::exit(1)
-}
-
 pub fn render_clap_json(args: &[OsString], error: &clap::Error) {
     let help = error.kind() == clap::error::ErrorKind::DisplayHelp;
     let version = error.kind() == clap::error::ErrorKind::DisplayVersion;
-    let commit_help = args.iter().any(|arg| arg == "commit");
+    let words: Vec<_> = args.iter().filter_map(|arg| arg.to_str()).collect();
+    let commit_help = words.contains(&"commit");
+    let leaf = words
+        .iter()
+        .find_map(|word| match *word {
+            "list" | "switch" | "get" | "remove" | "merge" | "install" => Some((*word).to_owned()),
+            _ => None,
+        })
+        .or_else(|| {
+            words
+                .iter()
+                .position(|word| *word == "trust")
+                .and_then(|index| words.get(index + 1))
+                .map(|leaf| format!("trust.{}", leaf.replace('-', "_")))
+        });
     let result = if help {
         if commit_help {
             json!({"outcome":"help","arguments":["--message","--stage-all","--dry-run"],"request_schema":schema_for!(CommitRequestEnvelope),"response_schema":schema_for!(Response),"error_codes":["cli.invalid_arguments","json.invalid_request","json.unsupported_schema_version","commit.nothing_staged","commit.nothing_to_commit","commit.generator_failed","commit.git_failed","trust.approval_required"],"actions":["git.stage_paths","git.stage_patch","commit.stage_all","commit.retry_staged","trust.approve_commit_generator","help.command_json"]})
+        } else if let Some(command) = leaf.as_deref() {
+            crate::machine::help(command)
         } else {
-            json!({"outcome":"help","commands":[{"name":"commit","json_support":"full"},{"name":"list","json_support":"unsupported"},{"name":"switch","json_support":"unsupported"}],"response_schema_version":1,"supported_request_schema_versions":[1],"global_options":["--output human|json","--input-output json"]})
+            json!({"outcome":"help","commands":(["list","switch","get","remove","merge","commit","trust.status","trust.reset","trust.commit_status","trust.commit_reset","trust.commit_approve","install"].into_iter().map(|name|json!({"name":name,"json_support":"full"})).collect::<Vec<_>>()),"response_schema_version":1,"supported_request_schema_versions":[1],"global_options":["--output human|json","--input-output json"]})
         }
     } else if version {
         json!({"outcome":"version","version":env!("CARGO_PKG_VERSION")})
     } else {
         Value::Null
     };
-    let response = if help || version {
+    let mut response = if help || version {
         response(
             None,
             "success",
@@ -1025,6 +957,11 @@ pub fn render_clap_json(args: &[OsString], error: &clap::Error) {
             Vec::new(),
             Vec::new(),
         )
+    };
+    response.command = if commit_help {
+        "commit".into()
+    } else {
+        leaf.unwrap_or_else(|| "cli".into())
     };
     let _ = print_response(&response);
 }
