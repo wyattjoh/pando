@@ -22,7 +22,7 @@ often "work":
 | Don't | Do | Why the wrapper matters |
 |---|---|---|
 | `git worktree add ...` / `git checkout -b ...` | `worktrees switch [branch]` | Applies the branch-resolution order, the configured root, and post-create hooks/trust |
-| `git commit -m "<message you wrote>"` | `worktrees commit` (omit `-m` to let the **configured generator** write the message) | If the user didn't give you a message, do not invent one yourself — let `worktrees commit` run the configured generator. Only pass `-m` when the user supplied the exact message, or none is configured and you must ask them |
+| `git commit -m "<message you wrote>"` | `worktrees commit --input-output json` (omit a message in the request to let the **configured generator** write it) | If the user didn't give you a message, do not invent one yourself — let the generator write it. Only supply a literal message when the user gave you that exact text |
 | `git worktree remove ...` | `worktrees remove [--force] [branch...]` | Keeps the local branch ref; runs `pre-remove` hooks |
 | `git merge ...` / `git rebase ...` onto the target | `worktrees merge [--no-rebase] [--no-remove]` | Resolves the configured target branch, runs `pre-merge` hooks, and is crash-recoverable |
 
@@ -54,7 +54,22 @@ the four operations above must go through `worktrees`, not `git`.
 | `ZDOTDIR` | Where `worktrees install` writes/edits `.zshrc`. Falls back to `$HOME` |
 
 **Only `commit` supports `--output json` / `--input-output json`** today. Every
-other command returns a structured "unsupported" error under `--output json`.
+other command returns a structured "unsupported" error under `--output json`
+— drive `list`/`switch`/`get`/`remove`/`merge`/`trust`/`install` normally
+and parse their plain stdout (most, like `get`, already print one
+unambiguous value).
+
+**When you (an agent) run `worktrees commit`, default to `--input-output
+json`**, not the human/Cliclack mode. It gives you a single parsed JSON
+document instead of formatted terminal text, a stable `error.code` instead
+of a free-text message, and a `next_steps[]` array with ready-to-run
+recovery invocations (e.g. what to run if nothing is staged) instead of a
+prompt meant for a human. See `references/commands/commit.md` for the full
+request/response schema, every `error.code`, and worked examples for staged,
+generator-written, `--stage-all`, and dry-run commits. `--input-output json`
+requires the **entire** request (`selection`, `message`, `dry_run`) in the
+JSON body on stdin — it rejects `-m`/`--stage-all`/`--dry-run` passed as CLI
+flags alongside it.
 
 ## Anatomy
 
@@ -99,26 +114,49 @@ worktrees switch                 # interactive picker
 ```
 Source: README.md ("Switching and creating")
 
-### Stage deliberately, then commit — let `worktrees commit` write the message
+### Stage deliberately, then commit as an agent — `--input-output json`
 ```sh
 git add README.md src/commit.rs   # selected paths, or:
 git add --patch                   # selected hunks
-worktrees commit                  # no -m: runs the configured generator
+
+# no message given: let the configured generator write it
+printf '%s\n' '{"schema_version":1,"input":{"selection":"staged","message":{"source":"configured_generator"},"dry_run":false}}' \
+  | worktrees commit --input-output json
+
+# user gave you this exact message
+printf '%s\n' '{"schema_version":1,"input":{"selection":"staged","message":{"source":"provided","value":"feat: add commit support"},"dry_run":false}}' \
+  | worktrees commit --input-output json
 ```
-Bare `worktrees commit` (no `--stage-all`) only commits what is already
-staged in the index — it never stages for you. If the user asked you to
-"commit" without giving an exact message, **do not compose one yourself and
-pass `-m`** — run bare `worktrees commit` so the configured generator (or,
-if none is configured, the CLI's own built-in prompt) produces it. Only pass
-`-m "<message>"` when the user gave you that literal message.
-Source: README.md ("Committing")
+Bare `worktrees commit` (`"selection":"staged"`) only commits what is
+already staged in the index — it never stages for you. If the user asked
+you to "commit" without giving an exact message, **do not compose one
+yourself** — send `{"source":"configured_generator"}` so the configured
+generator (or the CLI's own built-in prompt, if none is configured) writes
+it. Only send `{"source":"provided","value":"..."}` when the user gave you
+that literal text.
+Source: README.md ("Committing"); request schema confirmed against
+`src/commit.rs`'s `CommitRequest`/`MessageSource` types
 
 ### Stage everything and commit, with or without a generated message
 ```sh
-worktrees commit --stage-all -m "chore: commit every change"   # user gave this exact message
-worktrees commit --stage-all          # no message given: uses the configured generator
+# generator writes the message
+printf '%s\n' '{"schema_version":1,"input":{"selection":"stage_all","message":{"source":"configured_generator"},"dry_run":false}}' \
+  | worktrees commit --input-output json
+
+# user gave you this exact message
+printf '%s\n' '{"schema_version":1,"input":{"selection":"stage_all","message":{"source":"provided","value":"chore: commit every change"},"dry_run":false}}' \
+  | worktrees commit --input-output json
 ```
-Source: README.md
+Source: README.md; `Selection::StageAll` in `src/commit.rs`
+
+### Preview a commit before running it (dry run)
+```sh
+printf '%s\n' '{"schema_version":1,"input":{"selection":"staged","message":{"source":"configured_generator"},"dry_run":true}}' \
+  | worktrees commit --input-output json
+```
+On success, `result` is `{"outcome":"dry_run","ready":true,"selection":"staged"}` —
+nothing is staged, generated, or committed.
+Source: `src/commit.rs` (`run_json`'s `invocation.dry_run` branch)
 
 ### Add a shared post-create hook
 ```yaml
@@ -146,14 +184,26 @@ port=$(worktrees get port)
 ```
 Source: README.md ("get")
 
-### Structured (JSON) commit usage — the only JSON-capable command
+### Handle a `commit` JSON error response
 ```sh
-worktrees commit --dry-run -m "fix: preview" --output json
-printf '%s\n' '{"schema_version":1,"request_id":"job-42","input":{"selection":"staged","message":{"source":"provided","value":"fix: preserve index"},"dry_run":false}}' \
+printf '%s\n' '{"schema_version":1,"input":{"selection":"staged","message":{"source":"configured_generator"},"dry_run":false}}' \
   | worktrees commit --input-output json
-worktrees commit --help --output json   # generated request/response schemas
+# {"status":"error","error":{"code":"commit.nothing_staged","message":"nothing is staged"},"next_steps":[...]}
 ```
-Source: README.md ("Structured (JSON) usage"); design rationale in `docs/adr/0002-render-typed-command-outcomes.md`
+On `"status":"error"`, read `error.code` and, when present, `next_steps[]` —
+each entry is a ready-to-run `{"action","description","invocation":{"argv","stdin"}}`
+recovery option (e.g. `commit.nothing_staged` suggests staging paths, staging
+a patch, or retrying with `"selection":"stage_all"`). Don't guess a recovery
+step; use the one the response gives you. Full error-code table in
+`references/commands/commit.md`.
+Source: `src/commit.rs` (`recovery_steps`, `emit_failure_with_context`); design
+rationale in `docs/adr/0002-render-typed-command-outcomes.md`
+
+### Inspect the JSON request/response schema and Schema version
+```sh
+worktrees commit --help --output json   # generated request/response JSON Schemas
+```
+Source: README.md ("Structured (JSON) usage")
 
 ## References
 
