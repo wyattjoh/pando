@@ -79,13 +79,13 @@ flags alongside it.
 
 | Command | Purpose | Reference |
 |---|---|---|
-| `list` | List worktrees belonging to the current repository | [`references/commands/switch.md`](references/commands/switch.md) |
-| `switch [branch]` | Choose, create, or switch to a worktree and print its path | [`references/commands/switch.md`](references/commands/switch.md) |
-| `get <property>` | Print one current-worktree property | [`references/commands/switch.md`](references/commands/switch.md) |
+| `list` | List worktrees belonging to the current repository | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
+| `switch [branch]` | Choose, create, or switch to a worktree and print its path | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
+| `get <property>` | Print one current-worktree property | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `remove [--force] [branches...]` | Remove one or more topic worktrees while retaining their branches | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `merge [--no-rebase] [--no-remove]` | Integrate the current topic into the configured target branch | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `commit [-m MSG] [--stage-all] [--dry-run]` | Commit the existing index, optionally staging every change first | [`references/commands/commit.md`](references/commands/commit.md) |
-| `trust <subcommand>` | Inspect or revoke post-create hook or commit-generation approval | [`references/commands/trust.md`](references/commands/trust.md) |
+| `trust <subcommand>` | Inspect, approve, or revoke hook-phase or commit-generation trust. Subcommands: `status`, `reset`, `commit-status`, `commit-reset`, `commit-approve` | [`references/commands/trust.md`](references/commands/trust.md) |
 | `install` | Install the managed zsh integration | [`references/commands/install.md`](references/commands/install.md) |
 
 ## Common workflows
@@ -207,7 +207,7 @@ Source: README.md ("Structured (JSON) usage")
 
 ## References
 
-- [`references/commands/switch.md`](references/commands/switch.md) — `list`, `switch`, `get`
+- [`references/commands/switch.md`](references/commands/switch.md) — navigation commands: `list`, `switch`, `get`
 - [`references/commands/lifecycle.md`](references/commands/lifecycle.md) — `remove`, `merge`
 - [`references/commands/commit.md`](references/commands/commit.md) — `commit`, including the JSON request/response contract
 - [`references/commands/trust.md`](references/commands/trust.md) — `trust` and its subcommands

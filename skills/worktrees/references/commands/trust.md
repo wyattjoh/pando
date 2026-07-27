@@ -4,14 +4,15 @@
 Usage: worktrees trust [OPTIONS] <COMMAND>
 ```
 
-Inspects or revokes approval for two independently-trusted surfaces:
-**post-create hooks** and **commit generation**. Neither has a
-noninteractive bypass — approval is always an interactive, default-negative
-prompt.
+Inspects or revokes approval for two independently trusted surfaces:
+**hook phases** (`post-create`, `pre-merge`, and `pre-remove`) and **commit
+generation**. `commit-approve` can also grant commit-generator approval.
+Neither surface has a noninteractive approval bypass: approval is always an
+interactive, default-negative prompt.
 
 | Subcommand | Purpose |
 |---|---|
-| `status` | Show configured and trusted state for every hook phase |
+| `status` | Show configured and trusted state for the `post-create`, `pre-merge`, and `pre-remove` hook phases |
 | `reset` | Revoke every hook-phase approval for this repository clone |
 | `commit-status` | Show approval state for the effective commit-generator settings |
 | `commit-reset` | Revoke commit-generator approval for this repository clone |
@@ -34,16 +35,18 @@ stored atomically in
 auto-shared across clones of the same repository.
 
 `reset`/`commit-reset` are idempotent and remove only the current clone's
-record — the next worktree creation with commands present asks again.
-`commit-reset` does not alter post-create hook approval, and vice versa.
+record. After `reset`, the next operation that reaches a configured hook phase
+asks again. After `commit-reset`, the next operation requiring the shared
+commit generator asks for separate approval. `commit-reset` does not alter
+hook-phase approval, and vice versa.
 
 `--output json` is **not supported** for any `trust` subcommand.
 
 ## Commands
 
 ```sh
-worktrees trust status            # what post-create hooks are configured/trusted
-worktrees trust reset             # revoke all post-create hook trust for this clone
+worktrees trust status            # configured/trusted state for every hook phase
+worktrees trust reset             # revoke all hook-phase trust for this clone
 
 worktrees trust commit-status     # approval state of the effective commit generator
 worktrees trust commit-approve    # interactively approve a shared generator

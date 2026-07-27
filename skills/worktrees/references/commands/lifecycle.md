@@ -18,8 +18,10 @@ Usage: worktrees remove [OPTIONS] [BRANCHES]...
 | `--force` | Required to remove a dirty (uncommitted-changes) worktree |
 
 Removes registered topic worktrees but **never** deletes their local branch
-refs. Removing the current worktree emits the primary worktree's path
-afterward (so the zsh wrapper `cd`s you back to the primary worktree).
+refs. When the current worktree is among the removed targets, stdout contains
+only the primary worktree's byte-preserving path plus a trailing newline, so
+the zsh wrapper can `cd` there. Removing only other worktrees emits no stdout
+destination.
 
 `--output json` is **not supported**.
 
@@ -62,9 +64,13 @@ worktrees:
 Crash-recoverable and safe to re-invoke: before its first Git mutation,
 `merge` records the topic worktree/branch, target branch, and initial
 rebase/cleanup policy under Git's common state directory. A later invocation
-resumes the same operation with the pinned target/policy — including
-continuing through rebase conflicts, or retrying cleanup after a completed
-integration. See `docs/adr/0001-journal-merge-lifecycle.md`.
+resumes the same operation with the pinned target/policy, including continuing
+through rebase conflicts or retrying cleanup after a completed integration.
+
+After the default successful cleanup, stdout contains only the primary
+worktree's byte-preserving path plus a trailing newline, so the zsh wrapper
+can `cd` there. With `--no-remove`, the topic is retained and no destination is
+written to stdout. See `docs/adr/0001-journal-merge-lifecycle.md`.
 
 `--output json` is **not supported**.
 
