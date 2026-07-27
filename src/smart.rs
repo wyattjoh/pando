@@ -42,6 +42,8 @@ pub enum TrustCommand {
     CommitStatus,
     /// Revoke commit-generator approval for this repository clone.
     CommitReset,
+    /// Preview and approve effective shared commit-generation settings.
+    CommitApprove,
 }
 
 /// Resolves, creates when needed, and emits a switch destination.
@@ -153,6 +155,39 @@ pub fn trust_command(command: TrustCommand) -> Result<()> {
             } else {
                 ui::info("No saved commit generator trust existed for this repository.")?;
             }
+        }
+        TrustCommand::CommitApprove => {
+            let config = EffectiveConfig::load(&repository)?;
+            let hash = trust::generation_hash(&config.generation).context(
+                "the effective commit generator is user-controlled; no approval is required",
+            )?;
+            if trust::is_generation_trusted(&repository, &config.generation)? {
+                ui::info("The effective shared commit generator is already trusted.")?;
+                return Ok(());
+            }
+            ui::ensure_interactive(
+                "commit generator approval requires an interactive human terminal",
+            )?;
+            ui::info("Effective shared commit generation settings:")?;
+            if let Some(value) = &config.generation.command {
+                ui::step(format!("command: {}", value.value))?;
+            }
+            if let Some(value) = &config.generation.template {
+                ui::step(format!("template:\n{}", value.value))?;
+            }
+            ui::step(format!("identity: {hash}"))?;
+            let approved = ui::prompt_result(
+                confirm("Trust these settings for this repository?")
+                    .initial_value(false)
+                    .interact(),
+                "commit generator approval cancelled",
+                "failed to read commit generator approval",
+            )?;
+            if !approved {
+                return Err(ui::declined("commit generator approval declined"));
+            }
+            trust::approve_generation(&repository, &config.generation)?;
+            ui::success("Approved commit generator for this repository.")?;
         }
     }
     Ok(())

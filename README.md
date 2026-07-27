@@ -134,14 +134,25 @@ If the current effective hook list is empty, an obsolete record is cleared autom
 
 ## Committing
 
-Stage every tracked, deleted, and untracked change and commit it directly when the message is known:
+Bare `worktrees commit` commits only the existing Git index. Stage a deliberate selection with Git, then commit it:
 
 ```sh
+git add README.md src/commit.rs       # selected paths
+git add --patch                       # selected hunks
 worktrees commit -m "feat: add commit support"
 worktrees commit --message "fix: preserve staged changes"
 ```
 
-Without a message, `worktrees commit` renders the staged snapshot into a MiniJinja prompt and sends it on stdin to a configured generator. Its stdout becomes the complete commit message; its stderr remains visible. The generator runs from the worktree root through `/bin/sh -c`. Git's normal commit output, hooks, signing, and failures are forwarded unchanged. A generator failure leaves the all-changes snapshot staged for inspection or retry.
+Worktrees does not select files or hunks. To opt into staging every tracked, deleted, and untracked change, pass `--stage-all`:
+
+```sh
+worktrees commit --stage-all -m "chore: commit every change"
+worktrees commit --stage-all          # use the configured generator
+```
+
+When an interactive bare commit finds a dirty worktree but an empty index, it previews the all-change candidate and offers a default-No confirmation. `--dry-run` validates and previews without staging, generating, running hooks, changing trust, or committing. Shared generation is approved separately with `worktrees trust commit-approve`.
+
+Without a message, `worktrees commit` renders the staged snapshot into a MiniJinja prompt and sends it on stdin to a configured generator. Its stdout becomes the complete commit message; its stderr remains visible. The generator runs from the worktree root through `/bin/sh -c`. Git's normal hooks, signing, and failures remain enabled. A generator failure after `--stage-all` leaves the all-changes snapshot staged for inspection or retry.
 
 Configure a personal generator globally:
 
@@ -189,10 +200,25 @@ Committed shared generator fields are untrusted executable code or model instruc
 
 ```sh
 worktrees trust commit-status
+worktrees trust commit-approve
 worktrees trust commit-reset
 ```
 
-`commit-reset` is idempotent and does not alter post-create approval. Supplying `-m`/`--message` bypasses all generator configuration, template validation, and generator trust.
+`commit-approve` is interactive, default-negative, and records trust without staging or committing. `commit-reset` is idempotent and does not alter post-create approval. Supplying `-m`/`--message` bypasses all generator configuration, template validation, and generator trust.
+
+### Structured commit I/O
+
+Use ordinary argv with a structured response, or a strict versioned request on stdin:
+
+```sh
+worktrees commit --dry-run -m "fix: preview" --output json
+printf '%s\n' '{"schema_version":1,"request_id":"job-42","input":{"selection":"staged","message":{"source":"provided","value":"fix: preserve index"},"dry_run":false}}' \
+  | worktrees commit --input-output json
+worktrees commit --help --output json   # generated request/response schemas and catalogs
+worktrees --help --output json          # command support index
+```
+
+JSON mode emits exactly one document on stdout and nothing on stderr. Errors are nonzero and include stable codes and typed `next_steps`; for example, `commit.nothing_staged` suggests `git.stage_paths`, `git.stage_patch`, and `commit.stage_all`. JSON requests cannot approve shared generators.
 
 ## Lifecycle commands
 

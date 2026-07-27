@@ -2617,7 +2617,7 @@ fn commit_with_explicit_message_stages_all_change_kinds() {
 
     let output = Command::cargo_bin("worktrees")
         .unwrap()
-        .args(["commit", "-m", "feat: commit every change"])
+        .args(["commit", "--stage-all", "-m", "feat: commit every change"])
         .current_dir(&repo.main)
         .output()
         .unwrap();
@@ -2662,7 +2662,7 @@ fn commit_with_explicit_message_stages_all_change_kinds() {
 }
 
 #[test]
-fn shared_commit_generator_approval_cancellation_is_not_an_operational_error() {
+fn shared_commit_generator_requires_standalone_approval_interactively() {
     let repo = Repository::new();
     fs::write(
         repo.main.join(".worktrees.yaml"),
@@ -2673,7 +2673,7 @@ fn shared_commit_generator_approval_cancellation_is_not_an_operational_error() {
     let xdg = tempfile::tempdir().unwrap();
     let mut command = Command::cargo_bin("worktrees").unwrap();
     command
-        .arg("commit")
+        .args(["commit", "--stage-all"])
         .current_dir(&repo.main)
         .env("XDG_CONFIG_HOME", xdg.path());
 
@@ -2682,13 +2682,10 @@ fn shared_commit_generator_approval_cancellation_is_not_an_operational_error() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(
-        output
-            .stderr
-            .contains("commit generator approval cancelled"),
+        output.stderr.contains("run worktrees trust commit-approve"),
         "{}",
         output.stderr
     );
-    assert!(!output.stderr.contains("error:"), "{}", output.stderr);
     assert_eq!(
         Command::new("git")
             .args(["diff", "--cached", "--quiet"])
@@ -2713,7 +2710,7 @@ fn shared_commit_generator_approval_preflights_noninteractive_terminals() {
 
     let output = Command::cargo_bin("worktrees")
         .unwrap()
-        .arg("commit")
+        .args(["commit", "--stage-all"])
         .current_dir(&repo.main)
         .env("XDG_CONFIG_HOME", xdg.path())
         .output()
@@ -2722,7 +2719,10 @@ fn shared_commit_generator_approval_preflights_noninteractive_terminals() {
 
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(stderr.contains("no interactive terminal"), "{stderr}");
+    assert!(
+        stderr.contains("run worktrees trust commit-approve"),
+        "{stderr}"
+    );
     assert!(
         !stderr.contains("repository requests these commit generation settings"),
         "{stderr}"
@@ -2751,7 +2751,7 @@ fn commit_generates_message_from_global_configuration() {
 
     let mut command = Command::cargo_bin("worktrees").unwrap();
     command
-        .arg("commit")
+        .args(["commit", "--stage-all"])
         .current_dir(&repo.main)
         .env("XDG_CONFIG_HOME", xdg.path())
         .env("CLICOLOR_FORCE", "1");
@@ -2842,7 +2842,7 @@ fn commit_generator_failure_finishes_the_spinner_with_an_error_state() {
     fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
     let mut command = Command::cargo_bin("worktrees").unwrap();
     command
-        .arg("commit")
+        .args(["commit", "--stage-all"])
         .current_dir(&repo.main)
         .env("XDG_CONFIG_HOME", xdg.path())
         .env("CLICOLOR_FORCE", "1");
@@ -2936,7 +2936,7 @@ fn commit_renders_custom_template_with_staged_context() {
 
     let output = Command::cargo_bin("worktrees")
         .unwrap()
-        .arg("commit")
+        .args(["commit", "--stage-all"])
         .current_dir(&repo.main)
         .env("XDG_CONFIG_HOME", xdg.path())
         .env("CAPTURE", &captured)
@@ -2954,4 +2954,65 @@ fn commit_renders_custom_template_with_staged_context() {
         prompt.contains("history=initial") && prompt.contains("custom.txt"),
         "{prompt}"
     );
+}
+
+#[test]
+fn bare_commit_uses_only_the_existing_index() {
+    let repo = Repository::new();
+    fs::write(repo.main.join("README.md"), "staged\n").unwrap();
+    git(&repo.main, ["add", "README.md"]);
+    fs::write(repo.main.join("README.md"), "unstaged\n").unwrap();
+    fs::write(repo.main.join("untracked.txt"), "excluded\n").unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["commit", "-m", "fix: commit staged snapshot"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(git_output(&repo.main, ["show", "HEAD:README.md"]), "staged");
+    assert_eq!(
+        fs::read_to_string(repo.main.join("README.md")).unwrap(),
+        "unstaged\n"
+    );
+    assert!(repo.main.join("untracked.txt").exists());
+}
+
+#[test]
+fn json_dry_run_is_one_document_and_does_not_commit() {
+    let repo = Repository::new();
+    fs::write(repo.main.join("staged.txt"), "ready\n").unwrap();
+    git(&repo.main, ["add", "staged.txt"]);
+    let before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args([
+            "commit",
+            "--dry-run",
+            "--message",
+            "test: preview",
+            "--output",
+            "json",
+        ])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status"], "success");
+    assert_eq!(value["result"]["outcome"], "dry_run");
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), before);
 }

@@ -1,16 +1,29 @@
 use std::env;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use worktrees::{
     commit, git, install, render,
     smart::{self, GetProperty, TrustCommand},
     ui,
 };
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum OutputFormat {
+    #[default]
+    Human,
+    Json,
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
+    /// Select human terminal output or one structured JSON document.
+    #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Human)]
+    output: OutputFormat,
+    /// Read a versioned JSON request from stdin and emit JSON.
+    #[arg(long, value_enum, global = true)]
+    input_output: Option<OutputFormat>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -42,11 +55,17 @@ enum Commands {
         #[arg(long)]
         no_remove: bool,
     },
-    /// Stage all changes and create a commit.
+    /// Commit the existing index, optionally staging every change first.
     Commit {
         /// Commit message; omit to use the configured generator.
         #[arg(short, long)]
         message: Option<String>,
+        /// Stage tracked, deleted, and untracked changes before committing.
+        #[arg(long)]
+        stage_all: bool,
+        /// Validate and preview without staging, generating, or committing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Inspect or revoke post-create hook or commit-generation approval.
     Trust {
@@ -58,7 +77,30 @@ enum Commands {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let args: Vec<_> = env::args_os().collect();
+    let json_requested = args
+        .windows(2)
+        .any(|pair| (pair[0] == "--output" || pair[0] == "--input-output") && pair[1] == "json")
+        || args
+            .iter()
+            .any(|arg| arg == "--output=json" || arg == "--input-output=json");
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(error) if json_requested => {
+            let code = if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                0
+            } else {
+                2
+            };
+            commit::render_clap_json(&args, &error);
+            std::process::exit(code);
+        }
+        Err(error) => error.exit(),
+    };
+    if let Err(error) = run(cli) {
         let interaction = error.downcast_ref::<ui::InteractionError>();
         let rendered = match interaction {
             Some(interaction) if interaction.is_cancelled() => ui::cancel(interaction),
@@ -88,24 +130,45 @@ fn main() {
     }
 }
 
-fn run() -> Result<()> {
+fn run(cli: Cli) -> Result<()> {
     ui::install_theme();
-    match Cli::parse().command {
+    let json = cli.output == OutputFormat::Json || cli.input_output == Some(OutputFormat::Json);
+    let request_mode = cli.input_output == Some(OutputFormat::Json);
+    if cli.input_output == Some(OutputFormat::Human) {
+        anyhow::bail!("--input-output only supports json");
+    }
+    match cli.command {
+        Commands::List if json => commit::render_unsupported("list"),
         Commands::List => list(),
+        Commands::Switch { .. } if json => commit::render_unsupported("switch"),
         Commands::Switch { branch } => {
             smart::switch(branch)?;
             ui::finish(ui::success_style().apply_to("Worktree destination printed."))
         }
+        Commands::Get { .. } if json => commit::render_unsupported("get"),
         Commands::Get { property } => {
             smart::get(property)?;
             ui::finish(ui::muted_style().apply_to(format!("{property:?} printed.")))
         }
-        Commands::Commit { message } => commit::run(message),
+        Commands::Commit {
+            message,
+            stage_all,
+            dry_run,
+        } => commit::run(commit::Invocation {
+            message,
+            stage_all,
+            dry_run,
+            json,
+            request_mode,
+        }),
+        Commands::Remove { .. } if json => commit::render_unsupported("remove"),
         Commands::Remove { force, branches } => worktrees::lifecycle::remove(&branches, force),
+        Commands::Merge { .. } if json => commit::render_unsupported("merge"),
         Commands::Merge {
             no_rebase,
             no_remove,
         } => worktrees::lifecycle::merge(no_rebase, no_remove),
+        Commands::Trust { .. } if json => commit::render_unsupported("trust"),
         Commands::Trust { command } => {
             smart::trust_command(command)?;
             let summary = match command {
@@ -113,9 +176,11 @@ fn run() -> Result<()> {
                 TrustCommand::Reset => "Hook trust reset checked.",
                 TrustCommand::CommitStatus => "Commit generator trust status checked.",
                 TrustCommand::CommitReset => "Commit generator trust reset checked.",
+                TrustCommand::CommitApprove => "Commit generator trust approval checked.",
             };
             ui::finish(ui::muted_style().apply_to(summary))
         }
+        Commands::Install if json => commit::render_unsupported("install"),
         Commands::Install => install::run(),
     }
 }
