@@ -28,7 +28,7 @@ pub enum GetProperty {
     Branch,
     Port,
     WorktreePath,
-    MainWorktreePath,
+    PrimaryWorktreePath,
     WorktreeRoot,
 }
 
@@ -79,7 +79,7 @@ pub fn get(property: GetProperty) -> Result<()> {
             GetValue::Text(port_for_branch(git::current_branch(&repository)?).to_string())
         }
         GetProperty::WorktreePath => GetValue::Path(resolved_path(&repository.current().path)?),
-        GetProperty::MainWorktreePath => GetValue::Path(resolved_path(
+        GetProperty::PrimaryWorktreePath => GetValue::Path(resolved_path(
             repository
                 .primary
                 .as_ref()
@@ -105,6 +105,62 @@ pub fn get(property: GetProperty) -> Result<()> {
     stdout
         .write_all(b"\n")
         .context("failed to terminate requested worktree property")
+}
+
+/// Previews switching without creating directories, worktrees, trust, or setup records.
+///
+/// # Errors
+/// Returns an error when the branch or repository cannot be resolved.
+pub fn switch_dry_run(branch: Option<String>) -> Result<()> {
+    let branch = branch.context("switch --dry-run requires a branch")?;
+    let repository =
+        git::repository(&env::current_dir().context("failed to read the current directory")?)?;
+    git::validate_branch(&repository.current().path, &branch)?;
+    if let Some(existing) = repository
+        .worktrees
+        .iter()
+        .find(|w| matches!(&w.kind, WorktreeKind::Branch(value) if value == &branch))
+    {
+        return ui::finish(format!(
+            "Would enter {}; no changes made.",
+            existing.path.display()
+        ));
+    }
+    let destination = EffectiveConfig::load(&repository)?
+        .require_root()?
+        .join(&branch);
+    if destination.exists() || repository.worktrees.iter().any(|w| w.path == destination) {
+        bail!("the configured destination already exists or is registered");
+    }
+    ui::finish(format!(
+        "Would create a worktree for {branch} at {}; no changes made.",
+        destination.display()
+    ))
+}
+
+/// Previews a trust command without changing trust storage or prompting.
+///
+/// # Errors
+/// Returns an error when repository or configuration inspection fails.
+pub fn trust_dry_run(command: TrustCommand) -> Result<()> {
+    let cwd = env::current_dir().context("failed to read the current directory")?;
+    let repository = git::repository(&cwd)?;
+    match command {
+        TrustCommand::Status | TrustCommand::CommitStatus => trust_command(command),
+        TrustCommand::Reset => ui::finish("Would reset hook trust; no changes made."),
+        TrustCommand::CommitReset => {
+            ui::finish("Would reset commit generator trust; no changes made.")
+        }
+        TrustCommand::CommitApprove => {
+            let config = EffectiveConfig::load(&repository)?;
+            trust::generation_hash(&config.generation).context(
+                "the effective commit generator is user-controlled; no approval is required",
+            )?;
+            ui::finish(
+                "Would approve the effective shared commit generator after human review; no changes made.",
+            )
+        }
+    }
 }
 
 /// Inspects or resets post-create trust for the current repository.

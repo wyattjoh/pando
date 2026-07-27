@@ -26,6 +26,21 @@ Restart zsh or run:
 source ${ZDOTDIR:-$HOME}/.zshrc
 ```
 
+## Structured JSON
+
+Automation should use versioned request mode, keeping the command in argv and placing command-specific input on stdin:
+
+```sh
+printf '%s\n' '{"schema_version":1,"request_id":"example","input":{}}' \
+  | worktrees list --input-output json
+printf '%s\n' '{"schema_version":1,"input":{"property":"primary_worktree_path"}}' \
+  | worktrees get --input-output json
+```
+
+`--output json` instead uses ordinary argv flags as input. Both modes emit exactly one newline-terminated JSON document on stdout and no ordinary stderr on typed success or failure. Requests reject unknown fields, unsupported versions, trailing data, and mixed stdin/argv command input. Paths use tagged UTF-8 or base64 objects; responses carry typed results or errors plus context, effects, bounded diagnostics, and recovery steps.
+
+JSON execution is deterministic and noninteractive. Mutating commands support dry-run planning, while shared trust approval and installer writes remain manual human operations. The canonical property is `primary-worktree-path` (`primary_worktree_path` in JSON); the former Main spelling is not an alias. The installed zsh wrapper passes JSON invocations and all noninteractive-shell invocations through byte-for-byte without destination capture or `cd`.
+
 ## Switching and creating
 
 Switch directly to a branch or open the interactive picker:
@@ -233,14 +248,14 @@ Every successful `get` command writes exactly one value and a newline:
 ```sh
 branch=$(worktrees get branch)
 path=$(worktrees get worktree-path)
-main=$(worktrees get main-worktree-path)
+main=$(worktrees get primary-worktree-path)
 root=$(worktrees get worktree-root)
 port=$(worktrees get port)
 ```
 
 - `branch` — full named branch of the containing worktree;
 - `worktree-path` — resolved absolute containing worktree root;
-- `main-worktree-path` — resolved absolute primary worktree path;
+- `primary-worktree-path` — resolved absolute primary worktree path;
 - `worktree-root` — resolved absolute effective configured creation root;
 - `port` — deterministic branch-only port in `10000..=19999`, compatible with Worktrunk v0.66.0.
 

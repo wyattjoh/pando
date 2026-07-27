@@ -27,10 +27,14 @@ parent shell to the destination path the binary prints on stdout; all other
 subcommands pass straight through to the real binary. `command worktrees
 ...` always bypasses the wrapper.
 
-`--output json` is **not supported**.
+Both JSON modes are supported; agents use versioned request mode.
 
 ```sh
 cargo install --path .
 worktrees install
 source ${ZDOTDIR:-$HOME}/.zshrc
 ```
+
+## Structured JSON contract
+
+`install --input-output json` accepts `input.dry_run`. Dry run performs path/content preflight, prompts for nothing, writes nothing, and returns planned `file.write` effects with byte-safe targets. An already-current installation has its own successful outcome. A non-dry JSON request requiring writes returns `install.approval_required`, planned effects, and a manual `worktrees install` next step. Human `--dry-run` renders the same plan without JSON or mutation. The zsh function detects JSON flags by argv element (including `--flag=json`) and bypasses destination capture in JSON or noninteractive shells.

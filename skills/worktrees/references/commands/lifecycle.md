@@ -23,7 +23,7 @@ only the primary worktree's byte-preserving path plus a trailing newline, so
 the zsh wrapper can `cd` there. Removing only other worktrees emits no stdout
 destination.
 
-`--output json` is **not supported**.
+Both JSON modes are supported; agents use versioned request mode.
 
 ```sh
 worktrees remove                          # (inferred) removes the current topic
@@ -72,7 +72,7 @@ worktree's byte-preserving path plus a trailing newline, so the zsh wrapper
 can `cd` there. With `--no-remove`, the topic is retained and no destination is
 written to stdout. See `docs/adr/0001-journal-merge-lifecycle.md`.
 
-`--output json` is **not supported**.
+Both JSON modes are supported; agents use versioned request mode.
 
 ```sh
 worktrees merge                    # (inferred)
@@ -82,3 +82,7 @@ worktrees merge --no-remove        # (inferred)
 No literal example ships in README.md for `merge` — only prose; flag
 spellings are confirmed from the compiled binary's `--help`, but the
 invocations above are marked **(inferred)**.
+
+## Structured JSON contract
+
+Agents use request mode. `remove` input contains `branches`, `force`, and `dry_run`; never send `force:true` without explicit user approval. `merge` input contains `no_rebase`, `no_remove`, and `dry_run`. Request mode rejects mixed command arguments and flags. Results distinguish dry runs, no-ops, removals, retained topics, and completed cleanup. Effects identify hook, Git, and target worktree actions; failures use stable codes with diagnostics and recovery context. Dry runs execute no hooks or mutations. Exact-leaf JSON help exposes runtime schemas and the error/action catalogs.

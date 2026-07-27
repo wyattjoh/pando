@@ -1029,7 +1029,11 @@ fn installed_zsh_function_changes_the_invoking_shell_directory() {
     assert!(output.status.success(), "{}", output.stderr);
     assert_eq!(
         output.stdout,
-        format!("{}\n", repo.linked.canonicalize().unwrap().display())
+        format!(
+            "{}\n{}\n",
+            repo.linked.canonicalize().unwrap().display(),
+            repo.main.canonicalize().unwrap().display()
+        )
     );
 }
 
@@ -1206,7 +1210,7 @@ fn get_prints_exact_current_context_values_and_stable_ports() {
             repo.linked.canonicalize().unwrap().display().to_string(),
         ),
         (
-            "main-worktree-path",
+            "primary-worktree-path",
             repo.main.canonicalize().unwrap().display().to_string(),
         ),
         ("port", "13054".to_owned()),
@@ -2258,8 +2262,9 @@ fn installed_zsh_enters_destination_but_preserves_hook_failure_status() {
     assert_eq!(
         output.stdout,
         format!(
-            "{}\n",
-            root.join("zsh-hook").canonicalize().unwrap().display()
+            "{}\n{}\n",
+            root.join("zsh-hook").canonicalize().unwrap().display(),
+            repo.main.canonicalize().unwrap().display()
         )
     );
 }
@@ -3015,4 +3020,272 @@ fn json_dry_run_is_one_document_and_does_not_commit() {
     assert_eq!(value["status"], "success");
     assert_eq!(value["result"]["outcome"], "dry_run");
     assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), before);
+}
+
+fn json_command(
+    cwd: &Path,
+    args: &[&str],
+    stdin: Option<&serde_json::Value>,
+) -> std::process::Output {
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut child_stdin = child.stdin.take().unwrap();
+    if let Some(value) = stdin {
+        serde_json::to_writer(&mut child_stdin, value).unwrap();
+    }
+    drop(child_stdin);
+    child.wait_with_output().unwrap()
+}
+
+fn assert_json_pure(output: &std::process::Output) -> serde_json::Value {
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout.last(), Some(&b'\n'));
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn json_switch_argv_and_request_modes_select_existing_destination() {
+    let repo = Repository::new();
+    let argv = json_command(&repo.main, &["switch", "feature", "--output", "json"], None);
+    assert!(argv.status.success());
+    let argv = assert_json_pure(&argv);
+    let request = serde_json::json!({"schema_version":1,"request_id":"switch-1","input":{"branch":"feature"}});
+    let io = json_command(
+        &repo.main,
+        &["switch", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(io.status.success());
+    let io = assert_json_pure(&io);
+    assert_eq!(argv["result"]["destination"], io["result"]["destination"]);
+    assert_eq!(io["request_id"], "switch-1");
+}
+
+#[test]
+fn json_switch_without_branch_returns_structured_choices_without_prompting() {
+    let repo = Repository::new();
+    let output = json_command(&repo.main, &["switch", "--output", "json"], None);
+    assert!(!output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["error"]["code"], "switch.selection_required");
+    assert_eq!(value["context"]["choices"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn json_switch_new_branch_dry_run_is_nonmutating_and_execution_requires_approval() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("topics");
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    let before = git_output(&repo.main, ["worktree", "list", "--porcelain"]);
+    let preview = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["switch", "new-topic", "--dry-run", "--output", "json"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(preview.status.success());
+    let value = assert_json_pure(&preview);
+    assert_eq!(value["result"]["outcome"], "creation_plan");
+    assert_eq!(value["result"]["approval_required"], true);
+    assert_eq!(
+        git_output(&repo.main, ["worktree", "list", "--porcelain"]),
+        before
+    );
+    assert!(!root.exists());
+    let execute = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["switch", "new-topic", "--output", "json"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(!execute.status.success());
+    assert_eq!(
+        assert_json_pure(&execute)["error"]["code"],
+        "switch.approval_required"
+    );
+}
+
+#[test]
+fn json_remove_dry_run_has_effects_and_does_not_remove() {
+    let repo = Repository::new();
+    let request =
+        serde_json::json!({"schema_version":1,"input":{"branches":["feature"],"dry_run":true}});
+    let output = json_command(
+        &repo.main,
+        &["remove", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["result"]["outcome"], "dry_run");
+    assert!(
+        value["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["attempted"] == false)
+    );
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn json_remove_execution_removes_multiple_worktrees_and_retains_branches() {
+    let repo = Repository::new();
+    let second = repo.add_worktree("second topic", "second");
+    let request = serde_json::json!({"schema_version":1,"request_id":"remove-1","input":{"branches":["feature","second"]}});
+    let output = json_command(
+        &repo.main,
+        &["remove", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value = assert_json_pure(&output);
+    assert_eq!(value["request_id"], "remove-1");
+    assert_eq!(value["result"]["outcome"], "removed");
+    assert_eq!(value["result"]["targets"].as_array().unwrap().len(), 2);
+    assert!(
+        value["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["completed"] == true)
+    );
+    assert!(!repo.linked.exists());
+    assert!(!second.exists());
+    assert_eq!(
+        git_output(&repo.main, ["branch", "--list", "feature"]),
+        "feature"
+    );
+    assert_eq!(
+        git_output(&repo.main, ["branch", "--list", "second"]),
+        "second"
+    );
+}
+
+#[test]
+fn json_forced_remove_requires_explicit_force_and_reports_retention() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();
+    let request =
+        serde_json::json!({"schema_version":1,"input":{"branches":["feature"],"force":true}});
+    let output = json_command(
+        &repo.main,
+        &["remove", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["result"]["targets"][0]["branch_retained"], true);
+    assert_eq!(
+        git_output(&repo.main, ["branch", "--list", "feature"]),
+        "feature"
+    );
+}
+
+#[test]
+fn human_remove_dry_run_uses_preflight_without_mutation() {
+    let repo = Repository::new();
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["remove", "feature", "--dry-run"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("branch retained"));
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn json_remove_rejects_dirty_target_without_force_and_request_mixing() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();
+    let output = json_command(&repo.main, &["remove", "feature", "--output", "json"], None);
+    assert!(!output.status.success());
+    assert_eq!(
+        assert_json_pure(&output)["error"]["code"],
+        "remove.force_required"
+    );
+    let request =
+        serde_json::json!({"schema_version":1,"input":{"branches":["feature"],"dry_run":true}});
+    let mixed = json_command(
+        &repo.main,
+        &["remove", "feature", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(!mixed.status.success());
+    assert_eq!(
+        assert_json_pure(&mixed)["error"]["code"],
+        "json.invalid_request"
+    );
+}
+
+#[test]
+fn json_merge_dry_run_reports_policy_and_never_mutates_refs_or_worktrees() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("topic.txt"), "topic\n").unwrap();
+    git(&repo.linked, ["add", "topic.txt"]);
+    git(&repo.linked, ["commit", "-m", "topic"]);
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "worktrees:\n  target-branch: main\n",
+    )
+    .unwrap();
+    git(&repo.main, ["add", ".worktrees.yaml"]);
+    git(&repo.main, ["commit", "-m", "configure target"]);
+    let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+    let topic_before = git_output(&repo.linked, ["rev-parse", "HEAD"]);
+    let output = json_command(
+        &repo.linked,
+        &["merge", "--no-remove", "--dry-run", "--output", "json"],
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = assert_json_pure(&output);
+    assert_eq!(value["result"]["outcome"], "dry_run");
+    assert_eq!(value["result"]["policy"]["no_remove"], true);
+    assert!(
+        value["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["attempted"] == false)
+    );
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), main_before);
+    assert_eq!(
+        git_output(&repo.linked, ["rev-parse", "HEAD"]),
+        topic_before
+    );
+    assert!(repo.linked.exists());
 }

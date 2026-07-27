@@ -52,3 +52,7 @@ worktrees trust commit-status     # approval state of the effective commit gener
 worktrees trust commit-approve    # interactively approve a shared generator
 worktrees trust commit-reset      # revoke commit-generator trust for this clone
 ```
+
+## Structured JSON contract
+
+Trust leaves identify as `trust.status`, `trust.reset`, `trust.commit_status`, `trust.commit_reset`, and `trust.commit_approve`. Status leaves allow omitted `input`; mutating leaves accept `input.dry_run`. Status reports configured/trusted state, source metadata, counts, and identities without ordinary command contents. Approval previews and approval-required context include the generator settings a person must review. JSON never writes approval: it returns a human-required next step. Reset dry runs emit unattempted effects; real resets distinguish `reset` and `already_reset`. Exact-leaf JSON help is runtime-derived.

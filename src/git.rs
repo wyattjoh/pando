@@ -224,6 +224,19 @@ pub fn rebase_continue(cwd: &Path) -> Result<()> {
     run_git_inherit(cwd, ["rebase", "--continue"], "rebase continuation")
 }
 
+/// Runs a lifecycle Git operation with stdin closed and both streams captured.
+///
+/// # Errors
+/// Returns an error only when Git cannot be started.
+pub fn lifecycle_git_captured(cwd: &Path, args: &[&str]) -> Result<Output> {
+    Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output()
+        .context("failed to start lifecycle Git operation")
+}
+
 /// Removes a registered worktree without deleting its branch.
 ///
 /// # Errors
@@ -248,6 +261,24 @@ pub fn remove_worktree(cwd: &Path, path: &Path, force: bool) -> Result<()> {
     } else {
         bail!("git worktree remove failed with {status}")
     }
+}
+
+/// Removes a worktree while capturing Git diagnostics for JSON execution.
+///
+/// # Errors
+/// Returns an error only when Git cannot be started.
+pub fn remove_worktree_captured(cwd: &Path, path: &Path, force: bool) -> Result<Output> {
+    let mut command = Command::new("git");
+    command.arg("worktree").arg("remove");
+    if force {
+        command.arg("--force");
+    }
+    command
+        .arg(path)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output()
+        .context("failed to start git worktree remove")
 }
 
 /// Reports whether `ancestor` is an ancestor of `descendant`.

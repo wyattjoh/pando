@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -14,10 +15,209 @@ use crate::{
     config::{EffectiveConfig, HookPhase},
     git::{self, Repository},
     hash,
+    protocol::BytePath,
     setup::{self, HookOutcome},
     smart::approve_hooks,
     trust, ui,
 };
+
+/// Stable, journal-aware merge state exposed to command adapters.
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+#[allow(clippy::struct_excessive_bools)] // Protocol facts are intentionally explicit, not state switches.
+pub struct MergeContext {
+    pub source_branch: String,
+    pub target_branch: String,
+    pub phase: MergePhase,
+    pub policy: MergePolicy,
+    pub source_commit: String,
+    pub target_commit: String,
+    pub topic_worktree: BytePath,
+    pub primary_worktree: BytePath,
+    pub cleanup_pending: bool,
+    pub journaled: bool,
+    pub rebase_active: bool,
+    pub pre_merge_hooks_trusted: bool,
+    pub pre_remove_hooks_trusted: bool,
+}
+
+#[derive(Clone, Copy, Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergePhase {
+    Planned,
+    Rebase,
+    Validation,
+    Integration,
+    Cleanup,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, JsonSchema, Serialize)]
+pub struct MergePolicy {
+    pub no_rebase: bool,
+    pub no_remove: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PreflightFailureKind {
+    DuplicateTarget,
+    PrimaryForbidden,
+    ForceRequired,
+    LifecycleActive,
+    JournalInvalid,
+    UnknownTarget,
+    PolicyConflict,
+    Dirty,
+    NotFastForwardable,
+    Blocked,
+}
+#[derive(Debug)]
+pub struct PreflightFailure {
+    pub kind: PreflightFailureKind,
+    error: anyhow::Error,
+}
+impl std::fmt::Display for PreflightFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.error)
+    }
+}
+impl std::error::Error for PreflightFailure {}
+impl From<anyhow::Error> for PreflightFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self {
+            kind: PreflightFailureKind::Blocked,
+            error,
+        }
+    }
+}
+fn preflight(kind: PreflightFailureKind, message: impl Into<String>) -> PreflightFailure {
+    PreflightFailure {
+        kind,
+        error: anyhow::anyhow!(message.into()),
+    }
+}
+type PreflightResult<T> = std::result::Result<T, PreflightFailure>;
+
+/// Read-only plan. It deliberately contains no journal path or identity.
+#[derive(Debug)]
+pub struct MergePlan {
+    pub repository: Repository,
+    pub context: MergeContext,
+    pub config: EffectiveConfig,
+    pub needs_rebase: bool,
+}
+
+/// Performs all lifecycle checks without changing Git, trust, hooks, or the journal.
+///
+/// # Errors
+/// Returns an error for an invalid or blocked lifecycle state.
+#[allow(clippy::too_many_lines)]
+pub fn plan_merge(no_rebase: bool, no_remove: bool) -> PreflightResult<MergePlan> {
+    let cwd = env::current_dir().context("failed to read the current directory")?;
+    let repository = git::repository(&cwd)?;
+    let primary = repository
+        .primary
+        .as_ref()
+        .context("cannot merge from a bare repository")?;
+    if repository.current().path == *primary {
+        return Err(preflight(
+            PreflightFailureKind::PrimaryForbidden,
+            "merge must run from a topic worktree, not the primary worktree",
+        ));
+    }
+    let identity = git::worktree_identity(&repository.current().path)?;
+    let journal = read_journal(&repository.common_dir, &identity)?;
+    let rebase_active = git::rebase_in_progress(&repository.current().path)?;
+    if let Some(state) = &journal {
+        if state.version != 1
+            || state.topic_path != repository.current().path
+            || state.topic_identity != identity
+        {
+            return Err(anyhow::anyhow!(
+                "lifecycle journal is unsupported or does not match the current topic worktree"
+            )
+            .into());
+        }
+        if state.no_rebase != no_rebase || state.no_remove != no_remove {
+            return Err(preflight(
+                PreflightFailureKind::PolicyConflict,
+                "merge retry flags conflict with the journaled lifecycle policy; rerun with the original flags",
+            ));
+        }
+    }
+    if !rebase_active && git::is_dirty(&repository.current().path)? {
+        return Err(preflight(
+            PreflightFailureKind::Dirty,
+            "the topic worktree has local changes; commit or discard them before merging",
+        ));
+    }
+    let config = EffectiveConfig::load(&repository)?;
+    let source = journal.as_ref().map_or_else(
+        || git::current_branch(&repository).map(str::to_owned),
+        |s| Ok(s.source_branch.clone()),
+    )?;
+    let target = journal.as_ref().map_or_else(
+        || config.require_target_branch().map(str::to_owned),
+        |s| Ok(s.target_branch.clone()),
+    )?;
+    git::validate_branch(primary, &target)?;
+    if primary_branch(&repository)? != target {
+        return Err(anyhow::anyhow!(
+            "configured target branch {target:?} must be checked out in the primary worktree"
+        )
+        .into());
+    }
+    let source_commit = git::head_commit(&repository.current().path)?;
+    let target_commit = git::head_commit(primary)?;
+    let cleanup_pending = journal.as_ref().is_some_and(|s| s.cleanup_pending);
+    let needs_rebase = !cleanup_pending
+        && !rebase_active
+        && !git::is_ancestor(&repository.current().path, &target, &source)?;
+    if needs_rebase && no_rebase {
+        return Err(preflight(
+            PreflightFailureKind::NotFastForwardable,
+            format!(
+                "the topic is not fast-forwardable onto {target:?}; rerun without --no-rebase to rebase it"
+            ),
+        ));
+    }
+    let phase = if cleanup_pending {
+        MergePhase::Cleanup
+    } else if rebase_active {
+        MergePhase::Rebase
+    } else {
+        MergePhase::Planned
+    };
+    let pre_merge_hooks_trusted = config.pre_merge.is_empty()
+        || trust::is_trusted(&repository, HookPhase::PreMerge, &config.pre_merge)?;
+    let remove_config =
+        EffectiveConfig::load_for_worktree(&repository, &repository.current().path)?;
+    let pre_remove_hooks_trusted = remove_config.pre_remove.is_empty()
+        || trust::is_trusted(&repository, HookPhase::PreRemove, &remove_config.pre_remove)?;
+    let context = MergeContext {
+        source_branch: source,
+        target_branch: target,
+        phase,
+        policy: MergePolicy {
+            no_rebase,
+            no_remove,
+        },
+        source_commit,
+        target_commit,
+        topic_worktree: BytePath::path(&repository.current().path),
+        primary_worktree: BytePath::path(primary),
+        cleanup_pending,
+        journaled: journal.is_some(),
+        rebase_active,
+        pre_merge_hooks_trusted,
+        pre_remove_hooks_trusted,
+    };
+    Ok(MergePlan {
+        repository,
+        context,
+        config,
+        needs_rebase,
+    })
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +235,24 @@ struct MergeJournal {
     validated_source: Option<String>,
     #[serde(default)]
     validated_target: Option<String>,
+}
+
+/// A fully validated, read-only removal plan shared by human and JSON adapters.
+#[derive(Debug)]
+pub struct RemovalPlan {
+    pub repository: Repository,
+    pub primary: PathBuf,
+    pub current: PathBuf,
+    pub targets: Vec<RemovalTarget>,
+    pub force: bool,
+}
+
+/// One target and the configuration captured during removal preflight.
+#[derive(Clone, Debug)]
+pub struct RemovalTarget {
+    pub worktree: Worktree,
+    pub config: EffectiveConfig,
+    pub stale_journal: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -59,46 +277,89 @@ impl MergeWorktreeOutcome {
 ///
 /// Returns an error when preflight, hook execution, or Git deletion fails.
 pub fn remove(branches: &[String], force: bool) -> Result<()> {
-    let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = git::repository(&cwd)?;
-    let primary = repository
-        .primary
-        .as_ref()
-        .context("cannot remove a worktree from a bare repository")?;
-    let targets = select_removal_targets(&repository, branches, force)?;
-    let mut plans = Vec::with_capacity(targets.len());
-    for target in &targets {
-        let config = EffectiveConfig::load_for_worktree(&repository, &target.path)?;
-        approve_hooks(&repository, HookPhase::PreRemove, &config.pre_remove)?;
-        plans.push(config);
+    let plan = plan_remove(branches, force)?;
+    for target in &plan.targets {
+        approve_hooks(
+            &plan.repository,
+            HookPhase::PreRemove,
+            &target.config.pre_remove,
+        )?;
     }
-    for (target, config) in targets.iter().zip(&plans) {
-        run_hooks(HookPhase::PreRemove, &config.pre_remove, &target.path)?;
+    for target in &plan.targets {
+        run_hooks(
+            HookPhase::PreRemove,
+            &target.config.pre_remove,
+            &target.worktree.path,
+        )?;
     }
-    for target in &targets {
-        check_removable(target, force)?;
-    }
-
-    let current = repository.current().path.clone();
-    let mut ordered: Vec<_> = targets.iter().collect();
-    ordered.sort_by_key(|target| target.path == current);
-    let removing_current = targets.iter().any(|target| target.path == current);
-    for target in ordered {
-        git::remove_worktree(primary, &target.path, force).with_context(|| {
+    for target in &plan.targets {
+        if let Some(path) = &target.stale_journal {
+            fs::remove_file(path).with_context(|| {
+                format!("failed to clear stale lifecycle journal {}", path.display())
+            })?;
+        }
+        git::remove_worktree(&plan.primary, &target.worktree.path, force).with_context(|| {
             format!(
                 "failed to remove worktree for branch {}",
-                target.branch_label()
+                target.worktree.branch_label()
             )
         })?;
     }
+    let removing_current = plan
+        .targets
+        .iter()
+        .any(|target| target.worktree.path == plan.current);
     if removing_current {
-        write_destination(primary)?;
+        write_destination(&plan.primary)?;
     }
-    let count = targets.len();
+    let count = plan.targets.len();
     ui::finish(ui::success_style().apply_to(format!(
         "Removed {count} worktree{}; branches retained.",
         plural(count)
     )))
+}
+
+/// Prints a human-readable removal plan without mutation or approval.
+///
+/// # Errors
+/// Returns an error when preflight or terminal rendering fails.
+pub fn remove_dry_run(branches: &[String], force: bool) -> Result<()> {
+    let plan = plan_remove(branches, force)?;
+    for target in &plan.targets {
+        ui::info(format!(
+            "Would remove worktree for {} at {}; branch retained{}.",
+            target.worktree.branch_label(),
+            target.worktree.path.display(),
+            if target.config.pre_remove.is_empty() {
+                ""
+            } else {
+                "; pre-remove hooks require approval and would run"
+            }
+        ))?;
+    }
+    ui::finish(format!(
+        "Removal plan ready for {} worktree{}.",
+        plan.targets.len(),
+        plural(plan.targets.len())
+    ))
+}
+
+/// Prints a fully validated merge plan without writing journals, running hooks, or changing Git.
+///
+/// # Errors
+/// Returns an error when merge preflight fails or output cannot be rendered.
+pub fn merge_dry_run(no_rebase: bool, no_remove: bool) -> Result<()> {
+    let plan = plan_merge(no_rebase, no_remove)?;
+    ui::finish(format!(
+        "Would merge {} into {}{}; no changes made.",
+        plan.context.source_branch,
+        plan.context.target_branch,
+        if no_remove {
+            " and retain the topic worktree"
+        } else {
+            " and remove the topic worktree"
+        }
+    ))
 }
 
 /// Integrates the current topic branch into the configured target branch.
@@ -262,6 +523,47 @@ const fn plural(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
 
+/// Performs complete removal preflight without hooks, Git mutation, or journal cleanup.
+///
+/// # Errors
+/// Returns an error for invalid repository state, targets, journals, or force policy.
+pub fn plan_remove(branches: &[String], force: bool) -> PreflightResult<RemovalPlan> {
+    let cwd = env::current_dir().context("failed to read the current directory")?;
+    let repository = git::repository(&cwd)?;
+    let primary = repository
+        .primary
+        .clone()
+        .context("cannot remove a worktree from a bare repository")?;
+    let worktrees = select_removal_targets(&repository, branches, force).map_err(|error| {
+        error
+            .downcast::<PreflightFailure>()
+            .unwrap_or_else(PreflightFailure::from)
+    })?;
+    let mut targets = Vec::with_capacity(worktrees.len());
+    for worktree in worktrees {
+        let stale_journal = inspect_removal_state(&repository, &worktree).map_err(|error| {
+            error
+                .downcast::<PreflightFailure>()
+                .unwrap_or_else(PreflightFailure::from)
+        })?;
+        let config = EffectiveConfig::load_for_worktree(&repository, &worktree.path)?;
+        targets.push(RemovalTarget {
+            worktree,
+            config,
+            stale_journal,
+        });
+    }
+    targets.sort_by_key(|target| target.worktree.path == repository.current().path);
+    let current = repository.current().path.clone();
+    Ok(RemovalPlan {
+        repository,
+        primary,
+        current,
+        targets,
+        force,
+    })
+}
+
 fn select_removal_targets(
     repository: &Repository,
     branches: &[String],
@@ -274,7 +576,11 @@ fn select_removal_targets(
     };
     names.sort();
     if names.windows(2).any(|pair| pair[0] == pair[1]) {
-        bail!("duplicate branch arguments are not allowed");
+        return Err(preflight(
+            PreflightFailureKind::DuplicateTarget,
+            "duplicate branch arguments are not allowed",
+        )
+        .into());
     }
     let mut targets = Vec::with_capacity(branches.len().max(1));
     for branch in if branches.is_empty() {
@@ -288,38 +594,44 @@ fn select_removal_targets(
             .find(
                 |worktree| matches!(&worktree.kind, WorktreeKind::Branch(name) if name == &branch),
             )
-            .with_context(|| {
-                format!("no registered topic worktree is attached to branch {branch:?}")
+            .ok_or_else(|| {
+                preflight(
+                    PreflightFailureKind::UnknownTarget,
+                    format!("no registered topic worktree is attached to branch {branch:?}"),
+                )
             })?;
         if Some(&target.path) == repository.primary.as_ref() {
-            bail!("the primary worktree cannot be removed");
+            return Err(preflight(
+                PreflightFailureKind::PrimaryForbidden,
+                "the primary worktree cannot be removed",
+            )
+            .into());
         }
         check_removable(target, force)?;
-        reconcile_removal_state(repository, target)?;
         targets.push(target.clone());
     }
     Ok(targets)
 }
 
-fn reconcile_removal_state(repository: &Repository, target: &Worktree) -> Result<()> {
+fn inspect_removal_state(repository: &Repository, target: &Worktree) -> Result<Option<PathBuf>> {
     let identity = git::worktree_identity(&target.path)?;
     let Some(state) = read_journal(&repository.common_dir, &identity)? else {
-        return Ok(());
+        return Ok(None);
     };
     if state.version != 1 || state.topic_identity != identity || state.topic_path != target.path {
-        bail!(
-            "lifecycle journal for {} is malformed or does not match its worktree identity",
-            target.path.display()
-        );
+        return Err(preflight(
+            PreflightFailureKind::JournalInvalid,
+            format!(
+                "lifecycle journal for {} is malformed or does not match its worktree identity",
+                target.path.display()
+            ),
+        )
+        .into());
     }
     if state.cleanup_pending || git::rebase_in_progress(&target.path)? {
-        bail!(
-            "worktree {} has an active lifecycle operation; rerun worktrees merge to recover it before removal",
-            target.path.display()
-        );
+        return Err(preflight(PreflightFailureKind::LifecycleActive, format!("worktree {} has an active lifecycle operation; rerun worktrees merge to recover it before removal", target.path.display())).into());
     }
-    remove_journal(&repository.common_dir, &identity)
-        .context("failed to clear a stale pre-integration lifecycle journal")
+    Ok(Some(journal_path(&repository.common_dir, &identity)))
 }
 
 fn check_removable(target: &Worktree, force: bool) -> Result<()> {
@@ -337,10 +649,7 @@ fn check_removable(target: &Worktree, force: bool) -> Result<()> {
         );
     }
     if !force && git::is_dirty(&target.path)? {
-        bail!(
-            "worktree {} has local changes; rerun with --force to discard only worktree contents",
-            target.path.display()
-        );
+        return Err(preflight(PreflightFailureKind::ForceRequired, format!("worktree {} has local changes; rerun with --force to discard only worktree contents", target.path.display())).into());
     }
     if !matches!(target.condition, Condition::Clean | Condition::Dirty) {
         bail!(

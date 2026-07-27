@@ -4,6 +4,8 @@ pub mod git;
 mod hash;
 pub mod install;
 pub mod lifecycle;
+pub mod machine;
+pub mod protocol;
 pub mod render;
 pub mod setup;
 pub mod smart;

@@ -164,10 +164,44 @@ fn remove_record(path: &Path) -> Result<()> {
     }
 }
 
+pub type CapturedHookOutput = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// Runs hooks with output captured for a machine response.
+///
+/// # Errors
+/// Returns an error when a command cannot be started.
+pub fn run_steps_captured(
+    steps: &[HookStep],
+    destination: &Path,
+) -> Result<(HookOutcome, CapturedHookOutput)> {
+    let mut diagnostics = Vec::new();
+    for step in steps {
+        let output = Command::new("/bin/sh")
+            .args(["-c", &step.command])
+            .current_dir(destination)
+            .stdin(Stdio::null())
+            .output()
+            .context("failed to run captured hook")?;
+        diagnostics.push((output.stdout, output.stderr));
+        if !output.status.success() {
+            let outcome = if output
+                .status
+                .signal()
+                .is_some_and(|signal| matches!(signal, 2 | 3 | 15))
+            {
+                HookOutcome::Interrupted
+            } else {
+                HookOutcome::Failed(output.status.code().unwrap_or(1))
+            };
+            return Ok((outcome, diagnostics));
+        }
+    }
+    Ok((HookOutcome::Success, diagnostics))
+}
+
 /// Runs phase steps sequentially from the destination.
 ///
 /// # Errors
-///
 /// Returns an error when a command cannot start, stream output, or be awaited.
 pub fn run_steps(phase: HookPhase, steps: &[HookStep], destination: &Path) -> Result<HookOutcome> {
     for (index, step) in steps.iter().enumerate() {
