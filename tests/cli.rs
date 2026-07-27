@@ -103,6 +103,27 @@ fn list_shows_current_repository_worktrees_from_nested_directory() {
 }
 
 #[test]
+fn list_abbreviates_home_directory_with_tilde() {
+    let repo = Repository::new();
+    let home = repo.temp.path().canonicalize().unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .arg("list")
+        .current_dir(&repo.main)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("~/main"), "{stderr}");
+    assert!(stderr.contains("~/feature worktree"), "{stderr}");
+    assert!(!stderr.contains(home.to_str().unwrap()), "{stderr}");
+}
+
+#[test]
 fn list_uses_semantic_terminal_styles_without_writing_stdout() {
     let repo = Repository::new();
     fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();

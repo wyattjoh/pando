@@ -52,7 +52,7 @@ fn styled_row(worktree: &Worktree, branch_width: usize) -> String {
     format!(
         "{current_marker} {}  {}",
         styled_branch_label(worktree, branch_width, false),
-        ui::worktree_data_style().apply_to(worktree.path.display()),
+        ui::worktree_data_style().apply_to(abbreviated_path(&worktree.path)),
     )
 }
 
