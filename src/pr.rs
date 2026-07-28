@@ -71,11 +71,7 @@ pub fn run(inv: Invocation) -> Result<()> {
         );
     }
     if inv.request_mode {
-        if inv.title.is_some()
-            || inv.description.is_some()
-            || inv.description_file.is_some()
-            || inv.force
-        {
+        if inv.title.is_some() || inv.description.is_some() || inv.description_file.is_some() {
             bail!("json.invalid_request: command options are forbidden with --input-output json");
         }
         let mut input = String::new();
@@ -84,12 +80,15 @@ pub fn run(inv: Invocation) -> Result<()> {
         if r.description_file.as_deref() == Some("-") {
             bail!("stdin is not allowed as a description-file source");
         }
+        if r.description.is_some() && r.description_file.is_some() {
+            bail!("json.invalid_request: description conflicts with description_file");
+        }
         return execute(
             r.title,
             body_optional(r.description, r.description_file)?,
             r.status,
             r.dry_run,
-            false,
+            inv.force,
             false,
             true,
             r.remote,
@@ -182,6 +181,56 @@ fn execute(
         .next()
         .unwrap_or_default()
         .to_owned();
+    // Resolve dirty state before generating metadata so skipped or committed changes are
+    // represented by the committed range sent to the generator.
+    let dirty = crate::git::is_dirty(&repo.current().path)?;
+    if dirty {
+        if force && !yolo {
+            return fail_dirty(json_mode);
+        }
+        if yolo {
+            crate::commit::run(crate::commit::Invocation {
+                message: None,
+                stage_all: true,
+                dry_run: false,
+                json: false,
+                request_mode: false,
+            })?;
+        } else {
+            let options = [
+                ("commit", "Commit all changes", ""),
+                ("skip", "Skip local changes", ""),
+                ("stop", "Stop", ""),
+            ];
+            loop {
+                let choice = cliclack::select("This worktree has uncommitted changes")
+                    .items(&options)
+                    .initial_value("commit")
+                    .interact()?;
+                match choice {
+                    "commit" => {
+                        crate::commit::run(crate::commit::Invocation {
+                            message: None,
+                            stage_all: false,
+                            dry_run: false,
+                            json: false,
+                            request_mode: false,
+                        })?;
+                        if !crate::git::is_dirty(&repo.current().path)? {
+                            break;
+                        }
+                    }
+                    "skip" => break,
+                    _ => {
+                        return Err(crate::ui::declined_noop(
+                            "Pull request creation cancelled; nothing was pushed or created.",
+                            "Pull request creation cancelled.",
+                        ));
+                    }
+                }
+            }
+        }
+    }
     if title.is_none() || body.is_none() {
         let config = crate::config::EffectiveConfig::load(&repo)?;
         let generator = config
@@ -207,16 +256,21 @@ fn execute(
                 .map_or("(unknown)".into(), |v| v.to_string_lossy().into_owned());
             let diffstat = git_cmd(&repo, &["diff", "--stat", &format!("{base}...HEAD")])?;
             let diff = git_cmd(&repo, &["diff", &format!("{base}...HEAD")])?;
+            let subjects = git_cmd(&repo, &["log", "--format=%s", &format!("{base}..HEAD")])?;
+            let explicit_title = title.as_deref().unwrap_or("");
+            let explicit_description = body.as_deref().unwrap_or("");
             let prompt = if let Some(template) = config.pr_generation.template.as_ref() {
                 let mut environment = Environment::new();
                 environment.add_template("pr", &template.value)?;
                 environment.get_template("pr")?.render(context! {
                     repo => repo_name, branch => head, base, git_diff_stat => diffstat,
-                    git_diff => diff, pull_request_template
+                    git_diff => diff, git_commit_subjects => subjects,
+                    explicit_title => title.as_deref().unwrap_or(""),
+                    explicit_description => body.as_deref().unwrap_or(""), pull_request_template
                 })?
             } else {
                 format!(
-                    "Generate a PR metadata document. Return exactly one first-line level-one heading, followed by the description. Preserve required headings, checklists, and sections from the pull-request template; replace placeholders and instructional comments with factual content.\nRepository: {repo_name}\nTopic branch: {head}\nTarget branch: {base}\nDiffstat:\n{diffstat}\nDiff:\n{diff}\nPull-request template:\n{pull_request_template}\n"
+                    "Generate a PR metadata document. Return exactly one first-line level-one heading, followed by the description. Preserve required headings, checklists, and sections from the pull-request template; replace placeholders and instructional comments with factual content.\nRepository: {repo_name}\nTopic branch: {head}\nTarget branch: {base}\nDiffstat:\n{diffstat}\nCommitted commit subjects:\n{subjects}\nExplicit title: {explicit_title}\nExplicit description:\n{explicit_description}\nDiff:\n{diff}\nPull-request template:\n{pull_request_template}\n"
                 )
             };
             let mut child = Command::new("/bin/sh")
@@ -251,8 +305,11 @@ fn execute(
             }
         }
     }
-    let mut title = title.unwrap_or_else(|| "Generated pull request".to_owned());
+    let mut title = title.context("PR title is required")?;
     let mut body = body.unwrap_or_default();
+    if title.trim().is_empty() {
+        bail!("PR title cannot be empty");
+    }
     if head == base {
         return fail(
             json_mode,
@@ -313,7 +370,8 @@ fn execute(
             "GitHub pull request preflight failed",
         );
     }
-    let urls: Vec<serde_json::Value> = serde_json::from_slice(&existing.stdout).unwrap_or_default();
+    let urls: Vec<serde_json::Value> = serde_json::from_slice(&existing.stdout)
+        .context("GitHub pull request preflight returned malformed JSON")?;
     if let Some(url) = urls
         .first()
         .and_then(|v| v.get("url"))
@@ -671,6 +729,36 @@ fn output(
     }
     Ok(())
 }
+fn fail_dirty(json_mode: bool) -> Result<()> {
+    let message = "topic worktree is dirty; commit changes first or retry with --yolo";
+    if json_mode {
+        crate::protocol::write(&crate::protocol::Response {
+            schema_version: crate::protocol::SCHEMA_VERSION,
+            request_id: None,
+            command: "pr.create".into(),
+            status: "error",
+            result: None,
+            error: Some(crate::protocol::ErrorBody {
+                code: "repository.dirty".into(),
+                message: message.into(),
+            }),
+            context: json!({"dirty": true}),
+            effects: vec![],
+            diagnostics: vec![],
+            next_steps: vec![crate::protocol::NextStep {
+                action: "retry".into(),
+                description:
+                    "Commit the changes, or retry with --yolo to commit them automatically.".into(),
+                mutation: "none".into(),
+                requires_human_approval: true,
+                invocation: json!({"command": "worktrees pr create --yolo"}),
+            }],
+        })?;
+        return Ok(());
+    }
+    bail!("repository.dirty: {message}")
+}
+
 fn fail(j: bool, c: &str, m: &str) -> Result<()> {
     if j {
         crate::protocol::write(&crate::protocol::failure("pr.create", None, c, m))?;
@@ -709,5 +797,23 @@ mod tests {
             Some("alice/project".into())
         );
         assert_eq!(github_repository("https://gitlab.com/alice/project"), None);
+    }
+
+    #[test]
+    fn metadata_requires_nonempty_title_and_description() {
+        assert!(parse_metadata("# \nbody").is_err());
+        assert!(parse_metadata("# title\n").is_err());
+        assert_eq!(
+            parse_metadata("# title\nbody").unwrap(),
+            ("title".into(), "body".into())
+        );
+    }
+
+    #[test]
+    fn request_rejects_description_conflict() {
+        let request: Request =
+            serde_json::from_str(r#"{"description":"inline","description_file":"body.md"}"#)
+                .unwrap();
+        assert!(request.description.is_some() && request.description_file.is_some());
     }
 }
