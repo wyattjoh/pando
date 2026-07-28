@@ -284,7 +284,7 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
 }
 
 const PICKER_FRAME_ROWS: usize = 6;
-const PICKER_CHOICE_PREFIX: &str = "      ";
+const PICKER_CHOICE_PREFIX: &str = "    ";
 const STANDARD_SELECTION_FRAME_ROWS: usize = 3;
 const STANDARD_SELECTION_MAX_ROWS: usize = 10;
 
@@ -1266,7 +1266,10 @@ mod tests {
             .unwrap();
         let choice = rendered.lines().find(|line| line.contains("main")).unwrap();
 
-        assert_eq!(header.find("BRANCH"), choice.find("main"), "{rendered}");
+        let header_column = UnicodeWidthStr::width(&header[..header.find("BRANCH").unwrap()]);
+        let choice_column = UnicodeWidthStr::width(&choice[..choice.find("main").unwrap()]);
+
+        assert_eq!(header_column, choice_column, "{rendered}");
     }
 
     #[test]
