@@ -62,6 +62,9 @@ enum Commands {
         no_rebase: bool,
         #[arg(long)]
         no_remove: bool,
+        /// Stage and commit all changes before merging.
+        #[arg(long, conflicts_with = "dry_run")]
+        yolo: bool,
         /// Validate and preview without mutation.
         #[arg(long)]
         dry_run: bool,
@@ -244,18 +247,47 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Merge {
             no_rebase,
             no_remove,
+            yolo: true,
+            dry_run: false,
+        } if json => anyhow::bail!("--yolo only supports human output"),
+        Commands::Merge {
+            no_rebase,
+            no_remove,
+            yolo: false,
             dry_run,
         } if json => machine::merge(request_mode, no_rebase, no_remove, dry_run),
         Commands::Merge {
             no_rebase,
             no_remove,
+            yolo: true,
+            dry_run: false,
+        } => {
+            commit::run(commit::Invocation {
+                message: None,
+                stage_all: true,
+                dry_run: false,
+                json: false,
+                request_mode: false,
+            })?;
+            worktrees::lifecycle::merge(no_rebase, no_remove)
+        }
+        Commands::Merge {
+            no_rebase,
+            no_remove,
+            yolo: false,
             dry_run: false,
         } => worktrees::lifecycle::merge(no_rebase, no_remove),
         Commands::Merge {
             no_rebase,
             no_remove,
+            yolo: false,
             dry_run: true,
         } => worktrees::lifecycle::merge_dry_run(no_rebase, no_remove),
+        Commands::Merge {
+            yolo: true,
+            dry_run: true,
+            ..
+        } => anyhow::bail!("--yolo cannot be used with --dry-run"),
         Commands::Trust { command, dry_run } if json => {
             let id = match command {
                 TrustCommand::Status => "trust.status",
