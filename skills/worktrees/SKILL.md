@@ -31,10 +31,10 @@ the four operations above must go through `worktrees`, not `git`.
 
 ## Local setup
 
-- Binary: `worktrees` on `PATH` (pinned during generation: **v0.1.0**).
-- The installed zsh integration wraps `switch`/`remove`/`merge` in a shell
-  function that `cd`s to the destination the binary prints; `command
-  worktrees ...` bypasses the wrapper and hits the real binary directly.
+- Binaries: `worktrees` and its `wt` symlink on `PATH` when installed with `just install` (pinned during generation: **v0.1.0**).
+- The installed zsh integration wraps both `worktrees` and `wt` so
+  `switch`/`remove`/`merge` can `cd` to the destination the selected binary
+  prints. `command worktrees ...` and `command wt ...` bypass the wrappers.
 - Config files the CLI reads (see `references/config.md`):
   `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml`,
   `.worktrees.yaml`, `.worktrees.local.yaml`.
@@ -90,10 +90,11 @@ for leaf contracts and approval rules.
 
 ### Install and enable the zsh integration
 ```sh
-cargo install --path .
+just install
 worktrees install
 source ${ZDOTDIR:-$HOME}/.zshrc
 ```
+`just install` installs `worktrees` with Cargo and creates `wt` as a relative symlink beside it.
 Source: README.md ("Install")
 
 ### Configure a root before creating any worktrees

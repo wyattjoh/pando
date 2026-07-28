@@ -1252,11 +1252,10 @@ fn install_preserves_zshrc_and_is_idempotent() {
 
     let integration = xdg.path().join("worktrees/worktrees.zsh");
     let generated = fs::read_to_string(&integration).unwrap();
-    assert!(generated.contains("worktrees()"));
+    assert!(generated.contains("worktrees() { _worktrees_dispatch worktrees \"$@\"; }"));
+    assert!(generated.contains("wt() { _worktrees_dispatch wt \"$@\"; }"));
     assert!(generated.contains("builtin cd -- \"$destination\""));
-    assert!(generated.contains("command worktrees \"$@\""));
-    assert!(generated.contains("# wt()"));
-    assert!(!generated.lines().any(|line| line.starts_with("wt()")));
+    assert!(generated.contains("command \"$executable\" \"$@\""));
 
     let first_zshrc = fs::read(&zshrc).unwrap();
     assert!(first_zshrc.starts_with(original));
@@ -1331,7 +1330,7 @@ fn install_falls_back_to_home_configuration_paths() {
 }
 
 #[test]
-fn installed_zsh_function_changes_the_invoking_shell_directory() {
+fn installed_zsh_wt_function_changes_the_invoking_shell_directory() {
     if Command::new("zsh").arg("--version").output().is_err() {
         eprintln!("skipping: zsh is not installed");
         return;
@@ -1348,13 +1347,15 @@ fn installed_zsh_function_changes_the_invoking_shell_directory() {
             .get_program()
             .to_owned(),
     );
+    let bin = tempfile::tempdir().unwrap();
+    symlink(&binary, bin.path().join("wt")).unwrap();
     let script = format!(
-        "source {}; worktrees switch || exit $?; builtin pwd -P",
+        "source {}; wt switch || exit $?; builtin pwd -P",
         shell_quote(&integration)
     );
     let path = format!(
         "{}:{}",
-        binary.parent().unwrap().display(),
+        bin.path().display(),
         std::env::var("PATH").unwrap()
     );
 

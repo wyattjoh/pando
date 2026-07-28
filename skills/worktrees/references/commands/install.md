@@ -18,19 +18,20 @@ After installing, restart zsh or:
 source ${ZDOTDIR:-$HOME}/.zshrc
 ```
 
-Note: this release does **not** install a `wt` command/alias (the name may
-be owned by Worktrunk); the generated zsh integration file has a commented
-example that can be enabled manually.
+The generated zsh integration does not define a `wt` shell alias. Installing
+from this checkout with `just install` creates `wt` as a relative symlink
+beside the installed `worktrees` executable, then the integration defines
+`worktrees` and `wt` wrapper functions that invoke their corresponding binaries.
 
-The installed function wraps `switch`/`remove`/`merge` so it can `cd` the
-parent shell to the destination path the binary prints on stdout; all other
-subcommands pass straight through to the real binary. `command worktrees
-...` always bypasses the wrapper.
+Both installed functions wrap `switch`/`remove`/`merge` so they can `cd` the
+parent shell to the destination path the selected binary prints on stdout;
+all other subcommands pass straight through. `command worktrees ...` and
+`command wt ...` always bypass the wrappers.
 
 Both JSON modes are supported; agents use versioned request mode.
 
 ```sh
-cargo install --path .
+just install
 worktrees install
 source ${ZDOTDIR:-$HOME}/.zshrc
 ```
