@@ -37,7 +37,7 @@ printf '%s\n' '{"schema_version":1,"input":{"property":"primary_worktree_path"}}
   | worktrees get --input-output json
 ```
 
-`--output json` instead uses ordinary argv flags as input. Both modes emit exactly one newline-terminated JSON document on stdout and no ordinary stderr on typed success or failure. Requests reject unknown fields, unsupported versions, trailing data, and mixed stdin/argv command input. Paths use tagged UTF-8 or base64 objects; responses carry typed results or errors plus context, effects, bounded diagnostics, and recovery steps.
+`--output json` instead uses ordinary argv flags as input. Both modes emit exactly one newline-terminated JSON document on stdout and no ordinary stderr on typed success or failure. Requests reject unknown fields, unsupported versions, trailing data, and mixed stdin/argv command input. Paths use tagged UTF-8 or base64 objects; responses carry typed results or errors plus context, effects, bounded diagnostics, and recovery steps. Structured `list` worktrees and `switch.selection_required` choices include nullable `last_commit_at` values as RFC 3339 committer timestamps with explicit offsets. These records stay in Git order regardless of personal sort configuration; metadata lookup failures use `null` values and a bounded diagnostic.
 
 JSON execution is deterministic and noninteractive. Mutating commands support dry-run planning, while shared trust approval and installer writes remain manual human operations. The canonical property is `primary-worktree-path` (`primary_worktree_path` in JSON); the former Main spelling is not an alias. The installed zsh wrapper passes JSON invocations and all noninteractive-shell invocations through byte-for-byte without destination capture or `cd`.
 
@@ -50,7 +50,7 @@ worktrees switch feature/login
 worktrees switch
 ```
 
-The picker lists navigable worktrees in Git's order, defaults to the current worktree, and ends with **Create or switch branch…**. Escape cancels without changing directory.
+The picker lists navigable worktrees with aligned branch, last-commit, and path columns, defaults to the current worktree, and ends with **Create or switch branch…**. Last commit means the HEAD commit's committer time and is shown in local time as `YYYY-MM-DD HH:MM`, or `unknown` when it cannot be resolved. The initial order comes from `worktrees.default-sort` and falls back to Git order. Ctrl-S cycles temporarily through Git order, branch A-Z, last commit newest-first, and path A-Z while preserving the filter and selected worktree. Escape cancels without changing directory.
 
 Branch resolution is local and has no implicit fetch:
 
@@ -77,13 +77,14 @@ Create `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml` manually:
 ```yaml
 worktrees:
   root: ../worktrees
+  default-sort: last-commit-at
 ```
 
-The global file controls only placement; it cannot define hooks. Absolute roots are used directly. Relative roots are anchored at Git's primary worktree, not the current nested directory or linked worktree.
+The global file controls placement and the personal default sort; it cannot define hooks. `default-sort` accepts `git`, `branch`, `last-commit-at`, or `path`, and defaults to `git` when omitted. Absolute roots are used directly. Relative roots are anchored at Git's primary worktree, not the current nested directory or linked worktree.
 
 ### Shared project setup
 
-A committed `.worktrees.yaml` in the invoking worktree may define setup, but cannot control placement:
+A committed `.worktrees.yaml` in the invoking worktree may define setup, but cannot control placement or the personal `default-sort` preference:
 
 ```yaml
 hooks:
@@ -102,6 +103,7 @@ A `.worktrees.local.yaml` in the primary worktree can override placement and app
 ```yaml
 worktrees:
   root: /Volumes/fast/worktrees
+  default-sort: path
 hooks:
   post-create:
     - name: Personal editor setup
@@ -114,7 +116,7 @@ Git must report this file as ignored. Add this to the primary worktree's `.gitig
 /.worktrees.local.yaml
 ```
 
-Shared hooks run before local hooks. The shared file is read from the invoking worktree so setup follows the branch from which creation begins; the local overlay is always read from the primary worktree and is shared by linked worktrees. The local root overrides the global root.
+Shared hooks run before local hooks. The shared file is read from the invoking worktree so setup follows the branch from which creation begins; the local overlay is always read from the primary worktree and is shared by linked worktrees. The local root and default sort override their global values.
 
 If a configured root is inside the primary checkout, that destination must also be ignored before creation. For example, with `root: .worktrees`, add:
 
@@ -267,7 +269,7 @@ Queries work from nested directories. Branch-dependent properties fail in detach
 worktrees list
 ```
 
-The aligned table includes Git's worktree order, branch, absolute path, current `*` marker, dirty state, and exceptional detached, bare, locked, prunable, missing, inaccessible, or unknown states.
+The aligned table shows `BRANCH`, `LAST COMMIT AT`, and `PATH`, plus the current `*` marker, dirty state, and exceptional detached, bare, locked, prunable, missing, inaccessible, or unknown states. Last-commit values use each HEAD commit's committer timestamp in local `YYYY-MM-DD HH:MM` form, or `unknown` when metadata is unavailable. The active branch, last-commit, or path sort has a direction arrow; Git order is named in the heading. Human ordering follows `worktrees.default-sort`, while structured JSON always preserves Git's discovery order.
 
 ## `wt` short name
 

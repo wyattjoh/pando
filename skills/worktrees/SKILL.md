@@ -64,7 +64,10 @@ Requests reject unknown fields, trailing data, unsupported versions, and
 mixed command flags. Dry-run mutating requests use `input.dry_run:true`.
 Never construct a remove request with `force:true` without explicit user
 approval. JSON cannot grant hook or generator trust or authorize installer
-writes. See the command references for leaf contracts and approval rules.
+writes. Structured worktree records expose nullable RFC 3339
+`last_commit_at` values and always retain Git discovery order, regardless of
+the human `worktrees.default-sort` preference. See the command references
+for leaf contracts and approval rules.
 
 ## Anatomy
 
@@ -99,7 +102,10 @@ No root is ever created automatically — this is required before the first `swi
 # ${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml
 worktrees:
   root: ../worktrees
+  default-sort: last-commit-at # git, branch, last-commit-at, or path
 ```
+The ignored `.worktrees.local.yaml` overlay may override both values; committed
+`.worktrees.yaml` cannot set the personal `default-sort` preference.
 Source: README.md ("Global placement")
 
 ### Switch to / create a branch worktree
@@ -107,6 +113,9 @@ Source: README.md ("Global placement")
 worktrees switch feature/login   # exact branch
 worktrees switch                 # interactive picker
 ```
+The picker shows local HEAD committer timestamps and starts in the configured
+sort mode. Ctrl-S cycles Git order, branch A-Z, last commit newest-first, and
+path A-Z without persisting the change or losing the filter/selection.
 Source: README.md ("Switching and creating")
 
 ### Stage deliberately, then commit as an agent — `--input-output json`

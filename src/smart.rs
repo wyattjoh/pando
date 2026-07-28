@@ -15,12 +15,12 @@ use siphasher::sip::SipHasher13;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    WorktreeKind,
+    SortMode, Worktree, WorktreeKind,
     config::{EffectiveConfig, HookPhase, HookStep},
     git::{self, Repository},
     render,
     setup::{self, HookOutcome},
-    trust, ui,
+    sorted_worktree_indices, trust, ui,
 };
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -53,10 +53,9 @@ pub enum TrustCommand {
 /// Returns an error when repository planning, user approval, creation, or setup fails.
 pub fn switch(branch: Option<String>) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = git::repository(&cwd)?;
     match branch {
-        Some(branch) => resolve_and_switch(&repository, &branch),
-        None => pick_and_switch(&repository),
+        Some(branch) => resolve_and_switch(&git::repository(&cwd)?, &branch),
+        None => pick_and_switch(&git::repository_with_metadata(&cwd)?),
     }
 }
 
@@ -258,60 +257,33 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
     if choices.is_empty() {
         bail!("the current repository has no navigable worktrees");
     }
-    let default = choices
-        .iter()
-        .position(|worktree| worktree.current)
-        .unwrap_or(0);
-    let branch_action = choices.len();
-    let mut labels = render::menu_labels(&choices);
-    labels.push(
-        ui::interactive(ui::shortcut_style())
-            .apply_to("+ Create or switch branches...")
-            .to_string(),
-    );
-    let current = choices
-        .iter()
-        .map(|worktree| worktree.current)
-        .chain(std::iter::once(false))
-        .collect();
-    let shortcuts = choices
-        .iter()
-        .map(|worktree| !worktree.current)
-        .chain(std::iter::once(true))
-        .collect();
-    let filters = choices
-        .iter()
-        .map(|worktree| {
-            format!(
-                "{} {} {}",
-                worktree.branch_label(),
-                worktree.state_label(),
-                worktree.path.display()
-            )
-        })
-        .chain(std::iter::once("create switch branches".to_owned()))
-        .collect();
+    let default_sort = EffectiveConfig::load_default_sort(repository)?;
+    if let Some(warning) = &repository.metadata_warning {
+        ui::warning(warning)?;
+    }
     ui::ensure_interactive("worktree selection requires an interactive terminal")?;
     let selection = ui::prompt_result(
-        WorktreePicker::new(labels, filters, current, shortcuts, default).interact(),
+        WorktreePicker::from_worktrees(choices.clone(), default_sort).interact(),
         "selection cancelled",
         "failed to read worktree selection from the terminal",
     )?;
-    if selection < choices.len() {
-        let chosen = choices[selection];
-        let branch = match &chosen.kind {
-            WorktreeKind::Branch(branch) => Some(branch.as_str()),
-            _ => None,
-        };
-        return enter_existing(repository, &chosen.path, branch);
+    match selection {
+        PickerChoice::Worktree(identity) => {
+            let chosen = choices[identity];
+            let branch = match &chosen.kind {
+                WorktreeKind::Branch(branch) => Some(branch.as_str()),
+                _ => None,
+            };
+            enter_existing(repository, &chosen.path, branch)
+        }
+        PickerChoice::Create => {
+            let branch = read_branch_name()?;
+            resolve_and_switch(repository, &branch)
+        }
     }
-
-    debug_assert_eq!(selection, branch_action);
-    let branch = read_branch_name()?;
-    resolve_and_switch(repository, &branch)
 }
 
-const PICKER_FRAME_ROWS: usize = 5;
+const PICKER_FRAME_ROWS: usize = 6;
 const STANDARD_SELECTION_FRAME_ROWS: usize = 3;
 const STANDARD_SELECTION_MAX_ROWS: usize = 10;
 
@@ -330,11 +302,69 @@ fn picker_viewport_rows(terminal_rows: u16) -> usize {
         .max(1)
 }
 
-struct WorktreePicker {
-    labels: Vec<String>,
-    filters: Vec<String>,
-    current: Vec<bool>,
-    shortcuts: Vec<bool>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PickerChoice {
+    Worktree(usize),
+    Create,
+}
+
+struct PickerItem {
+    choice: PickerChoice,
+    label: String,
+    filter: String,
+    current: bool,
+    shortcut: bool,
+}
+
+impl PickerItem {
+    fn worktree(identity: usize, worktree: &Worktree, label: String) -> Self {
+        Self {
+            choice: PickerChoice::Worktree(identity),
+            label,
+            filter: format!(
+                "{} {} {}",
+                worktree.branch_label(),
+                worktree.state_label(),
+                worktree.path.display()
+            ),
+            current: worktree.current,
+            shortcut: !worktree.current,
+        }
+    }
+
+    fn create(label: String) -> Self {
+        Self {
+            choice: PickerChoice::Create,
+            label,
+            filter: "create switch branches".to_owned(),
+            current: false,
+            shortcut: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn test(
+        identity: usize,
+        label: impl Into<String>,
+        filter: impl Into<String>,
+        current: bool,
+        shortcut: bool,
+    ) -> Self {
+        Self {
+            choice: PickerChoice::Worktree(identity),
+            label: label.into(),
+            filter: filter.into(),
+            current,
+            shortcut,
+        }
+    }
+}
+
+struct WorktreePicker<'a> {
+    worktrees: Vec<&'a Worktree>,
+    items: Vec<PickerItem>,
+    order: Vec<usize>,
+    sort: SortMode,
     selected: usize,
     number_start: usize,
     viewport_rows: usize,
@@ -342,19 +372,37 @@ struct WorktreePicker {
     filter: String,
 }
 
-impl WorktreePicker {
-    fn new(
-        labels: Vec<String>,
-        filters: Vec<String>,
-        current: Vec<bool>,
-        shortcuts: Vec<bool>,
-        selected: usize,
-    ) -> Self {
+impl<'a> WorktreePicker<'a> {
+    fn from_worktrees(worktrees: Vec<&'a Worktree>, sort: SortMode) -> Self {
+        let selected_identity = PickerChoice::Worktree(
+            worktrees
+                .iter()
+                .position(|worktree| worktree.current)
+                .unwrap_or(0),
+        );
+        let labels = render::menu_labels(&worktrees);
+        let mut items = worktrees
+            .iter()
+            .enumerate()
+            .zip(labels)
+            .map(|((identity, worktree), label)| PickerItem::worktree(identity, worktree, label))
+            .collect::<Vec<_>>();
+        items.push(PickerItem::create(
+            ui::interactive(ui::shortcut_style())
+                .apply_to("+ Create or switch branches...")
+                .to_string(),
+        ));
+        let mut order = sorted_worktree_indices(&worktrees, sort);
+        order.push(items.len() - 1);
+        let selected = order
+            .iter()
+            .position(|index| items[*index].choice == selected_identity)
+            .unwrap_or(0);
         Self {
-            labels,
-            filters,
-            current,
-            shortcuts,
+            worktrees,
+            items,
+            order,
+            sort,
             selected,
             number_start: selected.saturating_add(1),
             viewport_rows: 20,
@@ -363,7 +411,23 @@ impl WorktreePicker {
         }
     }
 
-    fn interact(mut self) -> io::Result<usize> {
+    #[cfg(test)]
+    fn new(items: Vec<PickerItem>, selected: usize) -> Self {
+        let order = (0..items.len()).collect();
+        Self {
+            worktrees: Vec::new(),
+            items,
+            order,
+            sort: SortMode::Git,
+            selected,
+            number_start: selected.saturating_add(1),
+            viewport_rows: 20,
+            terminal_columns: None,
+            filter: String::new(),
+        }
+    }
+
+    fn interact(mut self) -> io::Result<PickerChoice> {
         let term = Term::stderr();
         if !term.is_term() {
             return Err(io::ErrorKind::NotConnected.into());
@@ -374,7 +438,7 @@ impl WorktreePicker {
         result
     }
 
-    fn interact_inner(&mut self, mut term: &Term) -> io::Result<usize> {
+    fn interact_inner(&mut self, mut term: &Term) -> io::Result<PickerChoice> {
         let mut previous_frame = String::new();
         let mut shortcut_prefix = false;
         loop {
@@ -399,6 +463,11 @@ impl WorktreePicker {
             if let Some(selection) = self.shortcut_selection(&key) {
                 return Ok(selection);
             }
+            if key == Key::Char('\u{13}') {
+                self.cycle_sort();
+                shortcut_prefix = false;
+                continue;
+            }
             // `console` reports Ctrl-A as Home on Unix.
             if key == Key::Home {
                 shortcut_prefix = true;
@@ -412,12 +481,12 @@ impl WorktreePicker {
                             &visible,
                             self.selected,
                             self.number_start,
-                            self.number_start + 8 == self.shortcuts.len() - 1,
+                            self.number_start + 8 == self.items.len() - 1,
                         )
                         .iter()
                         .find(|(_, shortcut)| *shortcut == number)
                     {
-                        return Ok(*index);
+                        return Ok(self.items[*index].choice);
                     }
                     continue;
                 }
@@ -429,14 +498,16 @@ impl WorktreePicker {
                 }
                 Key::ArrowDown if self.selected + 1 < visible.len() => {
                     self.selected += 1;
-                    let action = self.shortcuts.len() - 1;
+                    let action = self.items.len() - 1;
                     self.number_start = if self.selected + 9 <= action {
                         self.selected + 1
                     } else {
                         action.saturating_sub(8)
                     };
                 }
-                Key::Enter if !visible.is_empty() => return Ok(visible[self.selected]),
+                Key::Enter if !visible.is_empty() => {
+                    return Ok(self.items[visible[self.selected]].choice);
+                }
                 Key::Escape | Key::CtrlC => return Err(io::ErrorKind::Interrupted.into()),
                 Key::Backspace => {
                     self.filter.pop();
@@ -453,12 +524,36 @@ impl WorktreePicker {
         }
     }
 
+    fn cycle_sort(&mut self) {
+        let selected_identity = self
+            .visible()
+            .get(self.selected)
+            .map(|index| self.items[*index].choice);
+        self.sort = self.sort.next();
+        self.order = sorted_worktree_indices(&self.worktrees, self.sort);
+        let create = self
+            .items
+            .iter()
+            .position(|item| item.choice == PickerChoice::Create)
+            .expect("the create action is always present");
+        self.order.push(create);
+        let visible = self.visible();
+        self.selected = selected_identity
+            .and_then(|identity| {
+                visible
+                    .iter()
+                    .position(|index| self.items[*index].choice == identity)
+            })
+            .unwrap_or(0);
+        self.number_start = self.selected.saturating_add(1);
+    }
+
     fn visible(&self) -> Vec<usize> {
         let needle = self.filter.to_lowercase();
-        self.filters
+        self.order
             .iter()
-            .enumerate()
-            .filter_map(|(index, filter)| filter.to_lowercase().contains(&needle).then_some(index))
+            .copied()
+            .filter(|index| self.items[*index].filter.to_lowercase().contains(&needle))
             .collect()
     }
 
@@ -476,7 +571,7 @@ impl WorktreePicker {
         desired_start.min(last_page_start)
     }
 
-    fn displayed<'a>(&self, visible: &'a [usize], start: usize) -> &'a [usize] {
+    fn displayed<'visible>(&self, visible: &'visible [usize], start: usize) -> &'visible [usize] {
         let has_above = start > 0;
         let rows_before_bottom_hint = self.viewport_rows.saturating_sub(usize::from(has_above));
         let has_below = visible.len() > start + rows_before_bottom_hint;
@@ -484,8 +579,14 @@ impl WorktreePicker {
         &visible[start..visible.len().min(start + item_rows)]
     }
 
-    fn shortcut_selection(&self, key: &Key) -> Option<usize> {
-        (key == &Key::BackTab).then_some(self.labels.len() - 1)
+    fn shortcut_selection(&self, key: &Key) -> Option<PickerChoice> {
+        if key != &Key::BackTab {
+            return None;
+        }
+        self.items
+            .iter()
+            .find(|item| item.choice == PickerChoice::Create)
+            .map(|item| item.choice)
     }
 
     fn numbered(
@@ -499,7 +600,7 @@ impl WorktreePicker {
             .iter()
             .copied()
             .filter(|index| {
-                self.shortcuts[*index]
+                self.items[*index].shortcut
                     && (pinned_at_bottom || visible.get(selected).copied() != Some(*index))
             })
             .take(9)
@@ -515,9 +616,9 @@ impl WorktreePicker {
             visible,
             self.selected.saturating_sub(displayed_start),
             self.number_start.saturating_sub(displayed_start),
-            self.number_start + 8 == self.shortcuts.len() - 1,
+            self.number_start + 8 == self.items.len() - 1,
         );
-        let pinned_at_bottom = self.number_start + 8 == self.shortcuts.len() - 1;
+        let pinned_at_bottom = self.number_start + 8 == self.items.len() - 1;
         if visible_len == 0 {
             self.render_hint(&mut output, "No worktrees match this filter".to_owned());
         } else if displayed_start > 0 {
@@ -557,6 +658,11 @@ impl WorktreePicker {
             .apply_to(filter)
             .to_string();
         self.write_fitted_line(output, &filter_prefix, &filter);
+
+        let columns = ui::interactive(ui::muted_style())
+            .apply_to(render::menu_header(&self.worktrees, self.sort))
+            .to_string();
+        self.write_fitted_line(output, &filter_prefix, &columns);
     }
 
     fn render_hint(&self, output: &mut String, message: String) {
@@ -575,7 +681,7 @@ impl WorktreePicker {
         pinned_at_bottom: bool,
         numbered: &[(usize, usize)],
     ) {
-        let marker = if self.current[index] {
+        let marker = if self.items[index].current {
             ui::interactive(ui::accent_style().bold())
                 .apply_to("*")
                 .to_string()
@@ -602,10 +708,10 @@ impl WorktreePicker {
         };
         let label = if is_selected {
             ui::interactive(ui::selected_style())
-                .apply_to(strip_ansi_codes(&self.labels[index]))
+                .apply_to(strip_ansi_codes(&self.items[index].label))
                 .to_string()
         } else {
-            self.labels[index].clone()
+            self.items[index].label.clone()
         };
         let prefix = format!(
             "{}  {selected} {marker} ",
@@ -632,7 +738,7 @@ impl WorktreePicker {
         )
         .expect("writing to a string cannot fail");
         let prefix = format!("{}  ", ui::interactive(ui::accent_style()).apply_to("└"));
-        let help = picker_help();
+        let help = picker_help(self.sort);
         self.write_fitted_line(output, &prefix, &help);
     }
 
@@ -685,12 +791,13 @@ fn truncate_styled(value: &str, max_width: usize) -> String {
     }
 }
 
-fn picker_help() -> String {
+fn picker_help(sort: SortMode) -> String {
     let mut output = String::new();
     for (index, (shortcut, description)) in [
         ("↑/↓", "navigate"),
         ("Ctrl-A then 1–9", "select"),
         ("Shift-Tab", "create"),
+        ("Ctrl-S", "sort"),
         ("type to filter", ""),
         ("Enter", "select"),
         ("Esc/Ctrl-C", "cancel"),
@@ -722,6 +829,13 @@ fn picker_help() -> String {
             .expect("writing to a string cannot fail");
         }
     }
+    write!(
+        output,
+        "{}{}",
+        ui::interactive(ui::muted_style()).apply_to(" · "),
+        ui::interactive(ui::muted_style()).apply_to(sort.label())
+    )
+    .expect("writing to a string cannot fail");
     output
 }
 
@@ -1063,22 +1177,47 @@ mod tests {
     use console::{Key, strip_ansi_codes};
     use unicode_width::UnicodeWidthStr;
 
-    use super::{WorktreePicker, picker_viewport_rows, port_for_branch, rendered_physical_rows};
-    use crate::ui;
+    use super::{
+        PickerChoice, PickerItem, WorktreePicker, picker_viewport_rows, port_for_branch,
+        rendered_physical_rows,
+    };
+    use crate::{Condition, SortMode, Worktree, WorktreeKind, ui};
+
+    fn picker_item(
+        identity: usize,
+        label: impl Into<String>,
+        current: bool,
+        shortcut: bool,
+    ) -> PickerItem {
+        let label = label.into();
+        PickerItem::test(identity, label.clone(), label, current, shortcut)
+    }
+
+    fn worktree(path: &str, branch: &str, current: bool) -> Worktree {
+        Worktree {
+            path: path.into(),
+            head: None,
+            last_commit_at: None,
+            kind: WorktreeKind::Branch(branch.to_owned()),
+            locked: None,
+            prunable: None,
+            current,
+            condition: Condition::Clean,
+        }
+    }
 
     #[test]
-    fn picker_reserves_a_row_to_avoid_scrolling_its_header() {
-        assert_eq!(picker_viewport_rows(20), 15);
+    fn picker_reserves_rows_for_column_headers_without_scrolling() {
+        assert_eq!(picker_viewport_rows(20), 14);
         assert_eq!(picker_viewport_rows(5), 1);
     }
 
     #[test]
     fn picker_stops_scrolling_at_the_last_full_page() {
         let mut picker = WorktreePicker::new(
-            (0..20).map(|index| index.to_string()).collect(),
-            (0..20).map(|index| index.to_string()).collect(),
-            vec![false; 20],
-            vec![true; 20],
+            (0..20)
+                .map(|index| picker_item(index, index.to_string(), false, true))
+                .collect(),
             19,
         );
         picker.viewport_rows = 15;
@@ -1092,10 +1231,9 @@ mod tests {
     #[test]
     fn picker_shows_hints_for_results_outside_the_page() {
         let mut picker = WorktreePicker::new(
-            (0..20).map(|index| index.to_string()).collect(),
-            (0..20).map(|index| index.to_string()).collect(),
-            vec![false; 20],
-            vec![true; 20],
+            (0..20)
+                .map(|index| picker_item(index, index.to_string(), false, true))
+                .collect(),
             0,
         );
         picker.viewport_rows = 15;
@@ -1121,10 +1259,10 @@ mod tests {
             .apply_to("second")
             .to_string();
         let picker = WorktreePicker::new(
-            vec![first, second.clone()],
-            vec!["first".to_owned(), "second".to_owned()],
-            vec![true, false],
-            vec![false, true],
+            vec![
+                PickerItem::test(0, first, "first", true, false),
+                PickerItem::test(1, second.clone(), "second", false, true),
+            ],
             0,
         );
 
@@ -1143,13 +1281,7 @@ mod tests {
 
     #[test]
     fn picker_renders_a_no_match_state_without_a_selection() {
-        let mut picker = WorktreePicker::new(
-            vec!["main".to_owned()],
-            vec!["main".to_owned()],
-            vec![true],
-            vec![false],
-            0,
-        );
+        let mut picker = WorktreePicker::new(vec![picker_item(0, "main", true, false)], 0);
         picker.filter = "missing".to_owned();
 
         let rendered = picker.render(&[], 0, 0);
@@ -1162,13 +1294,8 @@ mod tests {
         let label = ui::interactive(ui::worktree_data_style())
             .apply_to("feature/with-a-very-long-name  ~/a/path/that-is-too-wide")
             .to_string();
-        let mut picker = WorktreePicker::new(
-            vec![label],
-            vec!["feature".to_owned()],
-            vec![true],
-            vec![false],
-            0,
-        );
+        let mut picker =
+            WorktreePicker::new(vec![PickerItem::test(0, label, "feature", true, false)], 0);
         let terminal_columns = 48;
         picker.terminal_columns = Some(terminal_columns);
         let rendered = picker.render(&[0], 0, 1);
@@ -1182,10 +1309,10 @@ mod tests {
     #[test]
     fn picker_compacts_markers_when_structural_chrome_does_not_fit() {
         let mut picker = WorktreePicker::new(
-            vec!["main".to_owned(), "feature".to_owned()],
-            vec!["main".to_owned(), "feature".to_owned()],
-            vec![true, false],
-            vec![false, true],
+            vec![
+                picker_item(0, "main", true, false),
+                picker_item(1, "feature", false, true),
+            ],
             0,
         );
         picker.terminal_columns = Some(4);
@@ -1211,10 +1338,10 @@ mod tests {
             warning_style.apply_to("*")
         );
         let mut picker = WorktreePicker::new(
-            vec!["first".to_owned(), dirty_label],
-            vec!["first".to_owned(), "dirty".to_owned()],
-            vec![true, false],
-            vec![false, true],
+            vec![
+                picker_item(0, "first", true, false),
+                PickerItem::test(1, dirty_label, "dirty", false, true),
+            ],
             0,
         );
         picker.terminal_columns = Some(15);
@@ -1233,15 +1360,50 @@ mod tests {
     #[test]
     fn picker_shift_tab_selects_the_create_action() {
         let picker = WorktreePicker::new(
-            vec!["main".to_owned(), "Create".to_owned()],
-            vec!["main".to_owned(), "Create".to_owned()],
-            vec![true, false],
-            vec![false, true],
+            vec![
+                picker_item(0, "main", true, false),
+                PickerItem::create("Create".to_owned()),
+            ],
             0,
         );
 
-        assert_eq!(picker.shortcut_selection(&Key::BackTab), Some(1));
+        assert_eq!(
+            picker.shortcut_selection(&Key::BackTab),
+            Some(PickerChoice::Create)
+        );
         assert_eq!(picker.shortcut_selection(&Key::CtrlC), None);
+    }
+
+    #[test]
+    fn picker_sorting_preserves_choice_identity_and_pins_create_last() {
+        let main = worktree("/repo/main", "z-main", true);
+        let feature = worktree("/repo/feature", "a-feature", false);
+        let mut picker = WorktreePicker::from_worktrees(vec![&main, &feature], SortMode::Git);
+
+        picker.cycle_sort();
+
+        let visible = picker.visible();
+        assert_eq!(
+            picker.items[visible[picker.selected]].choice,
+            PickerChoice::Worktree(0)
+        );
+        assert_eq!(
+            picker.items[*visible.last().unwrap()].choice,
+            PickerChoice::Create
+        );
+
+        picker.selected = visible.len() - 1;
+        picker.cycle_sort();
+
+        let visible = picker.visible();
+        assert_eq!(
+            picker.items[visible[picker.selected]].choice,
+            PickerChoice::Create
+        );
+        assert_eq!(
+            picker.items[*visible.last().unwrap()].choice,
+            PickerChoice::Create
+        );
     }
 
     #[test]

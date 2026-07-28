@@ -6,7 +6,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::git::{self, Repository};
+use crate::{
+    SortMode,
+    git::{self, Repository},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum HookPhase {
@@ -54,8 +57,11 @@ impl HookStep {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RootConfig {
-    root: PathBuf,
+struct LocalWorktreesConfig {
+    #[serde(default)]
+    root: Option<PathBuf>,
+    #[serde(default, rename = "default-sort")]
+    default_sort: Option<SortMode>,
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,6 +70,8 @@ struct WorktreesConfig {
     root: Option<PathBuf>,
     #[serde(default, rename = "target-branch")]
     target_branch: Option<String>,
+    #[serde(default, rename = "default-sort")]
+    default_sort: Option<SortMode>,
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,7 +140,7 @@ struct SharedConfig {
 #[serde(deny_unknown_fields)]
 struct LocalConfig {
     #[serde(default)]
-    worktrees: Option<RootConfig>,
+    worktrees: Option<LocalWorktreesConfig>,
     #[serde(default)]
     hooks: Option<HooksConfig>,
     #[serde(default)]
@@ -162,6 +170,7 @@ pub struct EffectiveGeneration {
 pub struct EffectiveConfig {
     pub root: Option<PathBuf>,
     pub target_branch: Option<String>,
+    pub default_sort: SortMode,
     pub post_create: Vec<HookStep>,
     pub pre_merge: Vec<HookStep>,
     pub pre_remove: Vec<HookStep>,
@@ -178,12 +187,32 @@ impl EffectiveConfig {
         Self::load_for_worktree(repository, &repository.current().path)
     }
 
+    /// Loads the personal human-interface sort preference without resolving placement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when configured files are invalid or inaccessible.
+    pub fn load_default_sort(repository: &Repository) -> Result<SortMode> {
+        Ok(
+            Self::load_for_worktree_inner(repository, &repository.current().path, false)?
+                .default_sort,
+        )
+    }
+
     /// Loads configuration with shared lifecycle hooks from `worktree`.
     ///
     /// # Errors
     ///
     /// Returns an error when configured files are invalid or inaccessible.
     pub fn load_for_worktree(repository: &Repository, worktree: &Path) -> Result<Self> {
+        Self::load_for_worktree_inner(repository, worktree, true)
+    }
+
+    fn load_for_worktree_inner(
+        repository: &Repository,
+        worktree: &Path,
+        resolve_placement: bool,
+    ) -> Result<Self> {
         let global_path = config_home()?.join("worktrees/config.yaml");
         let global: GlobalConfig = read_yaml_optional(&global_path)?;
 
@@ -250,16 +279,12 @@ impl EffectiveConfig {
             ),
         };
 
-        let configured_root = local.worktrees.map(|section| section.root).or_else(|| {
-            global
-                .worktrees
-                .as_ref()
-                .and_then(|section| section.root.clone())
-        });
-        let root = configured_root
-            .map(|root| resolve_root(repository, &root))
-            .transpose()?;
-
+        let (root, default_sort) = resolve_worktree_settings(
+            global.worktrees.as_ref(),
+            local.worktrees.as_ref(),
+            repository,
+            resolve_placement,
+        )?;
         let local_hooks = local.hooks.unwrap_or_default();
         if let Some(path) = &local_path {
             validate_hooks(&local_hooks, path)?;
@@ -267,10 +292,16 @@ impl EffectiveConfig {
         let target_branch = shared
             .worktrees
             .and_then(|section| section.target_branch)
-            .or_else(|| global.worktrees.and_then(|section| section.target_branch));
+            .or_else(|| {
+                global
+                    .worktrees
+                    .as_ref()
+                    .and_then(|section| section.target_branch.clone())
+            });
         Ok(Self {
             root,
             target_branch,
+            default_sort,
             post_create: combine(&shared_hooks, &local_hooks, HookPhase::PostCreate),
             pre_merge: combine(&shared_hooks, &local_hooks, HookPhase::PreMerge),
             pre_remove: combine(&shared_hooks, &local_hooks, HookPhase::PreRemove),
@@ -306,6 +337,29 @@ impl EffectiveConfig {
     pub fn require_target_branch(&self) -> Result<&str> {
         self.target_branch.as_deref().context("no target branch is configured; add worktrees.target-branch to .worktrees.yaml or global config")
     }
+}
+
+fn resolve_worktree_settings(
+    global: Option<&WorktreesConfig>,
+    local: Option<&LocalWorktreesConfig>,
+    repository: &Repository,
+    resolve_placement: bool,
+) -> Result<(Option<PathBuf>, SortMode)> {
+    let configured_root = local
+        .and_then(|section| section.root.clone())
+        .or_else(|| global.and_then(|section| section.root.clone()));
+    let root = if resolve_placement {
+        configured_root
+            .map(|root| resolve_root(repository, &root))
+            .transpose()?
+    } else {
+        None
+    };
+    let default_sort = local
+        .and_then(|section| section.default_sort)
+        .or_else(|| global.and_then(|section| section.default_sort))
+        .unwrap_or_default();
+    Ok((root, default_sort))
 }
 
 fn combine(shared: &HooksConfig, local: &HooksConfig, phase: HookPhase) -> Vec<HookStep> {

@@ -3,7 +3,9 @@ use std::env;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use worktrees::{
-    commit, git, install, machine, render,
+    commit,
+    config::EffectiveConfig,
+    git, install, machine, render,
     smart::{self, GetProperty, TrustCommand},
     ui,
 };
@@ -290,13 +292,17 @@ fn run(cli: Cli) -> Result<()> {
 
 fn list() -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
-    let worktrees = git::discover(&cwd)?;
+    let repository = git::repository_with_metadata(&cwd)?;
+    let default_sort = EffectiveConfig::load_default_sort(&repository)?;
+    if let Some(warning) = &repository.metadata_warning {
+        ui::warning(warning)?;
+    }
     ui::info(format!(
         "{}\n{}",
-        ui::heading_style().apply_to("Worktrees"),
-        render::table(&worktrees)
+        ui::heading_style().apply_to(format!("Worktrees ({})", default_sort.label())),
+        render::table(&repository.worktrees, default_sort)
     ))?;
-    ui::finish(list_summary(&worktrees))
+    ui::finish(list_summary(&repository.worktrees))
 }
 
 fn list_summary(worktrees: &[worktrees::Worktree]) -> String {

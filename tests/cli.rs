@@ -74,6 +74,21 @@ fn git<const N: usize>(dir: &Path, args: [&str; N]) {
     );
 }
 
+fn commit_with_dates(dir: &Path, message: &str, author_date: &str, committer_date: &str) {
+    let output = Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(dir)
+        .env("GIT_AUTHOR_DATE", author_date)
+        .env("GIT_COMMITTER_DATE", committer_date)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn list_shows_current_repository_worktrees_from_nested_directory() {
     let repo = Repository::new();
@@ -100,6 +115,168 @@ fn list_shows_current_repository_worktrees_from_nested_directory() {
     );
     assert!(!stderr.contains("clean"));
     assert!(stderr.contains("2 worktrees"), "{stderr}");
+}
+
+#[test]
+fn list_uses_committer_timestamp_and_converts_it_to_local_time() {
+    let repo = Repository::new();
+    fs::write(repo.main.join("timestamp.txt"), "timestamp\n").unwrap();
+    git(&repo.main, ["add", "timestamp.txt"]);
+    commit_with_dates(
+        &repo.main,
+        "record timestamp",
+        "2030-06-07T08:09:10+0000",
+        "2024-01-02T03:04:05-0500",
+    );
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .arg("list")
+        .current_dir(&repo.main)
+        .env("TZ", "UTC0")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let branch = stderr.find("BRANCH").unwrap();
+    let last_commit = stderr.find("LAST COMMIT AT").unwrap();
+    let path = stderr.find("PATH").unwrap();
+    assert!(branch < last_commit && last_commit < path, "{stderr}");
+    assert!(stderr.contains("2024-01-02 08:04"), "{stderr}");
+    assert!(!stderr.contains("2030-06-07"), "{stderr}");
+}
+
+#[test]
+fn list_honors_global_sort_and_ignored_local_override() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("older.txt"), "older\n").unwrap();
+    git(&repo.linked, ["add", "older.txt"]);
+    commit_with_dates(
+        &repo.linked,
+        "older feature",
+        "2023-01-01T00:00:00+0000",
+        "2023-01-01T00:00:00+0000",
+    );
+    fs::write(repo.main.join("newer.txt"), "newer\n").unwrap();
+    git(&repo.main, ["add", "newer.txt"]);
+    commit_with_dates(
+        &repo.main,
+        "newer main",
+        "2024-01-01T00:00:00+0000",
+        "2024-01-01T00:00:00+0000",
+    );
+
+    let xdg = tempfile::tempdir().unwrap();
+    let config_dir = xdg.path().join("worktrees");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.yaml"),
+        "worktrees:\n  default-sort: branch\n",
+    )
+    .unwrap();
+
+    let global = Command::cargo_bin("worktrees")
+        .unwrap()
+        .arg("list")
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(global.status.success());
+    assert!(global.stdout.is_empty());
+    let global_stderr = String::from_utf8(global.stderr).unwrap();
+    assert!(
+        global_stderr.contains("Worktrees (branch A-Z)"),
+        "{global_stderr}"
+    );
+    assert!(global_stderr.contains("BRANCH ↑"), "{global_stderr}");
+    assert!(
+        global_stderr.find(repo.linked.to_str().unwrap()).unwrap()
+            < global_stderr.find(repo.main.to_str().unwrap()).unwrap(),
+        "{global_stderr}"
+    );
+
+    fs::write(
+        repo.main.join(".git/info/exclude"),
+        "/.worktrees.local.yaml\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".worktrees.local.yaml"),
+        "worktrees:\n  default-sort: last-commit-at\n",
+    )
+    .unwrap();
+    let local = Command::cargo_bin("worktrees")
+        .unwrap()
+        .arg("list")
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(local.status.success());
+    assert!(local.stdout.is_empty());
+    let local_stderr = String::from_utf8(local.stderr).unwrap();
+    assert!(
+        local_stderr.contains("Worktrees (last commit newest-first)"),
+        "{local_stderr}"
+    );
+    assert!(local_stderr.contains("LAST COMMIT AT ↓"), "{local_stderr}");
+    assert!(
+        local_stderr.find(repo.main.to_str().unwrap()).unwrap()
+            < local_stderr.find(repo.linked.to_str().unwrap()).unwrap(),
+        "{local_stderr}"
+    );
+}
+
+#[test]
+fn list_rejects_invalid_and_shared_default_sort_with_source_context() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let config_dir = xdg.path().join("worktrees");
+    let global_path = config_dir.join("config.yaml");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(&global_path, "worktrees:\n  default-sort: newest\n").unwrap();
+
+    let invalid = Command::cargo_bin("worktrees")
+        .unwrap()
+        .arg("list")
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+    assert!(invalid.stdout.is_empty());
+    let invalid_stderr = String::from_utf8(invalid.stderr).unwrap();
+    assert!(invalid_stderr.contains(&global_path.display().to_string()));
+    assert!(
+        invalid_stderr.contains("unknown variant `newest`"),
+        "{invalid_stderr}"
+    );
+
+    fs::remove_file(global_path).unwrap();
+    let shared_path = repo.main.join(".worktrees.yaml");
+    fs::write(&shared_path, "worktrees:\n  default-sort: path\n").unwrap();
+    let shared = Command::cargo_bin("worktrees")
+        .unwrap()
+        .arg("list")
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(!shared.status.success());
+    assert!(shared.stdout.is_empty());
+    let shared_stderr = String::from_utf8(shared.stderr).unwrap();
+    assert!(shared_stderr.contains(&shared_path.display().to_string()));
+    assert!(
+        shared_stderr.contains("unknown field `default-sort`"),
+        "{shared_stderr}"
+    );
 }
 
 #[test]
@@ -138,9 +315,10 @@ fn list_uses_semantic_terminal_styles_without_writing_stdout() {
     assert!(output.status.success(), "{}", output.stderr);
     assert!(output.stdout.is_empty());
     assert!(
-        output
-            .stderr
-            .contains(&forced_style(worktrees::ui::heading_style(), "Worktrees")),
+        output.stderr.contains(&forced_style(
+            worktrees::ui::heading_style(),
+            "Worktrees (Git order)"
+        )),
         "{}",
         output.stderr
     );
@@ -353,6 +531,133 @@ fn list_reports_unknown_when_git_status_fails() {
 }
 
 #[test]
+fn metadata_failure_warns_once_for_human_list_and_is_structured_for_json() {
+    let repo = Repository::new();
+    let fake_bin = repo.temp.path().join("metadata-failure-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        "#!/bin/sh\nif [ \"$1\" = cat-file ]; then echo 'metadata command failed' >&2; exit 71; fi\nexec \"$REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+    let real_git = find_executable("git");
+
+    let human = Command::cargo_bin("worktrees")
+        .unwrap()
+        .arg("list")
+        .current_dir(&repo.main)
+        .env("PATH", &fake_bin)
+        .env("REAL_GIT", &real_git)
+        .output()
+        .unwrap();
+
+    assert!(human.status.success());
+    assert!(human.stdout.is_empty());
+    let human_stderr = String::from_utf8(human.stderr).unwrap();
+    let stderr = console::strip_ansi_codes(&human_stderr);
+    assert_eq!(
+        stderr
+            .matches("failed to load last-commit metadata")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("metadata command failed"), "{stderr}");
+
+    let json = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["list", "--output", "json"])
+        .current_dir(&repo.main)
+        .env("PATH", &fake_bin)
+        .env("REAL_GIT", &real_git)
+        .output()
+        .unwrap();
+
+    assert!(json.status.success());
+    let json = assert_json_pure(&json);
+    assert!(
+        json["result"]["worktrees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|worktree| worktree["last_commit_at"].is_null())
+    );
+    let diagnostics = json["diagnostics"].as_array().unwrap();
+    assert_eq!(diagnostics.len(), 1, "{json}");
+    assert_eq!(diagnostics[0]["source"], "git.commit_metadata");
+    assert_eq!(diagnostics[0]["stream"], "metadata");
+    assert!(
+        diagnostics[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("metadata command failed"),
+        "{json}"
+    );
+}
+
+#[test]
+fn metadata_uses_one_batch_and_is_skipped_for_get() {
+    let repo = Repository::new();
+    fs::write(repo.main.join("main-head.txt"), "main\n").unwrap();
+    git(&repo.main, ["add", "main-head.txt"]);
+    git(&repo.main, ["commit", "-m", "main head"]);
+    fs::write(repo.linked.join("feature-head.txt"), "feature\n").unwrap();
+    git(&repo.linked, ["add", "feature-head.txt"]);
+    git(&repo.linked, ["commit", "-m", "feature head"]);
+
+    let fake_bin = repo.temp.path().join("metadata-batch-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        "#!/bin/sh\nif [ \"$1\" = cat-file ]; then printf 'call\\n' >> \"$CALL_LOG\"; /bin/cat > \"$INPUT_LOG\"; exec \"$REAL_GIT\" \"$@\" < \"$INPUT_LOG\"; fi\nexec \"$REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+    let real_git = find_executable("git");
+    let call_log = repo.temp.path().join("cat-file-calls");
+    let input_log = repo.temp.path().join("cat-file-input");
+
+    let get = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["get", "branch"])
+        .current_dir(&repo.main)
+        .env("PATH", &fake_bin)
+        .env("REAL_GIT", &real_git)
+        .env("CALL_LOG", &call_log)
+        .env("INPUT_LOG", &input_log)
+        .output()
+        .unwrap();
+    assert!(
+        get.status.success(),
+        "{}",
+        String::from_utf8_lossy(&get.stderr)
+    );
+    assert!(!call_log.exists());
+
+    let list = Command::cargo_bin("worktrees")
+        .unwrap()
+        .arg("list")
+        .current_dir(&repo.main)
+        .env("PATH", &fake_bin)
+        .env("REAL_GIT", &real_git)
+        .env("CALL_LOG", &call_log)
+        .env("INPUT_LOG", &input_log)
+        .output()
+        .unwrap();
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    assert_eq!(fs::read_to_string(&call_log).unwrap(), "call\n");
+    let requested_heads = fs::read_to_string(&input_log).unwrap();
+    assert_eq!(requested_heads.lines().count(), 2, "{requested_heads}");
+}
+
+#[test]
 fn list_reports_an_actionable_error_outside_a_repository() {
     let temp = tempfile::tempdir().unwrap();
 
@@ -402,6 +707,32 @@ fn switch_defaults_to_current_worktree_and_keeps_stdout_pure() {
 }
 
 #[test]
+fn switch_ctrl_s_preserves_selection_and_stdout_purity() {
+    let repo = Repository::new();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .arg("switch")
+        .current_dir(&repo.main)
+        .env("NO_COLOR", "1");
+
+    let output =
+        run_resized_pty_command(command, (24, 600), (24, 600), b"\x1b[B\x13\x13\x13\x13\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", repo.linked.canonicalize().unwrap().display())
+    );
+    let stderr = console::strip_ansi_codes(&output.stderr);
+    assert!(stderr.contains("BRANCH ↑"), "{stderr}");
+    assert!(stderr.contains("Ctrl-S sort"), "{stderr}");
+    assert!(stderr.contains("branch A-Z"), "{stderr}");
+    assert!(stderr.contains("last commit newest-first"), "{stderr}");
+    assert!(stderr.contains("path A-Z"), "{stderr}");
+    assert!(stderr.matches("Git order").count() >= 2, "{stderr}");
+}
+
+#[test]
 fn switch_picker_preflights_stdin_before_rendering() {
     let repo = Repository::new();
     let mut command = Command::cargo_bin("worktrees").unwrap();
@@ -447,10 +778,22 @@ fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
         "{}",
         output.stderr
     );
+    let discovery = worktrees::git::discover_with_metadata(&repo.main).unwrap();
+    let choices: Vec<_> = discovery
+        .worktrees
+        .iter()
+        .filter(|worktree| worktree.navigable())
+        .collect();
+    let labels = worktrees::render::menu_labels(&choices);
+    let current = choices
+        .iter()
+        .position(|worktree| worktree.current)
+        .unwrap();
+    let selected_label = console::strip_ansi_codes(&labels[current]);
     assert!(
         output.stderr.contains(&forced_style(
             worktrees::ui::selected_style(),
-            format!("main     {}", repo.main.canonicalize().unwrap().display())
+            selected_label
         )),
         "{}",
         output.stderr
@@ -3100,6 +3443,82 @@ fn assert_json_pure(output: &std::process::Output) -> serde_json::Value {
     );
     assert_eq!(output.stdout.last(), Some(&b'\n'));
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn json_list_and_switch_include_commit_times_in_stable_git_order() {
+    let repo = Repository::new();
+    fs::write(repo.main.join("main-timestamp.txt"), "main\n").unwrap();
+    git(&repo.main, ["add", "main-timestamp.txt"]);
+    commit_with_dates(
+        &repo.main,
+        "main timestamp",
+        "2030-01-01T00:00:00+0000",
+        "2024-01-02T03:04:05-0500",
+    );
+    fs::write(repo.linked.join("feature-timestamp.txt"), "feature\n").unwrap();
+    git(&repo.linked, ["add", "feature-timestamp.txt"]);
+    commit_with_dates(
+        &repo.linked,
+        "feature timestamp",
+        "2031-01-01T00:00:00+0000",
+        "2024-01-03T04:05:06+0930",
+    );
+
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        "worktrees:\n  default-sort: branch\n",
+    )
+    .unwrap();
+
+    let list = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["list", "--output", "json"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let list = assert_json_pure(&list);
+    let worktrees = list["result"]["worktrees"].as_array().unwrap();
+    assert_eq!(worktrees[0]["branch"], "main");
+    assert_eq!(worktrees[1]["branch"], "feature");
+    assert_eq!(worktrees[0]["last_commit_at"], "2024-01-02T03:04:05-05:00");
+    assert_eq!(worktrees[1]["last_commit_at"], "2024-01-03T04:05:06+09:30");
+
+    let switch = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["switch", "--output", "json"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    assert!(!switch.status.success());
+    let switch = assert_json_pure(&switch);
+    let choices = switch["context"]["choices"].as_array().unwrap();
+    assert_eq!(choices[0]["branch"], "main");
+    assert_eq!(choices[1]["branch"], "feature");
+    assert_eq!(choices[0]["last_commit_at"], "2024-01-02T03:04:05-05:00");
+    assert_eq!(choices[1]["last_commit_at"], "2024-01-03T04:05:06+09:30");
+
+    for command in ["list", "switch"] {
+        let help = Command::cargo_bin("worktrees")
+            .unwrap()
+            .args([command, "--help", "--output", "json"])
+            .current_dir(&repo.main)
+            .output()
+            .unwrap();
+        assert!(help.status.success());
+        let help = assert_json_pure(&help);
+        assert!(
+            serde_json::to_string(&help["result"])
+                .unwrap()
+                .contains("last_commit_at"),
+            "{help}"
+        );
+    }
 }
 
 #[test]
