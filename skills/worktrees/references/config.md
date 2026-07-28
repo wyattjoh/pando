@@ -73,10 +73,10 @@ worktrees:
   target-branch: main
 ```
 
-`target-branch` is required for `worktrees merge` and is **not documented
-in README.md's Configuration section** — it only surfaces via the
-`require_target_branch` error message. Set it in `.worktrees.yaml` or the
-global config.
+`target-branch` overrides the default target for `worktrees merge`. When it
+is omitted, merge falls back to the local branch pointed to by `origin/HEAD`,
+then local `main`, then local `master`. Set it in `.worktrees.yaml` or the
+global config when a different target is needed.
 
 ## 3. Personal per-clone overlay
 

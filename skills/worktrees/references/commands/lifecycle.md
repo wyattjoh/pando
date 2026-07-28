@@ -45,7 +45,7 @@ Usage: worktrees merge [OPTIONS]
 | `--no-remove` | Keep the topic worktree/branch after a successful merge |
 | `--yolo` | Stage and commit every change with the configured generator before merging |
 
-Integrates the current clean topic into the configured target branch
+Integrates the current clean topic into the resolved target branch
 (checked out in the primary worktree) via `git merge --ff-only`. A diverged
 topic rebases onto the target by default. `--yolo` first runs the equivalent
 of `worktrees commit --stage-all` and continues only if the commit succeeds.
@@ -53,11 +53,10 @@ It supports human output only and conflicts with `--dry-run`. Phase-specific
 `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries (see
 `../config.md`).
 
-Requires `worktrees.target-branch` to be set in `.worktrees.yaml` or the
-global config — `merge` errors otherwise. This key is **not** documented in
-README.md's Configuration section; it only surfaces via the
-`require_target_branch` error message ("add worktrees.target-branch to
-.worktrees.yaml or global config").
+Uses `worktrees.target-branch` when set in `.worktrees.yaml` or the global
+config. Otherwise, it falls back to the local branch pointed to by
+`origin/HEAD`, then local `main`, then local `master`. It errors only when no
+configured or fallback branch exists.
 
 ```yaml
 # .worktrees.yaml or global config.yaml

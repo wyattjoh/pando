@@ -1155,6 +1155,28 @@ fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
 }
 
 #[test]
+fn merge_falls_back_to_main_without_target_configuration() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("feature.txt"), "feature\n").unwrap();
+    git(&repo.linked, ["add", "feature.txt"]);
+    git(&repo.linked, ["commit", "-m", "feature change"]);
+
+    let mut merge = Command::cargo_bin("worktrees").unwrap();
+    merge
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("CLICOLOR_FORCE", "1");
+    let merged = run_pty_command(merge, b"");
+
+    assert!(merged.status.success(), "{}", merged.stderr);
+    assert!(merged.stderr.contains("into"), "{}", merged.stderr);
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s"]),
+        "feature change"
+    );
+}
+
+#[test]
 fn merge_yolo_stages_commits_and_merges_all_changes() {
     let repo = Repository::new();
     fs::write(
