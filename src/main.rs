@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use worktrees::{
     commit,
     config::EffectiveConfig,
-    git, install, machine, render,
+    git, install, machine, pr, render,
     smart::{self, GetProperty, TrustCommand},
     ui,
 };
@@ -89,11 +89,34 @@ enum Commands {
         #[command(subcommand)]
         command: TrustCommand,
     },
+    /// Create a pull request from the current published topic branch.
+    Pr {
+        #[command(subcommand)]
+        command: PrCommand,
+    },
     /// Install the managed zsh integration.
     Install {
         /// Preview installation without writing or prompting.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PrCommand {
+    Create {
+        #[arg(short, long)]
+        title: Option<String>,
+        #[arg(long, conflicts_with = "description_file")]
+        description: Option<String>,
+        #[arg(long, conflicts_with = "description")]
+        description_file: Option<String>,
+        #[arg(long, value_enum, default_value_t)]
+        status: pr::Status,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -165,7 +188,7 @@ fn main() {
 fn command_id(args: &[std::ffi::OsString]) -> Option<String> {
     let words: Vec<_> = args.iter().filter_map(|arg| arg.to_str()).collect();
     for command in [
-        "list", "switch", "get", "remove", "merge", "commit", "install",
+        "list", "switch", "get", "remove", "merge", "commit", "install", "pr",
     ] {
         if words.contains(&command) {
             return Some(command.into());
@@ -319,6 +342,26 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Install { dry_run } if json => machine::install(request_mode, dry_run),
         Commands::Install { dry_run: false } => install::run(),
         Commands::Install { dry_run: true } => install::preview(),
+        Commands::Pr {
+            command:
+                PrCommand::Create {
+                    title,
+                    description,
+                    description_file,
+                    status,
+                    dry_run,
+                    force,
+                },
+        } => pr::run(pr::Invocation {
+            title,
+            description,
+            description_file,
+            status,
+            dry_run,
+            force,
+            json,
+            request_mode,
+        }),
     }
 }
 

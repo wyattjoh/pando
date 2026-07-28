@@ -5,6 +5,7 @@ mod hash;
 pub mod install;
 pub mod lifecycle;
 pub mod machine;
+pub mod pr;
 pub mod protocol;
 pub mod render;
 pub mod setup;

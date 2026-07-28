@@ -271,6 +271,18 @@ fn parse_committer_timestamp(commit: &[u8]) -> Option<DateTime<FixedOffset>> {
 /// # Errors
 ///
 /// Returns an error for detached, bare, or unknown current worktree states.
+/// Returns the configured origin URL, when one is available.
+///
+/// # Errors
+/// Returns an error when origin is missing or Git cannot be invoked.
+pub fn remote_url(cwd: &Path) -> Result<String> {
+    git_stdout(cwd, ["remote", "get-url", "origin"])
+}
+
+/// Returns the current named branch.
+///
+/// # Errors
+/// Returns an error for detached, bare, or unknown worktrees.
 pub fn current_branch(repository: &Repository) -> Result<&str> {
     match &repository.current().kind {
         WorktreeKind::Branch(branch) => Ok(branch),
