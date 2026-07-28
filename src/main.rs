@@ -120,6 +120,9 @@ enum PrCommand {
         remote: Option<String>,
         #[arg(long)]
         force: bool,
+        /// Commit all changes and create a ready pull request without confirmation.
+        #[arg(long, conflicts_with_all = ["status", "force", "dry_run"])]
+        yolo: bool,
     },
 }
 
@@ -361,6 +364,7 @@ fn run(cli: Cli) -> Result<()> {
                     dry_run,
                     remote,
                     force,
+                    yolo,
                 },
         } => pr::run(pr::Invocation {
             title,
@@ -369,6 +373,7 @@ fn run(cli: Cli) -> Result<()> {
             status,
             dry_run,
             force,
+            yolo,
             remote,
             json,
             request_mode,

@@ -43,6 +43,7 @@ pub struct Invocation {
     pub status: Status,
     pub dry_run: bool,
     pub force: bool,
+    pub yolo: bool,
     pub json: bool,
     pub request_mode: bool,
     pub remote: Option<String>,
@@ -52,6 +53,23 @@ pub struct Invocation {
 /// # Errors
 /// Returns an error when validation, provider preflight, or creation fails.
 pub fn run(inv: Invocation) -> Result<()> {
+    if inv.yolo && (inv.json || inv.request_mode) {
+        bail!(
+            "--yolo is available only with human output; use separate commit and forced PR operations"
+        );
+    }
+    if inv.yolo {
+        return execute(
+            inv.title,
+            body_optional(inv.description, inv.description_file)?,
+            Status::Ready,
+            false,
+            true,
+            true,
+            false,
+            inv.remote,
+        );
+    }
     if inv.request_mode {
         if inv.title.is_some()
             || inv.description.is_some()
@@ -72,6 +90,7 @@ pub fn run(inv: Invocation) -> Result<()> {
             r.status,
             r.dry_run,
             false,
+            false,
             true,
             r.remote,
         );
@@ -86,6 +105,7 @@ pub fn run(inv: Invocation) -> Result<()> {
         inv.status,
         inv.dry_run,
         inv.force,
+        false,
         inv.json,
         inv.remote,
     )
@@ -103,13 +123,19 @@ fn body_optional(desc: Option<String>, file: Option<String>) -> Result<Option<St
         Ok(desc)
     }
 }
-#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::fn_params_excessive_bools
+)]
 fn execute(
     mut title: Option<String>,
     mut body: Option<String>,
     status: Status,
     dry: bool,
     force: bool,
+    yolo: bool,
     json_mode: bool,
     requested_remote: Option<String>,
 ) -> Result<()> {
@@ -234,13 +260,6 @@ fn execute(
             "current branch is the configured target branch",
         );
     }
-    if crate::git::is_dirty(&repo.current().path)? {
-        return fail(
-            json_mode,
-            "repository.dirty",
-            "topic worktree must be clean",
-        );
-    }
     if !force && !io::stdout().is_terminal() && !json_mode {
         return fail(
             json_mode,
@@ -305,6 +324,56 @@ fn execute(
             "pr.already_exists",
             &format!("an open pull request already exists: {url}"),
         );
+    }
+    let dirty = crate::git::is_dirty(&repo.current().path)?;
+    if dirty {
+        if force && !yolo {
+            bail!(
+                "repository.dirty: topic worktree is dirty; commit changes first or retry with --yolo"
+            );
+        }
+        if yolo {
+            crate::commit::run(crate::commit::Invocation {
+                message: None,
+                stage_all: true,
+                dry_run: false,
+                json: false,
+                request_mode: false,
+            })?;
+        } else {
+            let options = [
+                ("commit", "Commit all changes", ""),
+                ("skip", "Skip local changes", ""),
+                ("stop", "Stop", ""),
+            ];
+            loop {
+                let choice = cliclack::select("This worktree has uncommitted changes")
+                    .items(&options)
+                    .initial_value("commit")
+                    .interact()?;
+                match choice {
+                    "commit" => {
+                        crate::commit::run(crate::commit::Invocation {
+                            message: None,
+                            stage_all: false,
+                            dry_run: false,
+                            json: false,
+                            request_mode: false,
+                        })?;
+                        if !crate::git::is_dirty(&repo.current().path)? {
+                            break;
+                        }
+                    }
+                    "skip" => break,
+                    _ => {
+                        return Err(crate::ui::declined_noop(
+                            "Pull request creation cancelled; nothing was pushed or created.",
+                            "Pull request creation cancelled.",
+                        ));
+                    }
+                }
+            }
+        }
     }
     if !force && !dry {
         let (updated_title, updated_body) = review_metadata(
