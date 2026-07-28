@@ -284,6 +284,7 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
 }
 
 const PICKER_FRAME_ROWS: usize = 6;
+const PICKER_CHOICE_PREFIX: &str = "      ";
 const STANDARD_SELECTION_FRAME_ROWS: usize = 3;
 const STANDARD_SELECTION_MAX_ROWS: usize = 10;
 
@@ -660,7 +661,10 @@ impl<'a> WorktreePicker<'a> {
         self.write_fitted_line(output, &filter_prefix, &filter);
 
         let columns = ui::interactive(ui::muted_style())
-            .apply_to(render::menu_header(&self.worktrees, self.sort))
+            .apply_to(format!(
+                "{PICKER_CHOICE_PREFIX}{}",
+                render::menu_header(&self.worktrees, self.sort)
+            ))
             .to_string();
         self.write_fitted_line(output, &filter_prefix, &columns);
     }
@@ -1248,6 +1252,21 @@ mod tests {
         let final_rendered = picker.render(final_page, 6, visible.len());
         assert!(final_rendered.contains("↑ 6 more above"));
         assert!(!final_rendered.contains("more below"));
+    }
+
+    #[test]
+    fn picker_aligns_column_headers_with_choice_values() {
+        let worktree = worktree("/repo", "main", true);
+        let picker = WorktreePicker::from_worktrees(vec![&worktree], SortMode::Git);
+        let frame = picker.render(&[0], 0, 1);
+        let rendered = strip_ansi_codes(&frame);
+        let header = rendered
+            .lines()
+            .find(|line| line.contains("BRANCH"))
+            .unwrap();
+        let choice = rendered.lines().find(|line| line.contains("main")).unwrap();
+
+        assert_eq!(header.find("BRANCH"), choice.find("main"), "{rendered}");
     }
 
     #[test]
