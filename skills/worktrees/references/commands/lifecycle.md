@@ -43,11 +43,15 @@ Usage: worktrees merge [OPTIONS]
 |---|---|
 | `--no-rebase` | Disable the default rebase when the topic has diverged from its target |
 | `--no-remove` | Keep the topic worktree/branch after a successful merge |
+| `--yolo` | Stage and commit every change with the configured generator before merging |
 
 Integrates the current clean topic into the configured target branch
 (checked out in the primary worktree) via `git merge --ff-only`. A diverged
-topic rebases onto the target by default. Phase-specific `pre-merge` and
-`pre-remove` hooks run at their lifecycle boundaries (see `../config.md`).
+topic rebases onto the target by default. `--yolo` first runs the equivalent
+of `worktrees commit --stage-all` and continues only if the commit succeeds.
+It supports human output only and conflicts with `--dry-run`. Phase-specific
+`pre-merge` and `pre-remove` hooks run at their lifecycle boundaries (see
+`../config.md`).
 
 Requires `worktrees.target-branch` to be set in `.worktrees.yaml` or the
 global config — `merge` errors otherwise. This key is **not** documented in
@@ -78,6 +82,7 @@ Both JSON modes are supported; agents use versioned request mode.
 worktrees merge                    # (inferred)
 worktrees merge --no-rebase        # (inferred)
 worktrees merge --no-remove        # (inferred)
+worktrees merge --yolo             # commit every change, then merge
 ```
 No literal example ships in README.md for `merge` — only prose; flag
 spellings are confirmed from the compiled binary's `--help`, but the

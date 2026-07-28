@@ -1155,6 +1155,46 @@ fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
 }
 
 #[test]
+fn merge_yolo_stages_commits_and_merges_all_changes() {
+    let repo = Repository::new();
+    fs::write(
+        repo.linked.join(".worktrees.yaml"),
+        "worktrees:\n  target-branch: main\n",
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".worktrees.yaml"]);
+    git(&repo.linked, ["commit", "-m", "configure merge target"]);
+    fs::write(repo.linked.join("yolo.txt"), "ship it\n").unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        "commit:\n  generation:\n    command: 'printf \"feat: yolo merge\\n\"'\n",
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["merge", "--yolo", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s"]),
+        "feat: yolo merge"
+    );
+    assert_eq!(git_output(&repo.main, ["show", "HEAD:yolo.txt"]), "ship it");
+}
+
+#[test]
 fn install_decline_makes_no_filesystem_changes() {
     let home = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
