@@ -141,6 +141,25 @@ fn execute(
     let cwd = env::current_dir()?;
     let repo = crate::git::repository(&cwd)?;
     let config = crate::config::EffectiveConfig::load(&repo)?;
+    let metadata_required = title.is_none() || body.is_none();
+    if metadata_required {
+        let Some(generator) = config.pr_generation.command.as_ref() else {
+            return fail(
+                json_mode,
+                "pr.generator_unavailable",
+                "PR metadata generator is required when title or description is omitted; configure pr.generation.command or provide both --title and --description",
+            );
+        };
+        if generator.source == crate::config::GenerationSource::Shared
+            && !crate::trust::is_pr_generation_trusted(&repo, &config.pr_generation)?
+        {
+            return fail(
+                json_mode,
+                "trust.approval_required",
+                "shared PR generator approval is required; run worktrees trust pr-approve",
+            );
+        }
+    }
     let base =
         crate::git::resolve_target_branch(&repo.current().path, config.target_branch.as_deref())?;
     let head = crate::git::current_branch(&repo)?.to_owned();
@@ -231,78 +250,66 @@ fn execute(
             }
         }
     }
-    if title.is_none() || body.is_none() {
-        let config = crate::config::EffectiveConfig::load(&repo)?;
+    if metadata_required && !dry {
         let generator = config
             .pr_generation
             .command
             .as_ref()
-            .context("missing PR metadata generator configuration")?;
-        if generator.source == crate::config::GenerationSource::Shared
-            && !crate::trust::is_pr_generation_trusted(&repo, &config.pr_generation)?
-        {
+            .context("PR metadata generator configuration disappeared after preflight")?;
+        let pull_request_template = resolved_pull_request_template(&repo, &config)?;
+        let repo_name = repo
+            .current()
+            .path
+            .file_name()
+            .map_or("(unknown)".into(), |v| v.to_string_lossy().into_owned());
+        let diffstat = git_cmd(&repo, &["diff", "--stat", &format!("{base}...HEAD")])?;
+        let diff = git_cmd(&repo, &["diff", &format!("{base}...HEAD")])?;
+        let subjects = git_cmd(&repo, &["log", "--format=%s", &format!("{base}..HEAD")])?;
+        let explicit_title = title.as_deref().unwrap_or("");
+        let explicit_description = body.as_deref().unwrap_or("");
+        let prompt = if let Some(template) = config.pr_generation.template.as_ref() {
+            let mut environment = Environment::new();
+            environment.add_template("pr", &template.value)?;
+            environment.get_template("pr")?.render(context! {
+                repo => repo_name, branch => head, base, git_diff_stat => diffstat,
+                git_diff => diff, git_commit_subjects => subjects,
+                explicit_title => title.as_deref().unwrap_or(""),
+                explicit_description => body.as_deref().unwrap_or(""), pull_request_template
+            })?
+        } else {
+            format!(
+                "Generate a PR metadata document. Return exactly one first-line level-one heading, followed by the description. Preserve required headings, checklists, and sections from the pull-request template; replace placeholders and instructional comments with factual content.\nRepository: {repo_name}\nTopic branch: {head}\nTarget branch: {base}\nDiffstat:\n{diffstat}\nCommitted commit subjects:\n{subjects}\nExplicit title: {explicit_title}\nExplicit description:\n{explicit_description}\nDiff:\n{diff}\nPull-request template:\n{pull_request_template}\n"
+            )
+        };
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", &generator.value])
+            .current_dir(&repo.current().path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .context("generator stdin unavailable")?
+            .write_all(prompt.as_bytes())?;
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
             return fail(
                 json_mode,
-                "trust.approval_required",
-                "shared PR generator approval is required; run worktrees trust pr-approve",
+                "pr.generator_failed",
+                "PR metadata generator failed",
             );
         }
-        if !dry {
-            let pull_request_template = resolved_pull_request_template(&repo, &config)?;
-            let repo_name = repo
-                .current()
-                .path
-                .file_name()
-                .map_or("(unknown)".into(), |v| v.to_string_lossy().into_owned());
-            let diffstat = git_cmd(&repo, &["diff", "--stat", &format!("{base}...HEAD")])?;
-            let diff = git_cmd(&repo, &["diff", &format!("{base}...HEAD")])?;
-            let subjects = git_cmd(&repo, &["log", "--format=%s", &format!("{base}..HEAD")])?;
-            let explicit_title = title.as_deref().unwrap_or("");
-            let explicit_description = body.as_deref().unwrap_or("");
-            let prompt = if let Some(template) = config.pr_generation.template.as_ref() {
-                let mut environment = Environment::new();
-                environment.add_template("pr", &template.value)?;
-                environment.get_template("pr")?.render(context! {
-                    repo => repo_name, branch => head, base, git_diff_stat => diffstat,
-                    git_diff => diff, git_commit_subjects => subjects,
-                    explicit_title => title.as_deref().unwrap_or(""),
-                    explicit_description => body.as_deref().unwrap_or(""), pull_request_template
-                })?
-            } else {
-                format!(
-                    "Generate a PR metadata document. Return exactly one first-line level-one heading, followed by the description. Preserve required headings, checklists, and sections from the pull-request template; replace placeholders and instructional comments with factual content.\nRepository: {repo_name}\nTopic branch: {head}\nTarget branch: {base}\nDiffstat:\n{diffstat}\nCommitted commit subjects:\n{subjects}\nExplicit title: {explicit_title}\nExplicit description:\n{explicit_description}\nDiff:\n{diff}\nPull-request template:\n{pull_request_template}\n"
-                )
-            };
-            let mut child = Command::new("/bin/sh")
-                .args(["-c", &generator.value])
-                .current_dir(&repo.current().path)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()?;
-            child
-                .stdin
-                .take()
-                .context("generator stdin unavailable")?
-                .write_all(prompt.as_bytes())?;
-            let out = child.wait_with_output()?;
-            if !out.status.success() {
-                return fail(
-                    json_mode,
-                    "pr.generator_failed",
-                    "PR metadata generator failed",
-                );
-            }
-            let (generated_title, generated_body) = parse_metadata(
-                &String::from_utf8(out.stdout)
-                    .map_err(|_| anyhow::anyhow!("PR generator produced non-UTF-8 output"))?,
-            )?;
-            if title.is_none() {
-                title = Some(generated_title);
-            }
-            if body.is_none() {
-                body = Some(generated_body);
-            }
+        let (generated_title, generated_body) = parse_metadata(
+            &String::from_utf8(out.stdout)
+                .map_err(|_| anyhow::anyhow!("PR generator produced non-UTF-8 output"))?,
+        )?;
+        if title.is_none() {
+            title = Some(generated_title);
+        }
+        if body.is_none() {
+            body = Some(generated_body);
         }
     }
     let mut title = title.context("PR title is required")?;

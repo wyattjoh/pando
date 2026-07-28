@@ -1277,7 +1277,7 @@ pub fn install(request_mode: bool, dry_flag: bool) -> Result<()> {
         (None, dry_flag)
     };
     let plan = install::json_plan()?;
-    let effects = ["integration", "startup"]
+    let effects = ["configuration", "integration", "startup"]
         .into_iter()
         .filter(|key| plan[*key]["would_change"] == true)
         .map(|key| Effect {

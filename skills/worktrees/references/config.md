@@ -10,8 +10,10 @@ strings, and empty `name` strings are all hard errors with file context.
 | Shared | `.worktrees.yaml` in the **invoking** worktree | **no** (only `target-branch`) | **no** | yes | yes (untrusted — needs `worktrees trust commit-approve`) |
 | Local | `.worktrees.local.yaml` in the **primary** worktree | yes | yes | yes | yes |
 
-`worktrees install` never creates or edits any of these YAML files — you
-write them by hand.
+`worktrees install` adds a commented scaffold to the global YAML file. It
+never enables a setting or edits existing user configuration. The scaffold is
+idempotent and documents the required placement root, the optional target
+branch fallback, and the optional PR metadata generator.
 
 ## 1. Global placement
 
@@ -36,6 +38,16 @@ May also set the commit generator globally:
 commit:
   generation:
     command: pi --no-session --no-tools
+```
+
+For PR creation, `pr.generation.command` is required only when the title or
+description is omitted. Supplying both values explicitly bypasses this
+configuration. `worktrees install` includes this as commented guidance:
+
+```yaml
+# pr:
+#   generation:
+#     command: pi --no-session --no-tools
 ```
 
 ## 2. Shared project setup
@@ -73,10 +85,10 @@ worktrees:
   target-branch: main
 ```
 
-`target-branch` overrides the default target for `worktrees merge`. When it
-is omitted, merge falls back to the local branch pointed to by `origin/HEAD`,
-then local `main`, then local `master`. Set it in `.worktrees.yaml` or the
-global config when a different target is needed.
+`target-branch` overrides the default target for `worktrees merge` and PR
+creation. When it is omitted, operations fall back to the local branch pointed
+to by `origin/HEAD`, then local `main`, then local `master`. Set it in
+`.worktrees.yaml` or the global config when a different target is needed.
 
 ## 3. Personal per-clone overlay
 

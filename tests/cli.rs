@@ -1217,6 +1217,36 @@ fn merge_yolo_stages_commits_and_merges_all_changes() {
 }
 
 #[test]
+fn pr_missing_metadata_generator_fails_before_dirty_worktree_handling() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["pr", "create"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("pr.generator_unavailable"), "{stderr}");
+    assert!(
+        stderr.contains("provide both --title and --description"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("uncommitted changes"), "{stderr}");
+    assert!(!stderr.contains("Commit all changes"), "{stderr}");
+    assert!(repo.linked.join("dirty.txt").is_file());
+    assert_eq!(
+        git_output(&repo.linked, ["status", "--porcelain"]),
+        "?? dirty.txt"
+    );
+}
+
+#[test]
 fn install_decline_makes_no_filesystem_changes() {
     let home = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
@@ -1312,6 +1342,11 @@ fn install_preserves_zshrc_and_is_idempotent() {
         installed.stderr
     );
 
+    let config = xdg.path().join("worktrees/config.yaml");
+    let generated_config = fs::read_to_string(&config).unwrap();
+    assert!(generated_config.contains("#   root: ../worktrees"));
+    assert!(generated_config.contains("#   target-branch: main"));
+    assert!(generated_config.contains("#     command: pi --no-session --no-tools"));
     let integration = xdg.path().join("worktrees/worktrees.zsh");
     let generated = fs::read_to_string(&integration).unwrap();
     assert!(generated.contains("worktrees() { _worktrees_dispatch worktrees \"$@\"; }"));
@@ -1321,6 +1356,8 @@ fn install_preserves_zshrc_and_is_idempotent() {
 
     let first_zshrc = fs::read(&zshrc).unwrap();
     assert!(first_zshrc.starts_with(original));
+    let first_config = fs::read(&config).unwrap();
+    assert_eq!(first_config, generated_config.as_bytes());
     let first_text = String::from_utf8(first_zshrc.clone()).unwrap();
     assert_eq!(
         first_text
@@ -1340,7 +1377,44 @@ fn install_preserves_zshrc_and_is_idempotent() {
             .contains("already current")
     );
     assert_eq!(fs::read(&zshrc).unwrap(), first_zshrc);
+    assert_eq!(fs::read(&config).unwrap(), first_config);
     assert_eq!(fs::read_to_string(&integration).unwrap(), generated);
+}
+
+#[test]
+fn install_preserves_existing_global_config() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+    let config_dir = xdg.path().join("worktrees");
+    fs::create_dir_all(&config_dir).unwrap();
+    let config = config_dir.join("config.yaml");
+    let original = b"worktrees:\n  root: /custom/worktrees\ncommit:\n  generation:\n    command: custom-generator\n";
+    fs::write(&config, original).unwrap();
+
+    let installed = run_install(home.path(), xdg.path(), Some(zdot.path()), b"y\r");
+    assert!(installed.status.success(), "{}", installed.stderr);
+    let content = fs::read(&config).unwrap();
+    assert!(content.starts_with(original));
+    assert_eq!(
+        content
+            .windows(b"# >>> worktrees configuration scaffold >>>".len())
+            .filter(|window| *window == b"# >>> worktrees configuration scaffold >>>")
+            .count(),
+        1
+    );
+    assert_eq!(
+        content
+            .windows(b"# <<< worktrees configuration scaffold <<<".len())
+            .filter(|window| *window == b"# <<< worktrees configuration scaffold <<<")
+            .count(),
+        1
+    );
+    assert!(
+        String::from_utf8(content)
+            .unwrap()
+            .contains("command: custom-generator")
+    );
 }
 
 #[test]
