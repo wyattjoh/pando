@@ -344,6 +344,102 @@ pub fn local_branch_exists(cwd: &Path, branch: &str) -> Result<bool> {
 /// # Errors
 ///
 /// Returns an error when Git cannot inspect remote refs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PushPlan {
+    pub remote: String,
+    pub branch: String,
+    pub set_upstream: bool,
+}
+
+/// Plans the deterministic ordinary push for a topic branch.
+///
+/// # Errors
+/// Returns an error when the upstream is malformed, or no unique remote can be selected.
+pub fn plan_push(cwd: &Path, branch: &str) -> Result<PushPlan> {
+    let upstream = run_git(
+        cwd,
+        [
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )?;
+    if upstream.status.success() {
+        let value = String::from_utf8_lossy(&upstream.stdout).trim().to_owned();
+        let (remote, upstream_branch) = value
+            .split_once('/')
+            .context("configured upstream is not a remote branch")?;
+        if remote.is_empty() || upstream_branch.is_empty() {
+            bail!("configured upstream is not a remote branch: {value}");
+        }
+        return Ok(PushPlan {
+            remote: remote.into(),
+            branch: upstream_branch.into(),
+            set_upstream: false,
+        });
+    }
+    let output = run_git(cwd, ["remote"])?;
+    ensure_success(&output, "git remote")?;
+    let mut remotes: Vec<_> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    if remotes.iter().any(|remote| remote == "origin") {
+        return Ok(PushPlan {
+            remote: "origin".into(),
+            branch: branch.into(),
+            set_upstream: true,
+        });
+    }
+    if let [remote] = remotes.as_slice() {
+        return Ok(PushPlan {
+            remote: remote.clone(),
+            branch: branch.into(),
+            set_upstream: true,
+        });
+    }
+    remotes.sort();
+    if remotes.is_empty() {
+        bail!("no Git remote is configured; add a remote before creating a pull request");
+    }
+    bail!(
+        "multiple Git remotes are configured ({}) and no origin exists; configure an upstream branch or choose a remote",
+        remotes.join(", ")
+    )
+}
+
+/// Publishes a branch with an ordinary fast-forward-safe push.
+///
+/// # Errors
+/// Returns an error when Git rejects or cannot execute the push.
+pub fn push(cwd: &Path, plan: &PushPlan, inherit: bool) -> Result<()> {
+    let refspec = format!("{}:{}", plan.branch, plan.branch);
+    if inherit {
+        let status = Command::new("git")
+            .args(["push", "-u", &plan.remote, &refspec])
+            .current_dir(cwd)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::from(open_stderr()?))
+            .stderr(Stdio::inherit())
+            .status()
+            .context("failed to start git push")?;
+        if status.success() {
+            Ok(())
+        } else {
+            bail!("git push failed with {status}")
+        }
+    } else {
+        let output = run_git(cwd, ["push", "-u", &plan.remote, &refspec])
+            .context("failed to start git push")?;
+        ensure_success(&output, "git push")
+    }
+}
+
+/// Returns already-fetched remote-tracking refs matching a branch name.
+///
+/// # Errors
+/// Returns an error when Git cannot inspect configured remotes or remote-tracking refs.
 pub fn remote_matches(cwd: &Path, branch: &str) -> Result<Vec<String>> {
     let output = run_git(cwd, ["remote"]).context("failed to inspect configured remotes")?;
     ensure_success(&output, "git remote")?;

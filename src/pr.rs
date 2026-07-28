@@ -152,13 +152,10 @@ fn execute(
             "GitHub CLI is not authenticated; run gh auth login",
         );
     }
-    if crate::git::remote_matches(&repo.current().path, &head)?.is_empty() {
-        return fail(
-            json_mode,
-            "pr.unpublished",
-            "topic branch is not published to a same-repository remote",
-        );
-    }
+    let push_plan = match crate::git::plan_push(&repo.current().path, &head) {
+        Ok(plan) => plan,
+        Err(error) => return fail(json_mode, "pr.remote_selection", &format!("{error:#}")),
+    };
     let existing = Command::new("gh")
         .args([
             "pr", "list", "--head", &head, "--base", &base, "--state", "open", "--json", "url",
@@ -183,12 +180,36 @@ fn execute(
             &format!("an open pull request already exists: {url}"),
         );
     }
+    let push_effect = json!({
+        "action": "git.push",
+        "remote": push_plan.remote,
+        "branch": push_plan.branch,
+        "set_upstream": push_plan.set_upstream,
+        "attempted": !dry,
+        "completed": false,
+    });
     if dry {
         return output(
             json_mode,
-            json!({"outcome":"dry_run","base":base,"head":head,"draft":status==Status::Draft}),
+            json!({"outcome":"dry_run","base":base,"head":head,"draft":status==Status::Draft,"push":push_effect}),
+            None,
             None,
         );
+    }
+    if let Err(error) = crate::git::push(&repo.current().path, &push_plan, !json_mode) {
+        if json_mode {
+            crate::protocol::write(&crate::protocol::Response {
+                schema_version: crate::protocol::SCHEMA_VERSION,
+                request_id: None,
+                command: "pr.create".into(), status: "error", result: None,
+                error: Some(crate::protocol::ErrorBody { code: "git.push_failed".into(), message: format!("{error:#}") }),
+                context: json!({"base":base,"head":head}),
+                effects: vec![crate::protocol::Effect { action: "git.push".into(), attempted: true, completed: false, details: Some(push_effect) }],
+                diagnostics: vec![], next_steps: vec![crate::protocol::NextStep { action: "retry".into(), description: "Fix the remote or branch divergence, then retry PR creation. Do not force-push.".into(), mutation: "none".into(), requires_human_approval: true, invocation: json!({"command":"worktrees pr create"}) }],
+            })?;
+            return Ok(());
+        }
+        return fail(false, "git.push_failed", &format!("{error:#}"));
     }
     let mut cmd = Command::new("gh");
     cmd.args([
@@ -210,16 +231,27 @@ fn execute(
         json_mode,
         json!({"outcome":"created","url":url,"base":base,"head":head,"draft":status==Status::Draft}),
         Some(url),
+        Some(crate::protocol::Effect {
+            action: "git.push".into(),
+            attempted: true,
+            completed: true,
+            details: Some(push_effect),
+        }),
     )
 }
-fn output(j: bool, r: serde_json::Value, h: Option<String>) -> Result<()> {
+fn output(
+    j: bool,
+    r: serde_json::Value,
+    h: Option<String>,
+    effect: Option<crate::protocol::Effect>,
+) -> Result<()> {
     if j {
         crate::protocol::write(&crate::protocol::success(
             "pr.create",
             None,
             r,
             json!({}),
-            vec![],
+            effect.into_iter().collect(),
         ))?;
     } else {
         crate::ui::finish(
