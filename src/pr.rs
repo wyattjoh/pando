@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
+use minijinja::{Environment, context};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -151,15 +152,26 @@ fn execute(
             );
         }
         if !dry {
-            let prompt = format!(
-                "Generate a PR metadata document. Return exactly one first-line level-one heading, followed by the description.\nRepository: {}\nTopic branch: {head}\nTarget branch: {base}\nDiffstat:\n{}\nDiff:\n{}\n",
-                repo.current()
-                    .path
-                    .file_name()
-                    .map_or("(unknown)".into(), |v| v.to_string_lossy().into_owned()),
-                git_cmd(&repo, &["diff", "--stat", &format!("{base}...HEAD")])?,
-                git_cmd(&repo, &["diff", &format!("{base}...HEAD")])?
-            );
+            let pull_request_template = resolved_pull_request_template(&repo, &config)?;
+            let repo_name = repo
+                .current()
+                .path
+                .file_name()
+                .map_or("(unknown)".into(), |v| v.to_string_lossy().into_owned());
+            let diffstat = git_cmd(&repo, &["diff", "--stat", &format!("{base}...HEAD")])?;
+            let diff = git_cmd(&repo, &["diff", &format!("{base}...HEAD")])?;
+            let prompt = if let Some(template) = config.pr_generation.template.as_ref() {
+                let mut environment = Environment::new();
+                environment.add_template("pr", &template.value)?;
+                environment.get_template("pr")?.render(context! {
+                    repo => repo_name, branch => head, base, git_diff_stat => diffstat,
+                    git_diff => diff, pull_request_template
+                })?
+            } else {
+                format!(
+                    "Generate a PR metadata document. Return exactly one first-line level-one heading, followed by the description. Preserve required headings, checklists, and sections from the pull-request template; replace placeholders and instructional comments with factual content.\nRepository: {repo_name}\nTopic branch: {head}\nTarget branch: {base}\nDiffstat:\n{diffstat}\nDiff:\n{diff}\nPull-request template:\n{pull_request_template}\n"
+                )
+            };
             let mut child = Command::new("/bin/sh")
                 .args(["-c", &generator.value])
                 .current_dir(&repo.current().path)
@@ -343,6 +355,36 @@ fn execute(
         }),
     )
 }
+fn resolved_pull_request_template(
+    repo: &crate::git::Repository,
+    config: &crate::config::EffectiveConfig,
+) -> Result<String> {
+    if let Some(value) = config.pull_request_template.as_ref()
+        && value.source != crate::config::GenerationSource::Global
+    {
+        return Ok(value.value.clone());
+    }
+    for path in [
+        ".github/pull_request_template.md",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        "pull_request_template.md",
+        "PULL_REQUEST_TEMPLATE.md",
+    ] {
+        let output = Command::new("git")
+            .args(["show", &format!("HEAD:{path}")])
+            .current_dir(&repo.current().path)
+            .output()?;
+        if output.status.success() {
+            return String::from_utf8(output.stdout)
+                .context("repository pull-request template is not UTF-8");
+        }
+    }
+    Ok(config
+        .pull_request_template
+        .as_ref()
+        .map_or_else(String::new, |value| value.value.clone()))
+}
+
 fn git_cmd(repo: &crate::git::Repository, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)

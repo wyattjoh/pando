@@ -113,6 +113,24 @@ creation:
 /.worktrees/
 ```
 
+## Pull-request templates
+
+`pr.pull-request-template` is a body-template value, separate from the
+`pr.generation.template` prompt. Its precedence is local configuration,
+shared project configuration, the committed repository template, then global
+configuration. Repository lookup prefers `.github/pull_request_template.md`,
+then `.github/PULL_REQUEST_TEMPLATE.md` (with root-level casing fallbacks),
+and reads only from committed `HEAD`. The resolved value is exposed to the
+MiniJinja prompt as `pull_request_template`; a custom generation prompt must
+place it explicitly, while the built-in prompt always includes it.
+
+```yaml
+pr:
+  pull-request-template: |
+    ## Summary
+    ## Testing
+```
+
 ## Layering rules
 
 - **Hooks**: shared (`.worktrees.yaml`) steps run before local
