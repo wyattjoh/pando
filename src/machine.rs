@@ -1,5 +1,5 @@
 use crate::{
-    Condition, WorktreeKind,
+    Condition, Worktree, WorktreeKind,
     config::{EffectiveConfig, HookPhase},
     git, install,
     protocol::{self, BytePath, Effect, EmptyInput},
@@ -20,6 +20,56 @@ struct SwitchInput {
     remote: Option<String>,
     #[serde(default)]
     dry_run: bool,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+struct WorktreeRecord {
+    kind: String,
+    branch: Option<String>,
+    path: BytePath,
+    head: Option<String>,
+    /// RFC 3339 committer timestamp for the worktree's HEAD commit.
+    last_commit_at: Option<String>,
+    condition: String,
+    current: bool,
+    navigable: bool,
+    lock_reason: Option<String>,
+    prune_reason: Option<String>,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+struct ListSummary {
+    total: usize,
+    dirty: usize,
+    unknown: usize,
+    missing: usize,
+    inaccessible: usize,
+    bare: usize,
+    locked: usize,
+    prunable: usize,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+struct ListResult {
+    outcome: &'static str,
+    worktrees: Vec<WorktreeRecord>,
+    summary: ListSummary,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+struct SwitchChoice {
+    branch: Option<String>,
+    destination: BytePath,
+    current: bool,
+    /// RFC 3339 committer timestamp for the worktree's HEAD commit.
+    last_commit_at: Option<String>,
+    retry: Value,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+struct SwitchSelectionContext {
+    choices: Vec<SwitchChoice>,
+    unregistered_branch: Value,
 }
 
 fn switch_request(
@@ -71,23 +121,51 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
     if !request_mode {
         input.dry_run = dry_run;
     }
-    let repo = match repository() {
+    let repo = match if input.branch.is_none() {
+        navigation_repository()
+    } else {
+        repository()
+    } {
         Ok(value) => value,
         Err(error) => return emit_err("switch", id, "repository.invalid", format!("{error:#}")),
     };
     let Some(branch) = input.branch else {
-        let choices: Vec<_> = repo.worktrees.iter().filter(|w| w.navigable()).map(|w| {
-            let branch = match &w.kind { WorktreeKind::Branch(value) => Some(value), _ => None };
-            json!({"branch":branch,"destination":BytePath::path(&w.path),"current":w.current,
-                "retry":{"argv":["worktrees","--input-output","json","switch"],"stdin":{"schema_version":1,"input":{"branch":branch}},"working_directory":BytePath::path(&repo.current().path)}})
-        }).collect();
+        let choices: Vec<_> = repo
+            .worktrees
+            .iter()
+            .filter(|worktree| worktree.navigable())
+            .map(|worktree| {
+                let branch = match &worktree.kind {
+                    WorktreeKind::Branch(value) => Some(value.clone()),
+                    _ => None,
+                };
+                SwitchChoice {
+                    retry: json!({"argv":["worktrees","--input-output","json","switch"],"stdin":{"schema_version":1,"input":{"branch":branch.clone()}}, "working_directory":BytePath::path(&repo.current().path)}),
+                    branch,
+                    destination: BytePath::path(&worktree.path),
+                    current: worktree.current,
+                    last_commit_at: worktree.machine_last_commit_at(),
+                }
+            })
+            .collect();
         let mut response = protocol::failure(
             "switch",
             id,
             "switch.selection_required",
             "select a registered worktree, or provide a branch name to resolve or create",
         );
-        response.context = json!({"choices":choices,"unregistered_branch":{"description":"provide input.branch with a branch name not shown above"}});
+        response.context = serde_json::to_value(SwitchSelectionContext {
+            choices,
+            unregistered_branch: json!({"description":"provide input.branch with a branch name not shown above"}),
+        })?;
+        if let Some(warning) = &repo.metadata_warning {
+            push_diagnostic(
+                &mut response,
+                "git.commit_metadata",
+                "metadata",
+                warning.as_bytes(),
+            );
+        }
         return emit(response, true);
     };
     if let Err(error) = git::validate_branch(&repo.current().path, &branch) {
@@ -370,6 +448,11 @@ struct DryRunInput {
 fn repository() -> Result<git::Repository> {
     git::repository(&env::current_dir().context("failed to read current directory")?)
 }
+
+fn navigation_repository() -> Result<git::Repository> {
+    git::repository_with_metadata(&env::current_dir().context("failed to read current directory")?)
+}
+
 fn condition(value: Condition) -> &'static str {
     match value {
         Condition::Clean => "clean",
@@ -379,12 +462,24 @@ fn condition(value: Condition) -> &'static str {
         Condition::Inaccessible => "inaccessible",
     }
 }
-fn kind(value: &WorktreeKind) -> Value {
-    match value {
-        WorktreeKind::Branch(branch) => json!({"kind":"branch","branch":branch}),
-        WorktreeKind::Detached => json!({"kind":"detached","branch":null}),
-        WorktreeKind::Bare => json!({"kind":"bare","branch":null}),
-        WorktreeKind::Unknown => json!({"kind":"unknown","branch":null}),
+fn worktree_record(worktree: &Worktree) -> WorktreeRecord {
+    let (kind, branch) = match &worktree.kind {
+        WorktreeKind::Branch(branch) => ("branch", Some(branch.clone())),
+        WorktreeKind::Detached => ("detached", None),
+        WorktreeKind::Bare => ("bare", None),
+        WorktreeKind::Unknown => ("unknown", None),
+    };
+    WorktreeRecord {
+        kind: kind.to_owned(),
+        branch,
+        path: BytePath::path(&worktree.path),
+        head: worktree.head.clone(),
+        last_commit_at: worktree.machine_last_commit_at(),
+        condition: condition(worktree.condition).to_owned(),
+        current: worktree.current,
+        navigable: worktree.navigable(),
+        lock_reason: worktree.locked.clone(),
+        prune_reason: worktree.prunable.clone(),
     }
 }
 
@@ -411,39 +506,54 @@ pub fn list(request_mode: bool) -> Result<()> {
     } else {
         None
     };
-    let repo = match repository() {
+    let repo = match navigation_repository() {
         Ok(v) => v,
         Err(e) => return emit_err("list", id, "repository.invalid", format!("{e:#}")),
     };
-    let records: Vec<_> = repo
-        .worktrees
-        .iter()
-        .map(|w| {
-            let mut v = kind(&w.kind);
-            let Some(o) = v.as_object_mut() else {
-                unreachable!("worktree kind is always an object")
-            };
-            o.insert("path".into(), json!(BytePath::path(&w.path)));
-            o.insert("head".into(), json!(w.head));
-            o.insert("condition".into(), json!(condition(w.condition)));
-            o.insert("current".into(), json!(w.current));
-            o.insert("navigable".into(), json!(w.navigable()));
-            o.insert("lock_reason".into(), json!(w.locked));
-            o.insert("prune_reason".into(), json!(w.prunable));
-            v
-        })
-        .collect();
-    let count = |c| repo.worktrees.iter().filter(|w| w.condition == c).count();
-    emit(
-        protocol::success(
-            "list",
-            id,
-            json!({"outcome":"listed","worktrees":records,"summary":{"total":repo.worktrees.len(),"dirty":count(Condition::Dirty),"unknown":count(Condition::Unknown),"missing":count(Condition::Missing),"inaccessible":count(Condition::Inaccessible),"bare":repo.worktrees.iter().filter(|w|w.is_bare()).count(),"locked":repo.worktrees.iter().filter(|w|w.locked.is_some()).count(),"prunable":repo.worktrees.iter().filter(|w|w.prunable.is_some()).count()}}),
-            json!({}),
-            vec![],
-        ),
-        false,
-    )
+    let records = repo.worktrees.iter().map(worktree_record).collect();
+    let count = |condition| {
+        repo.worktrees
+            .iter()
+            .filter(|worktree| worktree.condition == condition)
+            .count()
+    };
+    let result = ListResult {
+        outcome: "listed",
+        worktrees: records,
+        summary: ListSummary {
+            total: repo.worktrees.len(),
+            dirty: count(Condition::Dirty),
+            unknown: count(Condition::Unknown),
+            missing: count(Condition::Missing),
+            inaccessible: count(Condition::Inaccessible),
+            bare: repo
+                .worktrees
+                .iter()
+                .filter(|worktree| worktree.is_bare())
+                .count(),
+            locked: repo
+                .worktrees
+                .iter()
+                .filter(|worktree| worktree.locked.is_some())
+                .count(),
+            prunable: repo
+                .worktrees
+                .iter()
+                .filter(|worktree| worktree.prunable.is_some())
+                .count(),
+        },
+    };
+    let mut response =
+        protocol::success("list", id, serde_json::to_value(result)?, json!({}), vec![]);
+    if let Some(warning) = &repo.metadata_warning {
+        push_diagnostic(
+            &mut response,
+            "git.commit_metadata",
+            "metadata",
+            warning.as_bytes(),
+        );
+    }
+    emit(response, false)
 }
 
 /// Emits one naturally typed current-worktree property.
@@ -1335,7 +1445,16 @@ pub fn help(command: &str) -> Value {
         ),
         _ => (&[], &[]),
     };
-    json!({"outcome":"help","request_schema":request_schema,"response_schema":schemars::schema_for!(protocol::Response),"error_codes":errors,"actions":actions})
+    let result_schema = match command {
+        "list" => json!(schemars::schema_for!(ListResult)),
+        _ => Value::Null,
+    };
+    let selection_required_context_schema = if command == "switch" {
+        json!(schemars::schema_for!(SwitchSelectionContext))
+    } else {
+        Value::Null
+    };
+    json!({"outcome":"help","request_schema":request_schema,"response_schema":schemars::schema_for!(protocol::Response),"result_schema":result_schema,"selection_required_context_schema":selection_required_context_schema,"error_codes":errors,"actions":actions})
 }
 
 fn emit_err(c: &str, id: Option<String>, code: &str, msg: impl Into<String>) -> Result<()> {

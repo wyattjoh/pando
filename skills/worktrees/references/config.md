@@ -4,11 +4,11 @@ All three files are strict YAML (`deny_unknown_fields` on every struct):
 malformed files, duplicate/unknown keys, wrong types, empty `command`
 strings, and empty `name` strings are all hard errors with file context.
 
-| Layer | Path | Can set placement (`worktrees.root`) | Can set hooks | Can set `commit.generation.*` |
-|---|---|---|---|---|
-| Global | `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml` | yes | **no** | yes |
-| Shared | `.worktrees.yaml` in the **invoking** worktree | **no** (only `target-branch`) | yes | yes (untrusted — needs `worktrees trust commit-approve`) |
-| Local | `.worktrees.local.yaml` in the **primary** worktree | yes | yes | yes |
+| Layer | Path | Can set placement (`worktrees.root`) | Can set `worktrees.default-sort` | Can set hooks | Can set `commit.generation.*` |
+|---|---|---|---|---|---|
+| Global | `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml` | yes | yes | **no** | yes |
+| Shared | `.worktrees.yaml` in the **invoking** worktree | **no** (only `target-branch`) | **no** | yes | yes (untrusted — needs `worktrees trust commit-approve`) |
+| Local | `.worktrees.local.yaml` in the **primary** worktree | yes | yes | yes | yes |
 
 `worktrees install` never creates or edits any of these YAML files — you
 write them by hand.
@@ -19,9 +19,13 @@ write them by hand.
 # ${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml
 worktrees:
   root: ../worktrees
+  default-sort: last-commit-at
 ```
 
-Absolute roots are used directly; relative roots are anchored at Git's
+`default-sort` accepts only `git`, `branch`, `last-commit-at`, or `path`.
+It controls the initial human `list` and interactive `switch` order, defaults
+to `git` when omitted, and never changes structured JSON ordering. Absolute
+roots are used directly; relative roots are anchored at Git's
 **primary** worktree, never the current nested/linked worktree. No
 configured root at all is an error (across all layers) when `switch` needs
 to create a worktree.
@@ -80,6 +84,7 @@ global config.
 # .worktrees.local.yaml (in the primary worktree)
 worktrees:
   root: /Volumes/fast/worktrees
+  default-sort: path
 hooks:
   post-create:
     - name: Personal editor setup
@@ -115,6 +120,8 @@ creation:
 - **Root**: local root overrides global root. There is no intermediate
   "shared root" — the shared file cannot set `worktrees.root` at all, only
   `worktrees.target-branch`.
+- **Default sort**: the ignored local value overrides the global value. The
+  committed shared file cannot set this personal interface preference.
 - **Commit generation** (`command` and `template` resolve independently):
   local, then shared, then global — first layer that sets the value wins.
 

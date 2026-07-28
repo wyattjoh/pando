@@ -1,14 +1,24 @@
 use std::{
+    collections::{BTreeSet, HashMap},
     ffi::{OsStr, OsString},
     fs,
+    io::Write,
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    thread,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, FixedOffset};
 
 use crate::{Condition, Worktree, WorktreeKind};
+
+#[derive(Debug)]
+pub struct Discovery {
+    pub worktrees: Vec<Worktree>,
+    pub metadata_warning: Option<String>,
+}
 
 #[derive(Debug)]
 pub struct Repository {
@@ -16,6 +26,7 @@ pub struct Repository {
     pub current_index: usize,
     pub primary: Option<PathBuf>,
     pub common_dir: PathBuf,
+    pub metadata_warning: Option<String>,
 }
 
 impl Repository {
@@ -39,12 +50,38 @@ impl Repository {
     }
 }
 
-/// Discovers and enriches the worktrees for the repository containing `cwd`.
+/// Discovers the worktrees for the repository containing `cwd`.
+///
+/// This base discovery does not query commit objects. Navigation surfaces that
+/// display commit timestamps should use [`discover_with_metadata`] instead.
 ///
 /// # Errors
 ///
 /// Returns an error when Git cannot run or its worktree output is invalid.
-pub fn discover(cwd: &Path) -> Result<Vec<Worktree>> {
+pub fn discover(cwd: &Path) -> Result<Discovery> {
+    Ok(Discovery {
+        worktrees: discover_worktrees(cwd)?,
+        metadata_warning: None,
+    })
+}
+
+/// Discovers worktrees and enriches them with HEAD commit timestamps.
+///
+/// Metadata failures are systemic but non-fatal. They are returned as one
+/// warning while every unavailable timestamp remains `None`.
+///
+/// # Errors
+///
+/// Returns an error when base Git discovery fails or its output is invalid.
+pub fn discover_with_metadata(cwd: &Path) -> Result<Discovery> {
+    let mut discovery = discover(cwd)?;
+    discovery.metadata_warning = enrich_last_commit_at(cwd, &mut discovery.worktrees)
+        .err()
+        .map(|error| format!("failed to load last-commit metadata: {error:#}"));
+    Ok(discovery)
+}
+
+fn discover_worktrees(cwd: &Path) -> Result<Vec<Worktree>> {
     let output = run_git(cwd, ["worktree", "list", "--porcelain", "-z"])
         .context("failed to list Git worktrees for the current repository")?;
     ensure_success(&output, "git worktree list")?;
@@ -60,11 +97,27 @@ pub fn discover(cwd: &Path) -> Result<Vec<Worktree>> {
 
 /// Resolves repository-level worktree and common-directory context.
 ///
+/// This base repository does not query commit objects. Navigation surfaces that
+/// display commit timestamps should use [`repository_with_metadata`] instead.
+///
 /// # Errors
 ///
 /// Returns an error when Git context or a required path cannot be resolved.
 pub fn repository(cwd: &Path) -> Result<Repository> {
-    let worktrees = discover(cwd)?;
+    repository_from_worktrees(cwd, discover(cwd)?)
+}
+
+/// Resolves repository context and enriches worktrees with commit timestamps.
+///
+/// # Errors
+///
+/// Returns an error when base repository discovery or path resolution fails.
+pub fn repository_with_metadata(cwd: &Path) -> Result<Repository> {
+    repository_from_worktrees(cwd, discover_with_metadata(cwd)?)
+}
+
+fn repository_from_worktrees(cwd: &Path, discovery: Discovery) -> Result<Repository> {
+    let worktrees = discovery.worktrees;
     let current_index = worktrees
         .iter()
         .position(|worktree| worktree.current)
@@ -85,7 +138,132 @@ pub fn repository(cwd: &Path) -> Result<Repository> {
         current_index,
         primary,
         common_dir,
+        metadata_warning: discovery.metadata_warning,
     })
+}
+
+fn enrich_last_commit_at(cwd: &Path, worktrees: &mut [Worktree]) -> Result<()> {
+    let heads: BTreeSet<_> = worktrees
+        .iter()
+        .filter_map(|worktree| worktree.head.as_deref())
+        .filter_map(normalized_head)
+        .collect();
+    if heads.is_empty() {
+        return Ok(());
+    }
+
+    let mut child = Command::new("git")
+        .args(["cat-file", "--batch"])
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to start git cat-file --batch")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("failed to open git cat-file input")?;
+    let requests = heads
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let writer = thread::spawn(move || -> Result<()> {
+        writeln!(stdin, "{requests}").context("failed to write git cat-file input")
+    });
+    let output = child.wait_with_output();
+    let writer = writer
+        .join()
+        .map_err(|_| anyhow!("git cat-file input writer panicked"))?;
+    let output = output.context("failed to read git cat-file output")?;
+    ensure_success(&output, "git cat-file --batch")?;
+    writer?;
+    let resolved = parse_commit_batch(&output.stdout, &heads)?;
+
+    for worktree in worktrees {
+        worktree.last_commit_at = worktree
+            .head
+            .as_deref()
+            .and_then(normalized_head)
+            .and_then(|head| resolved.get(&head).copied());
+    }
+    Ok(())
+}
+
+fn normalized_head(head: &str) -> Option<String> {
+    let valid_length = matches!(head.len(), 40 | 64);
+    (valid_length
+        && head.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && head.bytes().any(|byte| byte != b'0'))
+    .then(|| head.to_ascii_lowercase())
+}
+
+fn parse_commit_batch(
+    bytes: &[u8],
+    heads: &BTreeSet<String>,
+) -> Result<HashMap<String, DateTime<FixedOffset>>> {
+    let mut cursor = 0;
+    let mut resolved = HashMap::new();
+    for head in heads {
+        let header_end = bytes[cursor..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| cursor + offset)
+            .context("git cat-file returned an incomplete header")?;
+        let header = std::str::from_utf8(&bytes[cursor..header_end])
+            .context("git cat-file returned a non-UTF-8 header")?;
+        cursor = header_end + 1;
+        if header.ends_with(" missing") {
+            continue;
+        }
+        let mut fields = header.split_whitespace();
+        let _object = fields.next().context("git cat-file omitted an object id")?;
+        let kind = fields
+            .next()
+            .context("git cat-file omitted an object type")?;
+        let size: usize = fields
+            .next()
+            .context("git cat-file omitted an object size")?
+            .parse()
+            .context("git cat-file returned an invalid object size")?;
+        if fields.next().is_some() || cursor + size >= bytes.len() {
+            bail!("git cat-file returned malformed batch output");
+        }
+        let object = &bytes[cursor..cursor + size];
+        cursor += size;
+        if bytes.get(cursor) != Some(&b'\n') {
+            bail!("git cat-file omitted an object separator");
+        }
+        cursor += 1;
+        if kind == "commit"
+            && let Some(timestamp) = parse_committer_timestamp(object)
+        {
+            resolved.insert(head.clone(), timestamp);
+        }
+    }
+    Ok(resolved)
+}
+
+fn parse_committer_timestamp(commit: &[u8]) -> Option<DateTime<FixedOffset>> {
+    let line = commit
+        .split(|byte| *byte == b'\n')
+        .take_while(|line| !line.is_empty())
+        .find(|line| line.starts_with(b"committer "))?;
+    let mut fields = line.rsplit(|byte| *byte == b' ');
+    let timezone = fields.next()?;
+    let seconds = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
+    if timezone.len() != 5 || !matches!(timezone[0], b'+' | b'-') {
+        return None;
+    }
+    let hours: i32 = std::str::from_utf8(&timezone[1..3]).ok()?.parse().ok()?;
+    let minutes: i32 = std::str::from_utf8(&timezone[3..5]).ok()?.parse().ok()?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    let sign = if timezone[0] == b'-' { -1 } else { 1 };
+    let offset = FixedOffset::east_opt(sign * (hours * 60 + minutes) * 60)?;
+    DateTime::from_timestamp(seconds, 0).map(|timestamp| timestamp.with_timezone(&offset))
 }
 
 /// Returns the current named branch.
@@ -706,6 +884,7 @@ pub fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>> {
             current = Some(Worktree {
                 path: PathBuf::from(OsString::from_vec(path.to_vec())),
                 head: None,
+                last_commit_at: None,
                 kind: WorktreeKind::Unknown,
                 locked: None,
                 prunable: None,
@@ -752,7 +931,9 @@ pub fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_porcelain;
+    use std::collections::BTreeSet;
+
+    use super::{parse_commit_batch, parse_committer_timestamp, parse_porcelain};
     use crate::WorktreeKind;
 
     #[test]
@@ -764,5 +945,40 @@ mod tests {
         assert_eq!(records[0].locked.as_deref(), Some("reason"));
         assert_eq!(records[1].kind, WorktreeKind::Bare);
         assert_eq!(records[1].prunable.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn parses_committer_timestamp_instead_of_author_timestamp() {
+        let commit = b"tree abc\nauthor Test <test@example.com> 1 +0000\ncommitter Test <test@example.com> 1704164645 -0500\n\nmessage\n";
+        let timestamp = parse_committer_timestamp(commit).unwrap();
+
+        assert_eq!(timestamp.to_rfc3339(), "2024-01-01T22:04:05-05:00");
+    }
+
+    #[test]
+    fn ignores_committer_like_text_outside_commit_headers() {
+        let commit = b"tree abc\nauthor Test <test@example.com> 1 +0000\n\ncommitter Test <test@example.com> 1704164645 -0500\n";
+
+        assert_eq!(parse_committer_timestamp(commit), None);
+    }
+
+    #[test]
+    fn batch_parser_keeps_missing_objects_unresolved() {
+        let missing = "1111111111111111111111111111111111111111".to_owned();
+        let commit_id = "2222222222222222222222222222222222222222".to_owned();
+        let commit = b"tree abc\ncommitter Test <test@example.com> 1704164645 +0000\n\nmessage\n";
+        let output = [
+            format!("{missing} missing\n").into_bytes(),
+            format!("{commit_id} commit {}\n", commit.len()).into_bytes(),
+            commit.to_vec(),
+            b"\n".to_vec(),
+        ]
+        .concat();
+        let heads = BTreeSet::from([missing.clone(), commit_id.clone()]);
+
+        let parsed = parse_commit_batch(&output, &heads).unwrap();
+
+        assert!(!parsed.contains_key(&missing));
+        assert_eq!(parsed[&commit_id].to_rfc3339(), "2024-01-02T03:04:05+00:00");
     }
 }

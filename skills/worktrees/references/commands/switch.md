@@ -10,10 +10,13 @@ configured root, and post-create hooks/trust all apply.
 Usage: worktrees list [OPTIONS]
 ```
 
-No positional args, no subcommands. Prints an aligned table: Git's worktree
-order, branch, absolute path, current `*` marker, dirty state, and
-exceptional detached, bare, locked, prunable, missing, inaccessible, or
-unknown states.
+No positional args, no subcommands. Prints aligned `BRANCH`, `LAST COMMIT AT`,
+and `PATH` columns with the current `*` marker, dirty state, and exceptional
+detached, bare, locked, prunable, missing, inaccessible, or unknown states.
+The timestamp is the HEAD commit's committer time, rendered in local
+`YYYY-MM-DD HH:MM` form or as `unknown`. Human output starts in the configured
+Git, branch A-Z, last-commit newest-first, or path A-Z order and marks the
+active order in its heading or column header.
 
 Both JSON modes are supported; agents use versioned request mode.
 
@@ -35,8 +38,12 @@ The binary writes **only** the successful destination path to stdout, with a
 trailing newline. Prompts, warnings, and hook output go to stderr — this is
 load-bearing: the installed zsh function captures stdout and `cd`s to it.
 
-Picker behavior: lists navigable worktrees in Git's order, defaults to the
-current worktree, ends with "Create or switch branch…". Escape cancels
+Picker behavior: lists navigable worktrees with the same branch,
+last-commit, and path columns, starts in `worktrees.default-sort`, defaults
+to the current worktree, and ends with "Create or switch branch…". Ctrl-S
+cycles Git order, branch A-Z, last commit newest-first, and path A-Z for the
+current invocation only. Re-sorting preserves the active filter and selected
+worktree identity; the create action stays pinned last. Escape cancels
 without changing directory.
 
 Branch resolution order (no implicit fetch):
@@ -104,4 +111,4 @@ echo "PORT=$(worktrees get port)" > .env.local
 
 Agents use `--input-output json`. `list` accepts `{"schema_version":1,"request_id":"…"}` with omitted `input`, or an empty `input` object. `get` requires `input.property`; JSON names are `branch`, `port`, `worktree_path`, `primary_worktree_path`, and `worktree_root`. `switch` accepts `input.branch`, `input.remote`, and `input.dry_run`. Request mode rejects simultaneous command arguments or flags.
 
-Responses identify as `list`, `get`, or `switch`; paths are UTF-8/base64 tagged objects. Switch may return an existing destination, a creation plan, or typed selection/remote/approval errors with retry context. Dry runs perform no creation or hooks and report unattempted effects. Exact-leaf `--help --output json` returns runtime request/response schemas and complete error/action catalogs. JSON writes one document to stdout and no ordinary stderr.
+Responses identify as `list`, `get`, or `switch`; paths are UTF-8/base64 tagged objects. Every structured `list` worktree and `switch.selection_required` choice includes nullable `last_commit_at`, an RFC 3339 HEAD committer timestamp with an explicit offset. These arrays retain Git discovery order under every personal default sort. A systemic metadata failure leaves timestamps null and adds one bounded diagnostic without ordinary stderr. Switch may return an existing destination, a creation plan, or typed selection/remote/approval errors with retry context. Dry runs perform no creation or hooks and report unattempted effects. Exact-leaf `--help --output json` returns runtime request/response schemas and complete error/action catalogs. JSON writes one document to stdout and no ordinary stderr.

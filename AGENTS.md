@@ -31,9 +31,9 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 
 | Module | Responsibility |
 |---|---|
-| `lib.rs` | `Worktree`/`WorktreeKind`/`Condition` domain types and their display/navigability rules |
-| `git.rs` | Every `git` subprocess call; parses `worktree list --porcelain -z`; `Repository` context |
-| `config.rs` | Three-layer YAML config resolution into `EffectiveConfig { root, steps }` |
+| `lib.rs` | `Worktree`/`WorktreeKind`/`Condition`/`SortMode` domain types, display/navigability rules, and stable worktree sorting |
+| `git.rs` | Every `git` subprocess call; parses `worktree list --porcelain -z`; batches HEAD committer metadata; `Repository` context |
+| `config.rs` | Strict three-layer YAML config parsing and effective value resolution |
 | `smart.rs` | Command implementations for `switch`/`get`/`trust`; all interactive prompts |
 | `trust.rs` | Post-create hook approval: command hashing, XDG `trust.json`, atomic writes |
 | `setup.rs` | Post-create hook execution and the incomplete-setup journal |
@@ -49,11 +49,11 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 
 **Config layering** (`EffectiveConfig::load`) is deliberately asymmetric:
 
-- global `$XDG_CONFIG_HOME/worktrees/config.yaml` — placement only, never hooks;
-- `.worktrees.yaml` read from the **invoking** worktree — hooks only, so setup follows the branch you create from;
-- `.worktrees.local.yaml` read from the **primary** worktree — both, and must be Git-ignored or loading is a hard error.
+- global `$XDG_CONFIG_HOME/worktrees/config.yaml` controls placement and the personal default sort, never hooks;
+- `.worktrees.yaml` read from the **invoking** worktree controls shared hooks and the target branch, never placement or personal sort, so setup follows the branch you create from;
+- `.worktrees.local.yaml` read from the **primary** worktree controls personal placement, hooks, and default sort, and must be Git-ignored or loading is a hard error.
 
-Shared hooks run before local hooks; the local root overrides the global root. All structs use `deny_unknown_fields`, so config mistakes fail loudly with file context.
+Shared hooks run before local hooks; the local root and default sort override their global values. Human list and picker rendering use the effective sort, while structured JSON always retains Git discovery order. All structs use `deny_unknown_fields`, so config mistakes fail loudly with file context.
 
 **Trust identity is command strings only.** `trust::command_hash` digests a domain-separated, length-prefixed concatenation of the ordered `command` fields — names, comments, and formatting are excluded on purpose, so reordering or editing a command revokes approval but renaming a step does not. Approval is keyed by the hex-encoded canonical primary-worktree path and there is no non-interactive bypass; `ensure_interactive` refuses rather than assuming yes.
 
