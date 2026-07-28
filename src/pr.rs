@@ -9,6 +9,9 @@ use std::{
     process::Command,
 };
 
+use cliclack::confirm;
+use console::{Key, Term};
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
@@ -123,6 +126,24 @@ fn execute(
     let push_plan =
         match crate::git::plan_push(&repo.current().path, &head, requested_remote.as_deref()) {
             Ok(plan) => plan,
+            Err(error)
+                if requested_remote.is_none()
+                    && !json_mode
+                    && !force
+                    && error.to_string().contains("multiple Git remotes") =>
+            {
+                crate::ui::ensure_interactive("remote selection requires confirmation")?;
+                let remotes = git_cmd(&repo, &["remote"])?;
+                let options: Vec<(String, String, String)> = remotes
+                    .lines()
+                    .map(|v| (v.to_owned(), v.to_owned(), String::new()))
+                    .collect();
+                let remote = cliclack::select("Select the pull request head remote")
+                    .items(&options)
+                    .interact()
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                crate::git::plan_push(&repo.current().path, &head, Some(&remote))?
+            }
             Err(error) => return fail(json_mode, "pr.remote_selection", &format!("{error:#}")),
         };
     let head_repository = github_repository(&crate::git::remote_url(
@@ -204,8 +225,8 @@ fn execute(
             }
         }
     }
-    let title = title.unwrap_or_else(|| "Generated pull request".to_owned());
-    let body = body.unwrap_or_default();
+    let mut title = title.unwrap_or_else(|| "Generated pull request".to_owned());
+    let mut body = body.unwrap_or_default();
     if head == base {
         return fail(
             json_mode,
@@ -285,6 +306,20 @@ fn execute(
             &format!("an open pull request already exists: {url}"),
         );
     }
+    if !force && !dry {
+        let (updated_title, updated_body) = review_metadata(
+            title,
+            body,
+            &base_repo,
+            &base,
+            &head_owner,
+            &head,
+            &push_plan.remote,
+            status,
+        )?;
+        title = updated_title;
+        body = updated_body;
+    }
     let push_effect = json!({
         "action": "git.push",
         "remote": push_plan.remote,
@@ -355,6 +390,122 @@ fn execute(
         }),
     )
 }
+#[allow(clippy::too_many_arguments)]
+fn review_metadata(
+    mut title: String,
+    mut body: String,
+    base_repo: &str,
+    base: &str,
+    head_repo: &str,
+    head: &str,
+    remote: &str,
+    status: Status,
+) -> Result<(String, String)> {
+    loop {
+        crate::ui::info(crate::ui::heading_style().apply_to("Review pull request"))?;
+        crate::ui::step(format!("base: {base_repo} ({base})"))?;
+        crate::ui::step(format!("head: {head_repo} ({head})"))?;
+        crate::ui::step(format!("push remote: {remote}"))?;
+        crate::ui::step(format!(
+            "status: {}",
+            if status == Status::Draft {
+                "draft"
+            } else {
+                "ready"
+            }
+        ))?;
+        crate::ui::step(crate::ui::heading_style().apply_to(format!("# {title}")))?;
+        render_markdown(&body)?;
+        crate::ui::info("Press Enter to create, Ctrl-G to edit, or Escape to cancel.")?;
+        match Term::stderr()
+            .read_key()
+            .context("failed to read PR review input")?
+        {
+            Key::Enter => {
+                let confirmed = crate::ui::prompt_result(
+                    confirm("Create this pull request?")
+                        .initial_value(false)
+                        .interact(),
+                    "pull request creation cancelled",
+                    "failed to read pull request confirmation",
+                )?;
+                if confirmed {
+                    return Ok((title, body));
+                }
+                return Err(crate::ui::declined_noop(
+                    "Pull request creation declined; nothing was pushed or created.",
+                    "Pull request creation cancelled.",
+                ));
+            }
+            Key::Escape | Key::CtrlC => {
+                return Err(crate::ui::declined_noop(
+                    "Pull request creation cancelled; nothing was pushed or created.",
+                    "Pull request creation cancelled.",
+                ));
+            }
+            Key::Char('\u{7}') => {
+                let path = env::temp_dir().join(format!("worktrees-pr-{}.md", std::process::id()));
+                fs::write(&path, format!("# {title}\n\n{body}\n"))?;
+                let editor = resolve_editor()?;
+                let status = Command::new("/bin/sh")
+                    .args(["-c", &format!(r#"{editor} "$1""#)])
+                    .arg("worktrees-pr-editor")
+                    .arg(&path)
+                    .status()
+                    .context("failed to launch configured editor")?;
+                if !status.success() {
+                    let _ = fs::remove_file(&path);
+                    bail!("pr.editor_failed: configured editor exited unsuccessfully");
+                }
+                let edited =
+                    fs::read_to_string(&path).context("failed to read edited PR document")?;
+                let parsed = parse_metadata(&edited).context(
+                    "edited PR document is invalid; expected '# <title>' followed by a description",
+                )?;
+                title = parsed.0;
+                body = parsed.1;
+                fs::remove_file(path)?;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn resolve_editor() -> Result<String> {
+    if let Some(editor) = env::var_os("GIT_EDITOR").filter(|v| !v.is_empty()) {
+        return Ok(editor.to_string_lossy().into_owned());
+    }
+    let config = Command::new("git")
+        .args(["config", "--get", "core.editor"])
+        .output()?;
+    if config.status.success() {
+        let value = String::from_utf8_lossy(&config.stdout).trim().to_owned();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+    }
+    for name in ["VISUAL", "EDITOR"] {
+        if let Some(editor) = env::var_os(name).filter(|v| !v.is_empty()) {
+            return Ok(editor.to_string_lossy().into_owned());
+        }
+    }
+    bail!("pr.editor_missing: configure core.editor, GIT_EDITOR, VISUAL, or EDITOR")
+}
+
+fn render_markdown(body: &str) -> Result<()> {
+    for line in body.lines() {
+        let rendered = if line.starts_with('#') || line.starts_with("```") {
+            crate::ui::heading_style().apply_to(line).to_string()
+        } else if line.starts_with("- ") || line.starts_with("* ") {
+            crate::ui::worktree_data_style().apply_to(line).to_string()
+        } else {
+            line.to_owned()
+        };
+        crate::ui::info(rendered)?;
+    }
+    Ok(())
+}
+
 fn resolved_pull_request_template(
     repo: &crate::git::Repository,
     config: &crate::config::EffectiveConfig,
