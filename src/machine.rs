@@ -799,8 +799,6 @@ struct RemoveInput {
     #[serde(default)]
     branches: Vec<String>,
     #[serde(default)]
-    force: bool,
-    #[serde(default)]
     dry_run: bool,
 }
 
@@ -810,8 +808,8 @@ struct RemoveInput {
 /// Returns an error when repository state cannot be inspected, mutation fails, or stdout cannot be written.
 #[allow(clippy::too_many_lines)]
 pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: bool) -> Result<()> {
-    let (id, input) = if request_mode {
-        if !branches.is_empty() || force || dry_run {
+    let (id, input, force) = if request_mode {
+        if !branches.is_empty() || dry_run {
             return emit_err(
                 "remove",
                 None,
@@ -820,7 +818,7 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
             );
         }
         match protocol::read_request::<RemoveInput>() {
-            Ok(r) if r.schema_version == 1 => (r.request_id, r.input),
+            Ok(r) if r.schema_version == 1 => (r.request_id, r.input, force),
             Ok(r) => {
                 return emit_err(
                     "remove",
@@ -832,17 +830,10 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
             Err(e) => return emit_err("remove", None, "json.invalid_request", e),
         }
     } else {
-        (
-            None,
-            RemoveInput {
-                branches,
-                force,
-                dry_run,
-            },
-        )
+        (None, RemoveInput { branches, dry_run }, force)
     };
 
-    let plan = match crate::lifecycle::plan_remove(&input.branches, input.force) {
+    let plan = match crate::lifecycle::plan_remove(&input.branches, force) {
         Ok(plan) => plan,
         Err(error) => {
             let message = error.to_string();
@@ -914,7 +905,7 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
             protocol::success(
                 "remove",
                 id,
-                json!({"outcome":"dry_run","targets":plan.targets.iter().map(|t|json!({"branch":t.worktree.branch_label(),"path":BytePath::path(&t.worktree.path),"branch_retained":true})).collect::<Vec<_>>(),"force":input.force}),
+                json!({"outcome":"dry_run","targets":plan.targets.iter().map(|t|json!({"branch":t.worktree.branch_label(),"path":BytePath::path(&t.worktree.path),"branch_retained":true})).collect::<Vec<_>>(),"force":force}),
                 json!({}),
                 effects,
             ),
@@ -937,7 +928,7 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
                     });
                     response.status = "error";
                     response.result = None;
-                    add_remove_retry(&mut response, &input, &plan.current);
+                    add_remove_retry(&mut response, &input, force, &plan.current);
                     return emit(response, true);
                 }
             };
@@ -952,7 +943,7 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
                 });
                 response.status = "error";
                 response.result = None;
-                add_remove_retry(&mut response, &input, &plan.current);
+                add_remove_retry(&mut response, &input, force, &plan.current);
                 return emit(response, true);
             }
             response.effects[index * 2].completed = true;
@@ -965,28 +956,25 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
                 });
                 response.status = "error";
                 response.result = None;
-                add_remove_retry(&mut response, &input, &plan.current);
+                add_remove_retry(&mut response, &input, force, &plan.current);
                 return emit(response, true);
             }
         }
         response.effects[index * 2 + 1].attempted = true;
-        let output = match git::remove_worktree_captured(
-            &plan.primary,
-            &target.worktree.path,
-            input.force,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                response.error = Some(crate::protocol::ErrorBody {
-                    code: "remove.git_start_failed".into(),
-                    message: format!("{error:#}"),
-                });
-                response.status = "error";
-                response.result = None;
-                add_remove_retry(&mut response, &input, &plan.current);
-                return emit(response, true);
-            }
-        };
+        let output =
+            match git::remove_worktree_captured(&plan.primary, &target.worktree.path, force) {
+                Ok(value) => value,
+                Err(error) => {
+                    response.error = Some(crate::protocol::ErrorBody {
+                        code: "remove.git_start_failed".into(),
+                        message: format!("{error:#}"),
+                    });
+                    response.status = "error";
+                    response.result = None;
+                    add_remove_retry(&mut response, &input, force, &plan.current);
+                    return emit(response, true);
+                }
+            };
         push_diagnostic(&mut response, "git", "stdout", &output.stdout);
         push_diagnostic(&mut response, "git", "stderr", &output.stderr);
         if !output.status.success() {
@@ -996,7 +984,7 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
             });
             response.status = "error";
             response.result = None;
-            add_remove_retry(&mut response, &input, &plan.current);
+            add_remove_retry(&mut response, &input, force, &plan.current);
             return emit(response, true);
         }
         response.effects[index * 2 + 1].completed = true;
@@ -1022,8 +1010,22 @@ fn push_diagnostic(response: &mut protocol::Response, source: &str, stream: &str
         truncated: bytes.len() > LIMIT,
     });
 }
-fn add_remove_retry(response: &mut protocol::Response, input: &RemoveInput, cwd: &std::path::Path) {
-    response.next_steps.push(crate::protocol::NextStep{action:"remove.retry".into(),description:"Retry pending removal targets after resolving the failure".into(),mutation:"worktree".into(),requires_human_approval:input.force,invocation:json!({"argv":["worktrees","remove","--input-output","json"],"stdin":{"schema_version":1,"input":input},"working_directory":BytePath::path(cwd)})});
+fn add_remove_retry(
+    response: &mut crate::protocol::Response,
+    input: &RemoveInput,
+    force: bool,
+    cwd: &std::path::Path,
+) {
+    let mut argv = vec![
+        "worktrees".to_string(),
+        "remove".to_string(),
+        "--input-output".to_string(),
+        "json".to_string(),
+    ];
+    if force {
+        argv.push("--force".into());
+    }
+    response.next_steps.push(crate::protocol::NextStep{action:"remove.retry".into(),description:"Retry pending removal targets after resolving the failure".into(),mutation:"worktree".into(),requires_human_approval:force,invocation:json!({"argv":argv,"stdin":{"schema_version":1,"input":input},"working_directory":BytePath::path(cwd)})});
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]

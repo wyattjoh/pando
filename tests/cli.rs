@@ -3748,11 +3748,10 @@ fn json_remove_execution_removes_multiple_worktrees_and_retains_branches() {
 fn json_forced_remove_requires_explicit_force_and_reports_retention() {
     let repo = Repository::new();
     fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();
-    let request =
-        serde_json::json!({"schema_version":1,"input":{"branches":["feature"],"force":true}});
+    let request = serde_json::json!({"schema_version":1,"input":{"branches":["feature"]}});
     let output = json_command(
         &repo.main,
-        &["remove", "--input-output", "json"],
+        &["remove", "--force", "--input-output", "json"],
         Some(&request),
     );
     assert!(output.status.success());
@@ -3762,6 +3761,24 @@ fn json_forced_remove_requires_explicit_force_and_reports_retention() {
         git_output(&repo.main, ["branch", "--list", "feature"]),
         "feature"
     );
+}
+
+#[test]
+fn json_remove_rejects_legacy_force_in_request() {
+    let repo = Repository::new();
+    let request =
+        serde_json::json!({"schema_version":1,"input":{"branches":["feature"],"force":true}});
+    let output = json_command(
+        &repo.main,
+        &["remove", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        assert_json_pure(&output)["error"]["code"],
+        "json.invalid_request"
+    );
+    assert!(repo.linked.exists());
 }
 
 #[test]

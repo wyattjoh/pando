@@ -62,8 +62,7 @@ when a returned next step explicitly requires a person's approval.
 
 Requests reject unknown fields, trailing data, unsupported versions, and
 mixed command flags. Dry-run mutating requests use `input.dry_run:true`.
-Never construct a remove request with `force:true` without explicit user
-approval. JSON cannot grant hook or generator trust or authorize installer
+Force is argv-only authorization for removal. Pass `--force` only with explicit user approval; never put `force` in a remove request document. JSON cannot grant hook or generator trust or authorize installer
 writes. Structured worktree records expose nullable RFC 3339
 `last_commit_at` values and always retain Git discovery order, regardless of
 the human `worktrees.default-sort` preference. See the command references
