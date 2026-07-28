@@ -11,14 +11,14 @@
 
 ## Install
 
-Build and install the binary, then explicitly install the zsh integration:
+Build and install the binary as both `worktrees` and `wt`, then explicitly install the zsh integration:
 
 ```sh
-cargo install --path .
+just install
 worktrees install
 ```
 
-The installer previews every mutation and asks for confirmation. It writes `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/worktrees.zsh` and adds one marked source block to `${ZDOTDIR:-$HOME}/.zshrc`. Rerunning it safely updates the managed function without duplicating the source block.
+`just install` installs `worktrees` with Cargo and creates `wt` as a relative symlink beside it. The installer previews every mutation and asks for confirmation. It writes `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/worktrees.zsh` and adds one marked source block to `${ZDOTDIR:-$HOME}/.zshrc`. Rerunning it safely updates the managed function without duplicating the source block.
 
 Restart zsh or run:
 
@@ -39,7 +39,7 @@ printf '%s\n' '{"schema_version":1,"input":{"property":"primary_worktree_path"}}
 
 `--output json` instead uses ordinary argv flags as input. Both modes emit exactly one newline-terminated JSON document on stdout and no ordinary stderr on typed success or failure. Requests reject unknown fields, unsupported versions, trailing data, and mixed stdin/argv command input. Paths use tagged UTF-8 or base64 objects; responses carry typed results or errors plus context, effects, bounded diagnostics, and recovery steps. Structured `list` worktrees and `switch.selection_required` choices include nullable `last_commit_at` values as RFC 3339 committer timestamps with explicit offsets. These records stay in Git order regardless of personal sort configuration; metadata lookup failures use `null` values and a bounded diagnostic.
 
-JSON execution is deterministic and noninteractive. Mutating commands support dry-run planning, while shared trust approval and installer writes remain manual human operations. The canonical property is `primary-worktree-path` (`primary_worktree_path` in JSON); the former Main spelling is not an alias. The installed zsh wrapper passes JSON invocations and all noninteractive-shell invocations through byte-for-byte without destination capture or `cd`.
+JSON execution is deterministic and noninteractive. Mutating commands support dry-run planning, while shared trust approval and installer writes remain manual human operations. The canonical property is `primary-worktree-path` (`primary_worktree_path` in JSON); the former Main spelling is not an alias. The installed zsh wrappers for `worktrees` and `wt` pass JSON invocations and all noninteractive-shell invocations through byte-for-byte without destination capture or `cd`.
 
 ## Switching and creating
 
