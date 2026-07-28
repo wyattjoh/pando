@@ -347,20 +347,11 @@ fn execute(
             "GitHub CLI is not authenticated; run gh auth login",
         );
     }
+    let head_ref = github_head_ref(&base_repo, &head_repository, &head_owner, &head);
     let existing = Command::new("gh")
         .args([
-            "pr",
-            "list",
-            "--repo",
-            &base_repo,
-            "--head",
-            &format!("{head_owner}:{head}"),
-            "--base",
-            &base,
-            "--state",
-            "open",
-            "--json",
-            "url",
+            "pr", "list", "--repo", &base_repo, "--head", &head_ref, "--base", &base, "--state",
+            "open", "--json", "url",
         ])
         .output()?;
     if !existing.status.success() {
@@ -480,18 +471,8 @@ fn execute(
     }
     let mut cmd = Command::new("gh");
     cmd.args([
-        "pr",
-        "create",
-        "--repo",
-        &base_repo,
-        "--base",
-        &base,
-        "--head",
-        &format!("{head_owner}:{head}"),
-        "--title",
-        &title,
-        "--body",
-        &body,
+        "pr", "create", "--repo", &base_repo, "--base", &base, "--head", &head_ref, "--title",
+        &title, "--body", &body,
     ]);
     if status == Status::Draft {
         cmd.arg("--draft");
@@ -693,6 +674,14 @@ fn parse_metadata(value: &str) -> Result<(String, String)> {
     Ok((title.to_owned(), description))
 }
 
+fn github_head_ref(base_repo: &str, head_repo: &str, head_owner: &str, head: &str) -> String {
+    if base_repo == head_repo {
+        head.to_owned()
+    } else {
+        format!("{head_owner}:{head}")
+    }
+}
+
 fn github_repository(url: &str) -> Option<String> {
     let value = url.trim_end_matches('/').trim_end_matches(".git");
     let path = value
@@ -783,6 +772,22 @@ mod tests {
         assert!(
             serde_json::from_str::<Request>(r#"{"title":"T","description":"B","force":true}"#)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn github_head_ref_uses_branch_for_same_repository() {
+        assert_eq!(
+            github_head_ref("alice/project", "alice/project", "alice", "feature"),
+            "feature"
+        );
+    }
+
+    #[test]
+    fn github_head_ref_qualifies_fork_branch() {
+        assert_eq!(
+            github_head_ref("alice/project", "bob/project", "bob", "feature"),
+            "bob:feature"
         );
     }
 
