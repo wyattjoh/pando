@@ -115,6 +115,9 @@ enum PrCommand {
         status: pr::Status,
         #[arg(long)]
         dry_run: bool,
+        /// Select the remote that owns the pull request head.
+        #[arg(long)]
+        remote: Option<String>,
         #[arg(long)]
         force: bool,
     },
@@ -350,6 +353,7 @@ fn run(cli: Cli) -> Result<()> {
                     description_file,
                     status,
                     dry_run,
+                    remote,
                     force,
                 },
         } => pr::run(pr::Invocation {
@@ -359,6 +363,7 @@ fn run(cli: Cli) -> Result<()> {
             status,
             dry_run,
             force,
+            remote,
             json,
             request_mode,
         }),

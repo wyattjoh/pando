@@ -204,6 +204,15 @@ step; use the one the response gives you. Full error-code table in
 Source: `src/commit.rs` (`recovery_steps`, `emit_failure_with_context`); design
 rationale in `docs/adr/0002-render-typed-command-outcomes.md`
 
+### Create a pull request from a fork
+
+Use `worktrees pr create --remote <name>` (or `input.remote` in JSON) when the
+head branch belongs on a personal fork. Remote precedence is explicit remote,
+then the branch upstream, then `origin`, then a sole configured remote. The
+configured target branch must have an upstream GitHub remote, which is used as
+the base repository. Fork heads are sent to GitHub as `owner:branch`; preflight
+and dry-run resolve both repositories before any push.
+
 ### Inspect the JSON request/response schema and Schema version
 ```sh
 worktrees commit --help --output json   # generated request/response JSON Schemas

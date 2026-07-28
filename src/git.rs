@@ -275,7 +275,7 @@ fn parse_committer_timestamp(commit: &[u8]) -> Option<DateTime<FixedOffset>> {
 ///
 /// # Errors
 /// Returns an error when origin is missing or Git cannot be invoked.
-pub fn remote_url(cwd: &Path) -> Result<String> {
+pub fn origin_url(cwd: &Path) -> Result<String> {
     git_stdout(cwd, ["remote", "get-url", "origin"])
 }
 
@@ -355,7 +355,22 @@ pub struct PushPlan {
 ///
 /// # Errors
 /// Returns an error when the upstream is malformed, or no unique remote can be selected.
-pub fn plan_push(cwd: &Path, branch: &str) -> Result<PushPlan> {
+pub fn plan_push(cwd: &Path, branch: &str, requested: Option<&str>) -> Result<PushPlan> {
+    if let Some(remote) = requested {
+        let output = run_git(cwd, ["remote"])?;
+        ensure_success(&output, "git remote")?;
+        if !String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|name| name == remote)
+        {
+            bail!("selected remote {remote:?} does not exist");
+        }
+        return Ok(PushPlan {
+            remote: remote.into(),
+            branch: branch.into(),
+            set_upstream: true,
+        });
+    }
     let upstream = run_git(
         cwd,
         [
@@ -407,6 +422,39 @@ pub fn plan_push(cwd: &Path, branch: &str) -> Result<PushPlan> {
         "multiple Git remotes are configured ({}) and no origin exists; configure an upstream branch or choose a remote",
         remotes.join(", ")
     )
+}
+
+/// Publishes a branch with an ordinary fast-forward-safe push.
+///
+/// # Errors
+/// Returns an error when Git rejects or cannot execute the push.
+pub fn branch_upstream_remote(cwd: &Path, branch: &str) -> Result<Option<String>> {
+    let output = run_git(
+        cwd,
+        [
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            &format!("{branch}@{{upstream}}"),
+        ],
+    )?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .split_once('/')
+        .map(|(remote, _)| remote.to_owned()))
+}
+
+/// Returns the configured URL for a named remote.
+///
+/// # Errors
+/// Returns an error when the remote is missing or Git cannot read it.
+pub fn remote_url(cwd: &Path, remote: &str) -> Result<String> {
+    let output = run_git(cwd, ["remote", "get-url", remote])?;
+    ensure_success(&output, "git remote get-url")?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// Publishes a branch with an ordinary fast-forward-safe push.

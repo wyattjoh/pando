@@ -27,6 +27,8 @@ pub struct Request {
     pub status: Status,
     #[serde(default)]
     pub dry_run: bool,
+    #[serde(default)]
+    pub remote: Option<String>,
 }
 #[allow(clippy::struct_excessive_bools)]
 pub struct Invocation {
@@ -38,6 +40,7 @@ pub struct Invocation {
     pub force: bool,
     pub json: bool,
     pub request_mode: bool,
+    pub remote: Option<String>,
 }
 /// Creates a pull request after validating repository and provider state.
 ///
@@ -65,6 +68,7 @@ pub fn run(inv: Invocation) -> Result<()> {
             r.dry_run,
             false,
             true,
+            r.remote,
         );
     }
     let title = inv.title.context("pr create requires --title")?;
@@ -78,6 +82,7 @@ pub fn run(inv: Invocation) -> Result<()> {
         inv.dry_run,
         inv.force,
         inv.json,
+        inv.remote,
     )
 }
 fn body(desc: Option<String>, file: Option<String>) -> Result<String> {
@@ -101,6 +106,7 @@ fn execute(
     dry: bool,
     force: bool,
     json_mode: bool,
+    requested_remote: Option<String>,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let repo = crate::git::repository(&cwd)?;
@@ -108,6 +114,25 @@ fn execute(
         .require_target_branch()?
         .to_owned();
     let head = crate::git::current_branch(&repo)?.to_owned();
+    let base_remote = crate::git::branch_upstream_remote(&repo.current().path, &base)?
+        .context("configured target branch has no upstream; cannot resolve base repository")?;
+    let base_repo = github_repository(&crate::git::remote_url(&repo.current().path, &base_remote)?)
+        .context("configured target upstream is not a supported GitHub remote")?;
+    let push_plan =
+        match crate::git::plan_push(&repo.current().path, &head, requested_remote.as_deref()) {
+            Ok(plan) => plan,
+            Err(error) => return fail(json_mode, "pr.remote_selection", &format!("{error:#}")),
+        };
+    let head_repository = github_repository(&crate::git::remote_url(
+        &repo.current().path,
+        &push_plan.remote,
+    )?)
+    .context("selected head remote is not a supported GitHub remote")?;
+    let head_owner = head_repository
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_owned();
     if head == base {
         return fail(
             json_mode,
@@ -152,13 +177,20 @@ fn execute(
             "GitHub CLI is not authenticated; run gh auth login",
         );
     }
-    let push_plan = match crate::git::plan_push(&repo.current().path, &head) {
-        Ok(plan) => plan,
-        Err(error) => return fail(json_mode, "pr.remote_selection", &format!("{error:#}")),
-    };
     let existing = Command::new("gh")
         .args([
-            "pr", "list", "--head", &head, "--base", &base, "--state", "open", "--json", "url",
+            "pr",
+            "list",
+            "--repo",
+            &base_repo,
+            "--head",
+            &format!("{head_owner}:{head}"),
+            "--base",
+            &base,
+            "--state",
+            "open",
+            "--json",
+            "url",
         ])
         .output()?;
     if !existing.status.success() {
@@ -191,7 +223,7 @@ fn execute(
     if dry {
         return output(
             json_mode,
-            json!({"outcome":"dry_run","base":base,"head":head,"draft":status==Status::Draft,"push":push_effect}),
+            json!({"outcome":"dry_run","base_repository":base_repo,"base_branch":base,"head_repository":format!("{head_owner}"),"head_branch":head,"remote":push_plan.remote,"draft":status==Status::Draft,"push":push_effect}),
             None,
             None,
         );
@@ -213,7 +245,18 @@ fn execute(
     }
     let mut cmd = Command::new("gh");
     cmd.args([
-        "pr", "create", "--base", &base, "--head", &head, "--title", &title, "--body", &body,
+        "pr",
+        "create",
+        "--repo",
+        &base_repo,
+        "--base",
+        &base,
+        "--head",
+        &format!("{head_owner}:{head}"),
+        "--title",
+        &title,
+        "--body",
+        &body,
     ]);
     if status == Status::Draft {
         cmd.arg("--draft");
@@ -229,7 +272,7 @@ fn execute(
     let url = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     output(
         json_mode,
-        json!({"outcome":"created","url":url,"base":base,"head":head,"draft":status==Status::Draft}),
+        json!({"outcome":"created","url":url,"base_repository":base_repo,"base_branch":base,"head_repository":head_owner,"head_branch":head,"remote":push_plan.remote,"draft":status==Status::Draft}),
         Some(url),
         Some(crate::protocol::Effect {
             action: "git.push".into(),
@@ -239,6 +282,20 @@ fn execute(
         }),
     )
 }
+fn github_repository(url: &str) -> Option<String> {
+    let value = url.trim_end_matches('/').trim_end_matches(".git");
+    let path = value
+        .strip_prefix("https://github.com/")
+        .or_else(|| value.strip_prefix("http://github.com/"))
+        .or_else(|| value.strip_prefix("git@github.com:"))
+        .or_else(|| value.strip_prefix("ssh://git@github.com/"))?;
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    (parts.next().is_none() && !owner.is_empty() && !repo.is_empty())
+        .then(|| format!("{owner}/{repo}"))
+}
+
 fn output(
     j: bool,
     r: serde_json::Value,
@@ -286,5 +343,18 @@ mod tests {
             serde_json::from_str::<Request>(r#"{"title":"T","description":"B","force":true}"#)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn github_repository_accepts_supported_remote_forms() {
+        assert_eq!(
+            github_repository("git@github.com:alice/project.git"),
+            Some("alice/project".into())
+        );
+        assert_eq!(
+            github_repository("https://github.com/alice/project"),
+            Some("alice/project".into())
+        );
+        assert_eq!(github_repository("https://gitlab.com/alice/project"), None);
     }
 }
