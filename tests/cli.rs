@@ -3268,13 +3268,57 @@ fn commit_generates_message_from_global_configuration() {
 }
 
 #[test]
+fn commit_generation_spinner_reports_elapsed_time() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        "commit:\n  generation:\n    command: \"sleep 2; printf 'feat: generated\\n\\n- first change\\n- second change\\n'\"\n",
+    )
+    .unwrap();
+    fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["commit", "--stage-all"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("CLICOLOR_FORCE", "1");
+    let output = run_terminal_command(command);
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    let plain_stderr = console::strip_ansi_codes(&output.stderr);
+    assert!(
+        plain_stderr.contains("Generating commit message... 1s"),
+        "generation spinner never displayed a nonzero elapsed time: {}",
+        output.stderr
+    );
+    let completion_seconds = plain_stderr.lines().find_map(|line| {
+        let start = line.find("Generated commit message:")?;
+        line[start + "Generated commit message:".len()..]
+            .split_whitespace()
+            .next()?
+            .strip_suffix('s')?
+            .parse::<u64>()
+            .ok()
+    });
+    assert!(
+        completion_seconds.is_some_and(|seconds| seconds >= 2),
+        "generation completion did not report the elapsed time: {}",
+        output.stderr
+    );
+}
+
+#[test]
 fn commit_generator_failure_finishes_the_spinner_with_an_error_state() {
     let repo = Repository::new();
     let xdg = tempfile::tempdir().unwrap();
     fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
     fs::write(
         xdg.path().join("worktrees/config.yaml"),
-        "commit:\n  generation:\n    command: exit 23\n",
+        "commit:\n  generation:\n    command: sleep 2; exit 23\n",
     )
     .unwrap();
     fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
@@ -3289,15 +3333,22 @@ fn commit_generator_failure_finishes_the_spinner_with_an_error_state() {
 
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
+    let plain_stderr = console::strip_ansi_codes(&output.stderr);
     assert!(
-        output.stderr.contains("Failed to generate commit message"),
-        "{}",
+        plain_stderr.contains("Generating commit message... 1s"),
+        "generation spinner never displayed a nonzero elapsed time: {}",
+        output.stderr
+    );
+    assert_eq!(
+        plain_stderr
+            .matches("Failed to generate commit message")
+            .count(),
+        1,
+        "generation failure was printed more than once: {}",
         output.stderr
     );
     assert!(
-        output
-            .stderr
-            .contains("commit generator failed with status"),
+        plain_stderr.contains("commit generator failed with status"),
         "{}",
         output.stderr
     );
