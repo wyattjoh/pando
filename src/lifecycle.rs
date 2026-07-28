@@ -156,7 +156,15 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool) -> PreflightResult<MergePlan
         |s| Ok(s.source_branch.clone()),
     )?;
     let target = journal.as_ref().map_or_else(
-        || config.require_target_branch().map(str::to_owned),
+        || {
+            git::resolve_target_branch(
+                repository
+                    .primary
+                    .as_ref()
+                    .context("repository has no primary worktree")?,
+                config.target_branch.as_deref(),
+            )
+        },
         |s| Ok(s.target_branch.clone()),
     )?;
     git::validate_branch(primary, &target)?;
@@ -362,7 +370,7 @@ pub fn merge_dry_run(no_rebase: bool, no_remove: bool) -> Result<()> {
     ))
 }
 
-/// Integrates the current topic branch into the configured target branch.
+/// Integrates the current topic branch into the resolved target branch.
 #[allow(clippy::too_many_lines)] // This is the explicit lifecycle state-machine boundary.
 ///
 /// # Errors
@@ -407,10 +415,8 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
     }
     let target = match &journal {
         Some(state) => state.target_branch.clone(),
-        None => config
-            .require_target_branch()
-            .context("failed to resolve merge target")?
-            .to_owned(),
+        None => git::resolve_target_branch(primary, config.target_branch.as_deref())
+            .context("failed to resolve merge target")?,
     };
     git::validate_branch(primary, &target)?;
     let primary_branch = primary_branch(&repository)?;

@@ -18,7 +18,7 @@ just install
 worktrees install
 ```
 
-`just install` installs `worktrees` with Cargo and creates `wt` as a relative symlink beside it. The installer previews every mutation and asks for confirmation. It writes `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/worktrees.zsh` and adds one marked source block to `${ZDOTDIR:-$HOME}/.zshrc`. Rerunning it safely updates the managed function without duplicating the source block.
+`just install` installs `worktrees` with Cargo and creates `wt` as a relative symlink beside it. The installer previews every mutation and asks for confirmation. It writes a commented configuration scaffold to `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml`, writes `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/worktrees.zsh`, and adds one marked source block to `${ZDOTDIR:-$HOME}/.zshrc`. Existing configuration and shell settings are preserved, and rerunning it safely updates only the managed blocks.
 
 Restart zsh or run:
 
@@ -124,7 +124,7 @@ If a configured root is inside the primary checkout, that destination must also 
 /.worktrees/
 ```
 
-No configured root is an error with a copyable global configuration example; `worktrees install` does not create or edit YAML.
+No configured root is an error with a copyable global configuration example. `worktrees install` adds a commented scaffold for `worktrees.root`, the optional target branch fallback, and the optional PR metadata generator to the global YAML file. The scaffold never enables a setting, preserves existing configuration, and is idempotent.
 
 ## Setup trust and recovery
 
@@ -241,7 +241,9 @@ JSON mode emits exactly one document on stdout and nothing on stderr. Errors are
 
 `worktrees remove [--force] [branch ...]` removes registered topic worktrees but never deletes their local branch refs. No arguments removes the current topic; explicit branches select registered topics. Dirty worktrees require `--force`, and removing the current worktree emits the primary path after deletion.
 
-`worktrees merge [--no-rebase] [--no-remove] [--yolo]` integrates the current clean topic into the configured target checked out in the primary worktree using `git merge --ff-only`. A diverged topic rebases by default. `--yolo` first runs the equivalent of `worktrees commit --stage-all`, using the configured commit-message generator, and then merges if the commit succeeds. It is available only with human output and cannot be combined with `--dry-run`. Phase-specific `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries; the journal pins recovery state through conflicts and cleanup retries.
+`worktrees pr create` requires `pr.generation.command` only when `--title` or `--description` is omitted. Supplying both explicit values bypasses generator configuration and trust checks. Missing generator configuration is rejected before any dirty-worktree commit, skip, or yolo handling. When no target branch is configured, PR and merge operations fall back to the fetched `origin/HEAD`, then local `main`, then local `master`.
+
+`worktrees merge [--no-rebase] [--no-remove] [--yolo]` integrates the current clean topic into the configured target checked out in the primary worktree using `git merge --ff-only`. When no target is configured, it falls back to the already-fetched `origin/HEAD` branch, then local `main`, then local `master`, without fetching. A diverged topic rebases by default. `--yolo` first runs the equivalent of `worktrees commit --stage-all`, using the configured commit-message generator, and then merges if the commit succeeds. It is available only with human output and cannot be combined with `--dry-run`. Phase-specific `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries; the journal pins recovery state through conflicts and cleanup retries.
 
 ## Context queries
 

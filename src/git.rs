@@ -271,6 +271,18 @@ fn parse_committer_timestamp(commit: &[u8]) -> Option<DateTime<FixedOffset>> {
 /// # Errors
 ///
 /// Returns an error for detached, bare, or unknown current worktree states.
+/// Returns the configured origin URL, when one is available.
+///
+/// # Errors
+/// Returns an error when origin is missing or Git cannot be invoked.
+pub fn origin_url(cwd: &Path) -> Result<String> {
+    git_stdout(cwd, ["remote", "get-url", "origin"])
+}
+
+/// Returns the current named branch.
+///
+/// # Errors
+/// Returns an error for detached, bare, or unknown worktrees.
 pub fn current_branch(repository: &Repository) -> Result<&str> {
     match &repository.current().kind {
         WorktreeKind::Branch(branch) => Ok(branch),
@@ -332,6 +344,224 @@ pub fn local_branch_exists(cwd: &Path, branch: &str) -> Result<bool> {
 /// # Errors
 ///
 /// Returns an error when Git cannot inspect remote refs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PushPlan {
+    pub remote: String,
+    pub branch: String,
+    pub set_upstream: bool,
+}
+
+/// Plans the deterministic ordinary push for a topic branch.
+///
+/// # Errors
+/// Returns an error when the upstream is malformed, or no unique remote can be selected.
+pub fn plan_push(cwd: &Path, branch: &str, requested: Option<&str>) -> Result<PushPlan> {
+    if let Some(remote) = requested {
+        let output = run_git(cwd, ["remote"])?;
+        ensure_success(&output, "git remote")?;
+        if !String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|name| name == remote)
+        {
+            bail!("selected remote {remote:?} does not exist");
+        }
+        return Ok(PushPlan {
+            remote: remote.into(),
+            branch: branch.into(),
+            set_upstream: true,
+        });
+    }
+    let upstream = run_git(
+        cwd,
+        [
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )?;
+    if upstream.status.success() {
+        let value = String::from_utf8_lossy(&upstream.stdout).trim().to_owned();
+        let (remote, upstream_branch) = value
+            .split_once('/')
+            .context("configured upstream is not a remote branch")?;
+        if remote.is_empty() || upstream_branch.is_empty() {
+            bail!("configured upstream is not a remote branch: {value}");
+        }
+        return Ok(PushPlan {
+            remote: remote.into(),
+            branch: upstream_branch.into(),
+            set_upstream: false,
+        });
+    }
+    let output = run_git(cwd, ["remote"])?;
+    ensure_success(&output, "git remote")?;
+    let mut remotes: Vec<_> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    if remotes.iter().any(|remote| remote == "origin") {
+        return Ok(PushPlan {
+            remote: "origin".into(),
+            branch: branch.into(),
+            set_upstream: true,
+        });
+    }
+    if let [remote] = remotes.as_slice() {
+        return Ok(PushPlan {
+            remote: remote.clone(),
+            branch: branch.into(),
+            set_upstream: true,
+        });
+    }
+    remotes.sort();
+    if remotes.is_empty() {
+        bail!("no Git remote is configured; add a remote before creating a pull request");
+    }
+    bail!(
+        "multiple Git remotes are configured ({}) and no origin exists; configure an upstream branch or choose a remote",
+        remotes.join(", ")
+    )
+}
+
+/// Publishes a branch with an ordinary fast-forward-safe push.
+///
+/// # Errors
+/// Returns an error when Git rejects or cannot execute the push.
+pub fn branch_upstream_remote(cwd: &Path, branch: &str) -> Result<Option<String>> {
+    let output = run_git(
+        cwd,
+        [
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            &format!("{branch}@{{upstream}}"),
+        ],
+    )?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .split_once('/')
+        .map(|(remote, _)| remote.to_owned()))
+}
+
+/// Resolves the target branch, preserving an explicit configuration value.
+/// Otherwise, uses the already-fetched `origin/HEAD` branch, then local `main`,
+/// then local `master`.
+///
+/// # Errors
+/// Returns an error when Git cannot inspect refs or no fallback branch exists.
+pub fn resolve_target_branch(cwd: &Path, configured: Option<&str>) -> Result<String> {
+    if let Some(branch) = configured {
+        return Ok(branch.to_owned());
+    }
+    let origin_head = git_stdout(cwd, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
+        .ok()
+        .and_then(|value| {
+            value
+                .trim()
+                .strip_prefix("refs/remotes/origin/")
+                .map(str::to_owned)
+        });
+    let origin_head = match origin_head {
+        Some(branch) if local_branch_exists(cwd, &branch)? => Some(branch),
+        _ => None,
+    };
+    let has_main = local_branch_exists(cwd, "main")?;
+    let has_master = local_branch_exists(cwd, "master")?;
+    fallback_target_branch(origin_head.as_deref(), has_main, has_master).map(str::to_owned).context(
+        "no target branch is configured and no fallback branch exists; configure worktrees.target-branch or create main/master",
+    )
+}
+
+fn fallback_target_branch(
+    origin_head: Option<&str>,
+    has_main: bool,
+    has_master: bool,
+) -> Option<&str> {
+    origin_head
+        .or(has_main.then_some("main"))
+        .or(has_master.then_some("master"))
+}
+
+#[cfg(test)]
+mod target_branch_tests {
+    #[test]
+    fn explicit_configuration_has_precedence() {
+        assert_eq!(
+            super::fallback_target_branch(Some("release"), true, true),
+            Some("release")
+        );
+    }
+
+    #[test]
+    fn origin_head_is_first_fallback() {
+        assert_eq!(
+            super::fallback_target_branch(Some("origin-head"), true, true),
+            Some("origin-head")
+        );
+    }
+
+    #[test]
+    fn main_is_second_fallback() {
+        assert_eq!(
+            super::fallback_target_branch(None, true, true),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn master_is_last_fallback() {
+        assert_eq!(
+            super::fallback_target_branch(None, false, true),
+            Some("master")
+        );
+    }
+}
+
+/// Returns the configured URL for a named remote.
+///
+/// # Errors
+/// Returns an error when the remote is missing or Git cannot read it.
+pub fn remote_url(cwd: &Path, remote: &str) -> Result<String> {
+    let output = run_git(cwd, ["remote", "get-url", remote])?;
+    ensure_success(&output, "git remote get-url")?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Publishes a branch with an ordinary fast-forward-safe push.
+///
+/// # Errors
+/// Returns an error when Git rejects or cannot execute the push.
+pub fn push(cwd: &Path, plan: &PushPlan, inherit: bool) -> Result<()> {
+    let refspec = format!("{}:{}", plan.branch, plan.branch);
+    if inherit {
+        let status = Command::new("git")
+            .args(["push", "-u", &plan.remote, &refspec])
+            .current_dir(cwd)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::from(open_stderr()?))
+            .stderr(Stdio::inherit())
+            .status()
+            .context("failed to start git push")?;
+        if status.success() {
+            Ok(())
+        } else {
+            bail!("git push failed with {status}")
+        }
+    } else {
+        let output = run_git(cwd, ["push", "-u", &plan.remote, &refspec])
+            .context("failed to start git push")?;
+        ensure_success(&output, "git push")
+    }
+}
+
+/// Returns already-fetched remote-tracking refs matching a branch name.
+///
+/// # Errors
+/// Returns an error when Git cannot inspect configured remotes or remote-tracking refs.
 pub fn remote_matches(cwd: &Path, branch: &str) -> Result<Vec<String>> {
     let output = run_git(cwd, ["remote"]).context("failed to inspect configured remotes")?;
     ensure_success(&output, "git remote")?;

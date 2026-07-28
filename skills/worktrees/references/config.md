@@ -10,8 +10,10 @@ strings, and empty `name` strings are all hard errors with file context.
 | Shared | `.worktrees.yaml` in the **invoking** worktree | **no** (only `target-branch`) | **no** | yes | yes (untrusted — needs `worktrees trust commit-approve`) |
 | Local | `.worktrees.local.yaml` in the **primary** worktree | yes | yes | yes | yes |
 
-`worktrees install` never creates or edits any of these YAML files — you
-write them by hand.
+`worktrees install` adds a commented scaffold to the global YAML file. It
+never enables a setting or edits existing user configuration. The scaffold is
+idempotent and documents the required placement root, the optional target
+branch fallback, and the optional PR metadata generator.
 
 ## 1. Global placement
 
@@ -36,6 +38,16 @@ May also set the commit generator globally:
 commit:
   generation:
     command: pi --no-session --no-tools
+```
+
+For PR creation, `pr.generation.command` is required only when the title or
+description is omitted. Supplying both values explicitly bypasses this
+configuration. `worktrees install` includes this as commented guidance:
+
+```yaml
+# pr:
+#   generation:
+#     command: pi --no-session --no-tools
 ```
 
 ## 2. Shared project setup
@@ -73,10 +85,10 @@ worktrees:
   target-branch: main
 ```
 
-`target-branch` is required for `worktrees merge` and is **not documented
-in README.md's Configuration section** — it only surfaces via the
-`require_target_branch` error message. Set it in `.worktrees.yaml` or the
-global config.
+`target-branch` overrides the default target for `worktrees merge` and PR
+creation. When it is omitted, operations fall back to the local branch pointed
+to by `origin/HEAD`, then local `main`, then local `master`. Set it in
+`.worktrees.yaml` or the global config when a different target is needed.
 
 ## 3. Personal per-clone overlay
 
@@ -111,6 +123,24 @@ creation:
 
 ```gitignore
 /.worktrees/
+```
+
+## Pull-request templates
+
+`pr.pull-request-template` is a body-template value, separate from the
+`pr.generation.template` prompt. Its precedence is local configuration,
+shared project configuration, the committed repository template, then global
+configuration. Repository lookup prefers `.github/pull_request_template.md`,
+then `.github/PULL_REQUEST_TEMPLATE.md` (with root-level casing fallbacks),
+and reads only from committed `HEAD`. The resolved value is exposed to the
+MiniJinja prompt as `pull_request_template`; a custom generation prompt must
+place it explicitly, while the built-in prompt always includes it.
+
+```yaml
+pr:
+  pull-request-template: |
+    ## Summary
+    ## Testing
 ```
 
 ## Layering rules
