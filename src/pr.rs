@@ -7,10 +7,9 @@ use std::{
     env, fs,
     io::{self, IsTerminal, Read, Write},
     process::Command,
-    time::Instant,
 };
 
-use cliclack::{confirm, spinner};
+use cliclack::confirm;
 use console::{Key, Term};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize, Serialize)]
@@ -366,22 +365,14 @@ fn execute(
             None,
         );
     }
-    let push_progress = (!json_mode && io::stderr().is_terminal()).then(|| {
-        let spinner = spinner();
-        spinner.start(crate::ui::heading_style().apply_to("Publishing topic branch..."));
-        spinner
-    });
-    if push_progress.is_none() && !json_mode {
-        crate::ui::info(crate::ui::heading_style().apply_to("Publishing topic branch..."))?;
-    }
-    if let Err(error) = crate::git::push(
-        &repo.current().path,
-        &push_plan,
-        !json_mode && push_progress.is_none(),
-    ) {
-        if let Some(progress) = &push_progress {
-            progress.error("Failed to publish topic branch");
-        }
+    let push = crate::ui::run_timed(
+        !json_mode,
+        "Publishing topic branch...",
+        "Published topic branch",
+        "Failed to publish topic branch",
+        |animated| crate::git::push(&repo.current().path, &push_plan, !json_mode && !animated),
+    );
+    if let Err(error) = push {
         if json_mode {
             crate::protocol::write(&crate::protocol::Response {
                 schema_version: crate::protocol::SCHEMA_VERSION,
@@ -396,19 +387,6 @@ fn execute(
         }
         return fail(false, "git.push_failed", &format!("{error:#}"));
     }
-    if let Some(progress) = &push_progress {
-        progress.stop(crate::ui::heading_style().apply_to("Published topic branch"));
-    } else if !json_mode {
-        crate::ui::step(crate::ui::heading_style().apply_to("Published topic branch"))?;
-    }
-    let create_progress = (!json_mode && io::stderr().is_terminal()).then(|| {
-        let spinner = spinner();
-        spinner.start(crate::ui::heading_style().apply_to("Creating pull request..."));
-        spinner
-    });
-    if create_progress.is_none() && !json_mode {
-        crate::ui::info(crate::ui::heading_style().apply_to("Creating pull request..."))?;
-    }
     let mut cmd = Command::new("gh");
     cmd.args([
         "pr", "create", "--repo", &base_repo, "--base", &base, "--head", &head_ref, "--title",
@@ -417,31 +395,25 @@ fn execute(
     if status == Status::Draft {
         cmd.arg("--draft");
     }
-    let out = match cmd.output() {
-        Ok(output) => output,
-        Err(error) => {
-            if let Some(progress) = &create_progress {
-                progress.error("Failed to create pull request");
+    let creation = crate::ui::run_timed(
+        !json_mode,
+        "Creating pull request...",
+        "Created pull request",
+        "Failed to create pull request",
+        |_| {
+            let output = cmd.output().context("failed to invoke GitHub CLI")?;
+            if output.status.success() {
+                Ok(output)
+            } else {
+                bail!("{}", String::from_utf8_lossy(&output.stderr).trim())
             }
-            return Err(error).context("failed to invoke GitHub CLI");
-        }
+        },
+    );
+    let out = match creation {
+        Ok(output) => output,
+        Err(error) => return fail(json_mode, "provider.creation_failed", &format!("{error:#}")),
     };
-    if !out.status.success() {
-        if let Some(progress) = &create_progress {
-            progress.error("Failed to create pull request");
-        }
-        return fail(
-            json_mode,
-            "provider.creation_failed",
-            &String::from_utf8_lossy(&out.stderr),
-        );
-    }
     let url = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if let Some(progress) = &create_progress {
-        progress.stop(crate::ui::heading_style().apply_to("Created pull request"));
-    } else if !json_mode {
-        crate::ui::step(crate::ui::heading_style().apply_to("Created pull request"))?;
-    }
     output(
         json_mode,
         json!({"outcome":"created","url":url,"base_repository":base_repo,"base_branch":base,"head_repository":head_owner,"head_branch":head,"remote":push_plan.remote,"draft":status==Status::Draft}),
@@ -495,65 +467,34 @@ fn generate_metadata(
             "Generate a PR metadata document. Return exactly one first-line level-one heading, followed by the description. Preserve required headings, checklists, and sections from the pull-request template; replace placeholders and instructional comments with factual content.\nRepository: {repo_name}\nTopic branch: {head}\nTarget branch: {base}\nDiffstat:\n{diffstat}\nCommitted commit subjects:\n{subjects}\nExplicit title: {explicit_title}\nExplicit description:\n{explicit_description}\nDiff:\n{diff}\nPull-request template:\n{pull_request_template}\n"
         )
     };
-    let generation_started = Instant::now();
-    let progress = (!json_mode && io::stderr().is_terminal()).then(|| {
-        let elapsed = crate::ui::muted_style().apply_to("{elapsed}");
-        let template = format!("{{msg}} {elapsed}");
-        let spinner = spinner().with_template(&template);
-        spinner.start(crate::ui::heading_style().apply_to("Generating pull request metadata..."));
-        spinner
-    });
-    if progress.is_none() && !json_mode {
-        crate::ui::info(
-            crate::ui::heading_style().apply_to("Generating pull request metadata..."),
-        )?;
-    }
-    let result = (|| {
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", &generator.value])
-            .current_dir(&repo.current().path)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-        child
-            .stdin
-            .take()
-            .context("generator stdin unavailable")?
-            .write_all(prompt.as_bytes())?;
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            bail!("PR metadata generator failed");
-        }
-        parse_metadata(
-            &String::from_utf8(output.stdout)
-                .map_err(|_| anyhow::anyhow!("PR generator produced non-UTF-8 output"))?,
-        )
-    })();
-    let elapsed =
-        crate::ui::muted_style().apply_to(format!("{}s", generation_started.elapsed().as_secs()));
-    match result {
-        Ok(metadata) => {
-            let completed = format!(
-                "{} {elapsed}",
-                crate::ui::heading_style().apply_to("Generated pull request metadata:")
-            );
-            if let Some(progress) = &progress {
-                progress.stop(completed);
-            } else if !json_mode {
-                crate::ui::step(completed)?;
+    crate::ui::run_timed(
+        !json_mode,
+        "Generating pull request metadata...",
+        "Generated pull request metadata:",
+        "Failed to generate pull request metadata",
+        |_| {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", &generator.value])
+                .current_dir(&repo.current().path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+            child
+                .stdin
+                .take()
+                .context("generator stdin unavailable")?
+                .write_all(prompt.as_bytes())?;
+            let output = child.wait_with_output()?;
+            if !output.status.success() {
+                bail!("PR metadata generator failed");
             }
-            Ok(metadata)
-        }
-        Err(error) => {
-            if let Some(progress) = &progress {
-                progress.error("Failed to generate pull request metadata");
-            } else if !json_mode {
-                crate::ui::warning("Failed to generate pull request metadata")?;
-            }
-            Err(error)
-        }
-    }
+            parse_metadata(
+                &String::from_utf8(output.stdout)
+                    .map_err(|_| anyhow::anyhow!("PR generator produced non-UTF-8 output"))?,
+            )
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

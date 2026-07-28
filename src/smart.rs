@@ -983,17 +983,23 @@ fn create(repository: &Repository, branch: &str, kind: &CreationKind) -> Result<
     let pending = (!config.post_create.is_empty())
         .then(|| setup::prepare(&repository.common_dir, branch, &destination))
         .transpose()?;
-    let creation = match kind {
-        CreationKind::Local => {
-            git::add_existing_worktree(&repository.current().path, &destination, branch)
-        }
-        CreationKind::Remote(remote) => {
-            git::add_tracking_worktree(&repository.current().path, &destination, branch, remote)
-        }
-        CreationKind::New { head } => {
-            git::add_new_worktree(&repository.current().path, &destination, branch, head)
-        }
-    };
+    let creation = ui::run_timed(
+        true,
+        "Creating worktree...",
+        "Created worktree",
+        "Failed to create worktree",
+        |_| match kind {
+            CreationKind::Local => {
+                git::add_existing_worktree(&repository.current().path, &destination, branch)
+            }
+            CreationKind::Remote(remote) => {
+                git::add_tracking_worktree(&repository.current().path, &destination, branch, remote)
+            }
+            CreationKind::New { head } => {
+                git::add_new_worktree(&repository.current().path, &destination, branch, head)
+            }
+        },
+    );
     if let Err(error) = creation {
         if let Some(pending) = pending {
             pending
