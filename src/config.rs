@@ -107,11 +107,20 @@ struct GlobalConfig {
     worktrees: Option<WorktreesConfig>,
     #[serde(default)]
     commit: Option<CommitConfig>,
+    #[serde(default)]
+    pr: Option<PrConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommitConfig {
+    #[serde(default)]
+    generation: Option<GenerationConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrConfig {
     #[serde(default)]
     generation: Option<GenerationConfig>,
 }
@@ -134,6 +143,8 @@ struct SharedConfig {
     hooks: Option<HooksConfig>,
     #[serde(default)]
     commit: Option<CommitConfig>,
+    #[serde(default)]
+    pr: Option<PrConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -145,6 +156,8 @@ struct LocalConfig {
     hooks: Option<HooksConfig>,
     #[serde(default)]
     commit: Option<CommitConfig>,
+    #[serde(default)]
+    pr: Option<PrConfig>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -175,6 +188,7 @@ pub struct EffectiveConfig {
     pub pre_merge: Vec<HookStep>,
     pub pre_remove: Vec<HookStep>,
     pub generation: EffectiveGeneration,
+    pub pr_generation: EffectiveGeneration,
 }
 
 impl EffectiveConfig {
@@ -208,6 +222,7 @@ impl EffectiveConfig {
         Self::load_for_worktree_inner(repository, worktree, true)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn load_for_worktree_inner(
         repository: &Repository,
         worktree: &Path,
@@ -221,6 +236,7 @@ impl EffectiveConfig {
         let shared_hooks = shared.hooks.clone().unwrap_or_default();
         validate_hooks(&shared_hooks, &shared_path)?;
         let shared_generation = shared.commit.and_then(|commit| commit.generation);
+        let shared_pr_generation = shared.pr.and_then(|pr| pr.generation);
         validate_generation(shared_generation.as_ref(), &shared_path)?;
 
         let local_path = repository
@@ -245,15 +261,19 @@ impl EffectiveConfig {
         };
 
         let global_generation = global.commit.and_then(|commit| commit.generation);
+        let global_pr_generation = global.pr.and_then(|pr| pr.generation);
         validate_generation(global_generation.as_ref(), &global_path)?;
         let local_generation = local
             .commit
             .as_ref()
             .and_then(|commit| commit.generation.clone());
+        let local_pr_generation = local.pr.as_ref().and_then(|pr| pr.generation.clone());
         if let Some(path) = &local_path {
             validate_generation(local_generation.as_ref(), path)?;
         }
 
+        validate_generation(shared_pr_generation.as_ref(), &shared_path)?;
+        validate_generation(global_pr_generation.as_ref(), &global_path)?;
         let generation = EffectiveGeneration {
             command: resolve_generation_value(
                 local_generation
@@ -306,6 +326,28 @@ impl EffectiveConfig {
             pre_merge: combine(&shared_hooks, &local_hooks, HookPhase::PreMerge),
             pre_remove: combine(&shared_hooks, &local_hooks, HookPhase::PreRemove),
             generation,
+            pr_generation: EffectiveGeneration {
+                command: resolve_generation_value(
+                    local_pr_generation.as_ref().and_then(|v| v.command.clone()),
+                    shared_pr_generation
+                        .as_ref()
+                        .and_then(|v| v.command.clone()),
+                    global_pr_generation
+                        .as_ref()
+                        .and_then(|v| v.command.clone()),
+                ),
+                template: resolve_generation_value(
+                    local_pr_generation
+                        .as_ref()
+                        .and_then(|v| v.template.clone()),
+                    shared_pr_generation
+                        .as_ref()
+                        .and_then(|v| v.template.clone()),
+                    global_pr_generation
+                        .as_ref()
+                        .and_then(|v| v.template.clone()),
+                ),
+            },
         })
     }
 

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     env, fs,
-    io::{self, IsTerminal, Read},
+    io::{self, IsTerminal, Read, Write},
     process::Command,
 };
 
@@ -18,7 +18,8 @@ pub enum Status {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    pub title: String,
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -63,7 +64,7 @@ pub fn run(inv: Invocation) -> Result<()> {
         }
         return execute(
             r.title,
-            body(r.description, r.description_file)?,
+            body_optional(r.description, r.description_file)?,
             r.status,
             r.dry_run,
             false,
@@ -71,13 +72,13 @@ pub fn run(inv: Invocation) -> Result<()> {
             r.remote,
         );
     }
-    let title = inv.title.context("pr create requires --title")?;
+    let title = inv.title;
     if inv.description.is_some() && inv.description_file.is_some() {
         bail!("--description conflicts with --description-file");
     }
     execute(
         title,
-        body(inv.description, inv.description_file)?,
+        body_optional(inv.description, inv.description_file)?,
         inv.status,
         inv.dry_run,
         inv.force,
@@ -85,23 +86,23 @@ pub fn run(inv: Invocation) -> Result<()> {
         inv.remote,
     )
 }
-fn body(desc: Option<String>, file: Option<String>) -> Result<String> {
+fn body_optional(desc: Option<String>, file: Option<String>) -> Result<Option<String>> {
     if let Some(f) = file {
         if f == "-" {
             let mut s = String::new();
             io::stdin().read_to_string(&mut s)?;
-            Ok(s)
+            Ok(Some(s))
         } else {
-            Ok(fs::read_to_string(f)?)
+            Ok(Some(fs::read_to_string(f)?))
         }
     } else {
-        desc.context("a pull request description is required")
+        Ok(desc)
     }
 }
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 fn execute(
-    title: String,
-    body: String,
+    mut title: Option<String>,
+    mut body: Option<String>,
     status: Status,
     dry: bool,
     force: bool,
@@ -133,6 +134,66 @@ fn execute(
         .next()
         .unwrap_or_default()
         .to_owned();
+    if title.is_none() || body.is_none() {
+        let config = crate::config::EffectiveConfig::load(&repo)?;
+        let generator = config
+            .pr_generation
+            .command
+            .as_ref()
+            .context("missing PR metadata generator configuration")?;
+        if generator.source == crate::config::GenerationSource::Shared
+            && !crate::trust::is_pr_generation_trusted(&repo, &config.pr_generation)?
+        {
+            return fail(
+                json_mode,
+                "trust.approval_required",
+                "shared PR generator approval is required; run worktrees trust pr-approve",
+            );
+        }
+        if !dry {
+            let prompt = format!(
+                "Generate a PR metadata document. Return exactly one first-line level-one heading, followed by the description.\nRepository: {}\nTopic branch: {head}\nTarget branch: {base}\nDiffstat:\n{}\nDiff:\n{}\n",
+                repo.current()
+                    .path
+                    .file_name()
+                    .map_or("(unknown)".into(), |v| v.to_string_lossy().into_owned()),
+                git_cmd(&repo, &["diff", "--stat", &format!("{base}...HEAD")])?,
+                git_cmd(&repo, &["diff", &format!("{base}...HEAD")])?
+            );
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", &generator.value])
+                .current_dir(&repo.current().path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+            child
+                .stdin
+                .take()
+                .context("generator stdin unavailable")?
+                .write_all(prompt.as_bytes())?;
+            let out = child.wait_with_output()?;
+            if !out.status.success() {
+                return fail(
+                    json_mode,
+                    "pr.generator_failed",
+                    "PR metadata generator failed",
+                );
+            }
+            let (generated_title, generated_body) = parse_metadata(
+                &String::from_utf8(out.stdout)
+                    .map_err(|_| anyhow::anyhow!("PR generator produced non-UTF-8 output"))?,
+            )?;
+            if title.is_none() {
+                title = Some(generated_title);
+            }
+            if body.is_none() {
+                body = Some(generated_body);
+            }
+        }
+    }
+    let title = title.unwrap_or_else(|| "Generated pull request".to_owned());
+    let body = body.unwrap_or_default();
     if head == base {
         return fail(
             json_mode,
@@ -282,6 +343,36 @@ fn execute(
         }),
     )
 }
+fn git_cmd(repo: &crate::git::Repository, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(&repo.current().path)
+        .output()?;
+    if !output.status.success() {
+        bail!("git command failed");
+    }
+    String::from_utf8(output.stdout).context("git output was not UTF-8")
+}
+
+fn parse_metadata(value: &str) -> Result<(String, String)> {
+    let mut lines = value.lines();
+    let first = lines
+        .next()
+        .context("PR generator output is missing a title")?;
+    let title = first
+        .strip_prefix("# ")
+        .context("PR generator output must begin with exactly one level-one heading")?
+        .trim();
+    if title.is_empty() || title.starts_with('#') {
+        bail!("PR title cannot be empty");
+    }
+    let description = lines.collect::<Vec<_>>().join("\n").trim().to_owned();
+    if description.is_empty() {
+        bail!("generated PR description cannot be empty");
+    }
+    Ok((title.to_owned(), description))
+}
+
 fn github_repository(url: &str) -> Option<String> {
     let value = url.trim_end_matches('/').trim_end_matches(".git");
     let path = value

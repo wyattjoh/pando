@@ -44,6 +44,9 @@ pub enum TrustCommand {
     CommitReset,
     /// Preview and approve effective shared commit-generation settings.
     CommitApprove,
+    PrStatus,
+    PrReset,
+    PrApprove,
 }
 
 /// Resolves, creates when needed, and emits a switch destination.
@@ -150,6 +153,9 @@ pub fn trust_dry_run(command: TrustCommand) -> Result<()> {
         TrustCommand::CommitReset => {
             ui::finish("Would reset commit generator trust; no changes made.")
         }
+        TrustCommand::PrStatus | TrustCommand::PrReset | TrustCommand::PrApprove => {
+            ui::finish("Would update PR generator trust; no changes made.")
+        }
         TrustCommand::CommitApprove => {
             let config = EffectiveConfig::load(&repository)?;
             trust::generation_hash(&config.generation).context(
@@ -203,6 +209,26 @@ pub fn trust_command(command: TrustCommand) -> Result<()> {
             } else {
                 ui::warning("The effective shared commit generator is not trusted.")?;
             }
+        }
+        TrustCommand::PrStatus => {
+            let config = EffectiveConfig::load(&repository)?;
+            if config.pr_generation.command.is_none() {
+                ui::info("No PR generator is configured.")?;
+            } else if trust::is_pr_generation_trusted(&repository, &config.pr_generation)? {
+                ui::success("The effective shared PR generator is trusted.")?;
+            } else {
+                ui::warning("The effective shared PR generator is not trusted.")?;
+            }
+        }
+        TrustCommand::PrReset => {
+            trust::reset_pr_generation(&repository)?;
+            ui::success("Reset PR generator trust for this repository.")?;
+        }
+        TrustCommand::PrApprove => {
+            let config = EffectiveConfig::load(&repository)?;
+            ui::ensure_interactive("PR generator approval requires an interactive human terminal")?;
+            trust::approve_pr_generation(&repository, &config.pr_generation)?;
+            ui::success("Approved PR generator for this repository.")?;
         }
         TrustCommand::CommitReset => {
             if trust::reset_generation(&repository)? {

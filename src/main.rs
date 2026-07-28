@@ -321,6 +321,9 @@ fn run(cli: Cli) -> Result<()> {
                 TrustCommand::CommitStatus => "trust.commit_status",
                 TrustCommand::CommitReset => "trust.commit_reset",
                 TrustCommand::CommitApprove => "trust.commit_approve",
+                TrustCommand::PrStatus => "trust.pr_status",
+                TrustCommand::PrReset => "trust.pr_reset",
+                TrustCommand::PrApprove => "trust.pr_approve",
             };
             machine::trust(id, request_mode, dry_run)
         }
@@ -339,6 +342,9 @@ fn run(cli: Cli) -> Result<()> {
                 TrustCommand::CommitStatus => "Commit generator trust status checked.",
                 TrustCommand::CommitReset => "Commit generator trust reset checked.",
                 TrustCommand::CommitApprove => "Commit generator trust approval checked.",
+                TrustCommand::PrStatus => "PR generator trust status checked.",
+                TrustCommand::PrReset => "PR generator trust reset checked.",
+                TrustCommand::PrApprove => "PR generator trust approval checked.",
             };
             ui::finish(ui::muted_style().apply_to(summary))
         }
