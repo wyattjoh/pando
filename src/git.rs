@@ -447,6 +447,80 @@ pub fn branch_upstream_remote(cwd: &Path, branch: &str) -> Result<Option<String>
         .map(|(remote, _)| remote.to_owned()))
 }
 
+/// Resolves the target branch, preserving an explicit configuration value.
+/// Otherwise, uses the already-fetched `origin/HEAD` branch, then local `main`,
+/// then local `master`.
+///
+/// # Errors
+/// Returns an error when Git cannot inspect refs or no fallback branch exists.
+pub fn resolve_target_branch(cwd: &Path, configured: Option<&str>) -> Result<String> {
+    if let Some(branch) = configured {
+        return Ok(branch.to_owned());
+    }
+    let origin_head = git_stdout(cwd, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
+        .ok()
+        .and_then(|value| {
+            value
+                .trim()
+                .strip_prefix("refs/remotes/origin/")
+                .map(str::to_owned)
+        });
+    let origin_head = match origin_head {
+        Some(branch) if local_branch_exists(cwd, &branch)? => Some(branch),
+        _ => None,
+    };
+    let has_main = local_branch_exists(cwd, "main")?;
+    let has_master = local_branch_exists(cwd, "master")?;
+    fallback_target_branch(origin_head.as_deref(), has_main, has_master).map(str::to_owned).context(
+        "no target branch is configured and no fallback branch exists; configure worktrees.target-branch or create main/master",
+    )
+}
+
+fn fallback_target_branch(
+    origin_head: Option<&str>,
+    has_main: bool,
+    has_master: bool,
+) -> Option<&str> {
+    origin_head
+        .or(has_main.then_some("main"))
+        .or(has_master.then_some("master"))
+}
+
+#[cfg(test)]
+mod target_branch_tests {
+    #[test]
+    fn explicit_configuration_has_precedence() {
+        assert_eq!(
+            super::fallback_target_branch(Some("release"), true, true),
+            Some("release")
+        );
+    }
+
+    #[test]
+    fn origin_head_is_first_fallback() {
+        assert_eq!(
+            super::fallback_target_branch(Some("origin-head"), true, true),
+            Some("origin-head")
+        );
+    }
+
+    #[test]
+    fn main_is_second_fallback() {
+        assert_eq!(
+            super::fallback_target_branch(None, true, true),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn master_is_last_fallback() {
+        assert_eq!(
+            super::fallback_target_branch(None, false, true),
+            Some("master")
+        );
+    }
+}
+
 /// Returns the configured URL for a named remote.
 ///
 /// # Errors

@@ -24,7 +24,7 @@ often "work":
 | `git worktree add ...` / `git checkout -b ...` | `worktrees switch [--dry-run] [branch]` | Applies the branch-resolution order, the configured root, and post-create hooks/trust |
 | `git commit -m "<message you wrote>"` | `worktrees commit --input-output json` (omit a message in the request to let the **configured generator** write it) | If the user didn't give you a message, do not invent one yourself — let the generator write it. Only supply a literal message when the user gave you that exact text |
 | `git worktree remove ...` | `worktrees remove [--force] [--dry-run] [branch...]` | Keeps the local branch ref; runs `pre-remove` hooks |
-| `git merge ...` / `git rebase ...` onto the target | `worktrees merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Resolves the configured target branch, runs `pre-merge` hooks, and is crash-recoverable |
+| `git merge ...` / `git rebase ...` onto the target | `worktrees merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Resolves the configured target branch, or origin/HEAD, main, then master without fetching, runs `pre-merge` hooks, and is crash-recoverable |
 
 `git add`/`git add --patch` are still the right tool for **staging** — only
 the four operations above must go through `worktrees`, not `git`.
@@ -209,7 +209,7 @@ rationale in `docs/adr/0002-render-typed-command-outcomes.md`
 Use `worktrees pr create --remote <name>` (or `input.remote` in JSON) when the
 head branch belongs on a personal fork. Remote precedence is explicit remote,
 then the branch upstream, then `origin`, then a sole configured remote. The
-configured target branch must have an upstream GitHub remote, which is used as
+the resolved target branch must have an upstream GitHub remote, which is used as
 the base repository. Fork heads are sent to GitHub as `owner:branch`; preflight
 and dry-run resolve both repositories before any push.
 

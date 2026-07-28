@@ -140,12 +140,12 @@ fn execute(
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let repo = crate::git::repository(&cwd)?;
-    let base = crate::config::EffectiveConfig::load(&repo)?
-        .require_target_branch()?
-        .to_owned();
+    let config = crate::config::EffectiveConfig::load(&repo)?;
+    let base =
+        crate::git::resolve_target_branch(&repo.current().path, config.target_branch.as_deref())?;
     let head = crate::git::current_branch(&repo)?.to_owned();
     let base_remote = crate::git::branch_upstream_remote(&repo.current().path, &base)?
-        .context("configured target branch has no upstream; cannot resolve base repository")?;
+        .context("target branch has no upstream; cannot resolve base repository")?;
     let base_repo = github_repository(&crate::git::remote_url(&repo.current().path, &base_remote)?)
         .context("configured target upstream is not a supported GitHub remote")?;
     let push_plan =
