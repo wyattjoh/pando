@@ -274,8 +274,8 @@ fn run(cli: Cli) -> Result<()> {
             branches,
         } => worktrees::lifecycle::remove_dry_run(&branches, force),
         Commands::Merge {
-            no_rebase,
-            no_remove,
+            no_rebase: _,
+            no_remove: _,
             yolo: true,
             dry_run: false,
         } if json => anyhow::bail!("--yolo only supports human output"),
