@@ -542,16 +542,15 @@ fn run_generator(
             message: error.to_string(),
             diagnostics: Vec::new(),
         })?;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(prompt.as_bytes())
-        .map_err(|error| CommandFailure {
+    if let Err(error) = child.stdin.take().unwrap().write_all(prompt.as_bytes())
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(CommandFailure {
             code: "commit.generator_failed",
             message: error.to_string(),
             diagnostics: Vec::new(),
-        })?;
+        });
+    }
     let output = child.wait_with_output().map_err(|error| CommandFailure {
         code: "commit.generator_failed",
         message: error.to_string(),
