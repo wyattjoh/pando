@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use worktrees::{
     commit,
     config::EffectiveConfig,
-    git, install, machine, render,
+    git, install, machine, pr, render,
     smart::{self, GetProperty, TrustCommand},
     ui,
 };
@@ -89,11 +89,40 @@ enum Commands {
         #[command(subcommand)]
         command: TrustCommand,
     },
+    /// Create a pull request from the current published topic branch.
+    Pr {
+        #[command(subcommand)]
+        command: PrCommand,
+    },
     /// Install the managed zsh integration.
     Install {
         /// Preview installation without writing or prompting.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PrCommand {
+    Create {
+        #[arg(short, long)]
+        title: Option<String>,
+        #[arg(long, conflicts_with = "description_file")]
+        description: Option<String>,
+        #[arg(long, conflicts_with = "description")]
+        description_file: Option<String>,
+        #[arg(long, value_enum, default_value_t)]
+        status: pr::Status,
+        #[arg(long)]
+        dry_run: bool,
+        /// Select the remote that owns the pull request head.
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long)]
+        force: bool,
+        /// Commit all changes and create a ready pull request without confirmation.
+        #[arg(long, conflicts_with_all = ["status", "force", "dry_run"])]
+        yolo: bool,
     },
 }
 
@@ -165,7 +194,7 @@ fn main() {
 fn command_id(args: &[std::ffi::OsString]) -> Option<String> {
     let words: Vec<_> = args.iter().filter_map(|arg| arg.to_str()).collect();
     for command in [
-        "list", "switch", "get", "remove", "merge", "commit", "install",
+        "list", "switch", "get", "remove", "merge", "commit", "install", "pr",
     ] {
         if words.contains(&command) {
             return Some(command.into());
@@ -245,8 +274,8 @@ fn run(cli: Cli) -> Result<()> {
             branches,
         } => worktrees::lifecycle::remove_dry_run(&branches, force),
         Commands::Merge {
-            no_rebase,
-            no_remove,
+            no_rebase: _,
+            no_remove: _,
             yolo: true,
             dry_run: false,
         } if json => anyhow::bail!("--yolo only supports human output"),
@@ -295,6 +324,9 @@ fn run(cli: Cli) -> Result<()> {
                 TrustCommand::CommitStatus => "trust.commit_status",
                 TrustCommand::CommitReset => "trust.commit_reset",
                 TrustCommand::CommitApprove => "trust.commit_approve",
+                TrustCommand::PrStatus => "trust.pr_status",
+                TrustCommand::PrReset => "trust.pr_reset",
+                TrustCommand::PrApprove => "trust.pr_approve",
             };
             machine::trust(id, request_mode, dry_run)
         }
@@ -313,12 +345,39 @@ fn run(cli: Cli) -> Result<()> {
                 TrustCommand::CommitStatus => "Commit generator trust status checked.",
                 TrustCommand::CommitReset => "Commit generator trust reset checked.",
                 TrustCommand::CommitApprove => "Commit generator trust approval checked.",
+                TrustCommand::PrStatus => "PR generator trust status checked.",
+                TrustCommand::PrReset => "PR generator trust reset checked.",
+                TrustCommand::PrApprove => "PR generator trust approval checked.",
             };
             ui::finish(ui::muted_style().apply_to(summary))
         }
         Commands::Install { dry_run } if json => machine::install(request_mode, dry_run),
         Commands::Install { dry_run: false } => install::run(),
         Commands::Install { dry_run: true } => install::preview(),
+        Commands::Pr {
+            command:
+                PrCommand::Create {
+                    title,
+                    description,
+                    description_file,
+                    status,
+                    dry_run,
+                    remote,
+                    force,
+                    yolo,
+                },
+        } => pr::run(pr::Invocation {
+            title,
+            description,
+            description_file,
+            status,
+            dry_run,
+            force,
+            yolo,
+            remote,
+            json,
+            request_mode,
+        }),
     }
 }
 

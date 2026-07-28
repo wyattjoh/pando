@@ -4,13 +4,18 @@
 Usage: worktrees install [OPTIONS]
 ```
 
-No flags beyond the globals. Installs the managed zsh integration:
+No flags beyond the globals. Installs the managed zsh integration and global
+configuration scaffold:
 
 - Previews every mutation and asks for confirmation before writing anything.
+- Adds a commented scaffold to `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml`.
+  It leaves `worktrees.root` commented for required placement configuration,
+  documents the optional target-branch fallback, and documents the optional PR
+  metadata generator used when PR metadata is omitted.
 - Writes `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/worktrees.zsh`.
 - Adds one marked source block to `${ZDOTDIR:-$HOME}/.zshrc`.
-- Rerunning it safely updates the managed function without duplicating the
-  source block.
+- Preserves existing configuration and shell content. Rerunning it safely
+  updates only managed content and is idempotent.
 
 After installing, restart zsh or:
 

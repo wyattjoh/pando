@@ -2,10 +2,11 @@ use std::{
     error::Error,
     fmt::{self, Display},
     io::{self, IsTerminal},
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
-use cliclack::{Theme, ThemeState, log, outro, outro_cancel, set_theme};
+use cliclack::{Theme, ThemeState, log, outro, outro_cancel, set_theme, spinner};
 use console::{
     Style, colors_enabled_stderr, set_colors_enabled, set_true_colors_enabled,
     true_colors_enabled_stderr,
@@ -226,6 +227,62 @@ pub fn declined(message: impl Into<String>) -> anyhow::Error {
 #[must_use]
 pub fn declined_noop(message: impl Into<String>, completion: impl Into<String>) -> anyhow::Error {
     InteractionError::declined(message, Some(completion.into())).into()
+}
+
+/// Runs a potentially slow operation with a timed human-mode progress indicator.
+///
+/// The operation receives whether an animated spinner owns stderr. Callers that
+/// can otherwise stream subprocess progress should capture it only when this is
+/// `true`, avoiding interleaved output while preserving progress on plain stderr.
+///
+/// # Errors
+///
+/// Returns the operation error after closing the indicator, or a terminal write
+/// error when progress output cannot be rendered.
+pub fn run_timed<T>(
+    enabled: bool,
+    starting: &str,
+    completed: &str,
+    failed: &str,
+    operation: impl FnOnce(bool) -> Result<T>,
+) -> Result<T> {
+    if !enabled {
+        return operation(false);
+    }
+
+    let started = Instant::now();
+    let progress = io::stderr().is_terminal().then(|| {
+        let elapsed = muted_style().apply_to("{elapsed}");
+        let template = format!("{{msg}} {elapsed}");
+        let progress = spinner().with_template(&template);
+        progress.start(heading_style().apply_to(starting));
+        progress
+    });
+    if progress.is_none() {
+        info(heading_style().apply_to(starting))?;
+    }
+
+    let result = operation(progress.is_some());
+    let elapsed = muted_style().apply_to(format!("{}s", started.elapsed().as_secs()));
+    match result {
+        Ok(value) => {
+            let message = format!("{} {elapsed}", heading_style().apply_to(completed));
+            if let Some(progress) = &progress {
+                progress.stop(message);
+            } else {
+                step(message)?;
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            if let Some(progress) = &progress {
+                progress.error(failed);
+            } else {
+                warning(failed)?;
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Writes an informational message through the terminal UI.

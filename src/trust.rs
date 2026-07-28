@@ -23,6 +23,8 @@ struct TrustFile {
     repositories: BTreeMap<String, TrustRecord>,
     #[serde(default)]
     commit_generators: BTreeMap<String, String>,
+    #[serde(default)]
+    pr_generators: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -195,6 +197,76 @@ pub fn approve_generation(repository: &Repository, generation: &EffectiveGenerat
 /// # Errors
 ///
 /// Returns an error when repository identity or trust storage cannot be updated.
+pub fn is_pr_generation_trusted(
+    repository: &Repository,
+    generation: &EffectiveGeneration,
+) -> Result<bool> {
+    let Some(hash) = generation_hash_named(generation, b"worktrees-pr-generation-v1") else {
+        return Ok(true);
+    };
+    Ok(read_trust()?
+        .pr_generators
+        .get(&repository_key(repository)?)
+        == Some(&hash))
+}
+
+/// Approves shared PR generation settings.
+///
+/// # Errors
+/// Returns an error when trust storage cannot be updated.
+pub fn approve_pr_generation(
+    repository: &Repository,
+    generation: &EffectiveGeneration,
+) -> Result<()> {
+    let Some(hash) = generation_hash_named(generation, b"worktrees-pr-generation-v1") else {
+        return Ok(());
+    };
+    let mut trust = read_trust()?;
+    trust
+        .pr_generators
+        .insert(repository_key(repository)?, hash);
+    write_trust(&trust)
+}
+
+/// Resets PR generator approval.
+///
+/// # Errors
+/// Returns an error when trust storage cannot be updated.
+pub fn reset_pr_generation(repository: &Repository) -> Result<bool> {
+    let mut trust = read_trust()?;
+    let removed = trust
+        .pr_generators
+        .remove(&repository_key(repository)?)
+        .is_some();
+    if removed {
+        write_trust(&trust)?;
+    }
+    Ok(removed)
+}
+
+fn generation_hash_named(generation: &EffectiveGeneration, domain: &[u8]) -> Option<String> {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    let mut shared = false;
+    for (name, value) in [
+        (b"command".as_slice(), generation.command.as_ref()),
+        (b"template".as_slice(), generation.template.as_ref()),
+    ] {
+        if let Some(value) = value.filter(|value| value.source == GenerationSource::Shared) {
+            shared = true;
+            digest.update((name.len() as u64).to_be_bytes());
+            digest.update(name);
+            digest.update((value.value.len() as u64).to_be_bytes());
+            digest.update(value.value.as_bytes());
+        }
+    }
+    shared.then(|| hash::encode_hex(&digest.finalize()))
+}
+
+/// Resets commit generator approval.
+///
+/// # Errors
+/// Returns an error when trust storage cannot be updated.
 pub fn reset_generation(repository: &Repository) -> Result<bool> {
     let mut trust = read_trust()?;
     let removed = trust

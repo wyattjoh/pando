@@ -1155,6 +1155,28 @@ fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
 }
 
 #[test]
+fn merge_falls_back_to_main_without_target_configuration() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("feature.txt"), "feature\n").unwrap();
+    git(&repo.linked, ["add", "feature.txt"]);
+    git(&repo.linked, ["commit", "-m", "feature change"]);
+
+    let mut merge = Command::cargo_bin("worktrees").unwrap();
+    merge
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("CLICOLOR_FORCE", "1");
+    let merged = run_pty_command(merge, b"");
+
+    assert!(merged.status.success(), "{}", merged.stderr);
+    assert!(merged.stderr.contains("into"), "{}", merged.stderr);
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s"]),
+        "feature change"
+    );
+}
+
+#[test]
 fn merge_yolo_stages_commits_and_merges_all_changes() {
     let repo = Repository::new();
     fs::write(
@@ -1192,6 +1214,36 @@ fn merge_yolo_stages_commits_and_merges_all_changes() {
         "feat: yolo merge"
     );
     assert_eq!(git_output(&repo.main, ["show", "HEAD:yolo.txt"]), "ship it");
+}
+
+#[test]
+fn pr_missing_metadata_generator_fails_before_dirty_worktree_handling() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["pr", "create"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("pr.generator_unavailable"), "{stderr}");
+    assert!(
+        stderr.contains("provide both --title and --description"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("uncommitted changes"), "{stderr}");
+    assert!(!stderr.contains("Commit all changes"), "{stderr}");
+    assert!(repo.linked.join("dirty.txt").is_file());
+    assert_eq!(
+        git_output(&repo.linked, ["status", "--porcelain"]),
+        "?? dirty.txt"
+    );
 }
 
 #[test]
@@ -1290,6 +1342,11 @@ fn install_preserves_zshrc_and_is_idempotent() {
         installed.stderr
     );
 
+    let config = xdg.path().join("worktrees/config.yaml");
+    let generated_config = fs::read_to_string(&config).unwrap();
+    assert!(generated_config.contains("#   root: ../worktrees"));
+    assert!(generated_config.contains("#   target-branch: main"));
+    assert!(generated_config.contains("#     command: pi --no-session --no-tools"));
     let integration = xdg.path().join("worktrees/worktrees.zsh");
     let generated = fs::read_to_string(&integration).unwrap();
     assert!(generated.contains("worktrees() { _worktrees_dispatch worktrees \"$@\"; }"));
@@ -1299,6 +1356,8 @@ fn install_preserves_zshrc_and_is_idempotent() {
 
     let first_zshrc = fs::read(&zshrc).unwrap();
     assert!(first_zshrc.starts_with(original));
+    let first_config = fs::read(&config).unwrap();
+    assert_eq!(first_config, generated_config.as_bytes());
     let first_text = String::from_utf8(first_zshrc.clone()).unwrap();
     assert_eq!(
         first_text
@@ -1318,7 +1377,44 @@ fn install_preserves_zshrc_and_is_idempotent() {
             .contains("already current")
     );
     assert_eq!(fs::read(&zshrc).unwrap(), first_zshrc);
+    assert_eq!(fs::read(&config).unwrap(), first_config);
     assert_eq!(fs::read_to_string(&integration).unwrap(), generated);
+}
+
+#[test]
+fn install_preserves_existing_global_config() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+    let config_dir = xdg.path().join("worktrees");
+    fs::create_dir_all(&config_dir).unwrap();
+    let config = config_dir.join("config.yaml");
+    let original = b"worktrees:\n  root: /custom/worktrees\ncommit:\n  generation:\n    command: custom-generator\n";
+    fs::write(&config, original).unwrap();
+
+    let installed = run_install(home.path(), xdg.path(), Some(zdot.path()), b"y\r");
+    assert!(installed.status.success(), "{}", installed.stderr);
+    let content = fs::read(&config).unwrap();
+    assert!(content.starts_with(original));
+    assert_eq!(
+        content
+            .windows(b"# >>> worktrees configuration scaffold >>>".len())
+            .filter(|window| *window == b"# >>> worktrees configuration scaffold >>>")
+            .count(),
+        1
+    );
+    assert_eq!(
+        content
+            .windows(b"# <<< worktrees configuration scaffold <<<".len())
+            .filter(|window| *window == b"# <<< worktrees configuration scaffold <<<")
+            .count(),
+        1
+    );
+    assert!(
+        String::from_utf8(content)
+            .unwrap()
+            .contains("command: custom-generator")
+    );
 }
 
 #[test]
@@ -3748,11 +3844,10 @@ fn json_remove_execution_removes_multiple_worktrees_and_retains_branches() {
 fn json_forced_remove_requires_explicit_force_and_reports_retention() {
     let repo = Repository::new();
     fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();
-    let request =
-        serde_json::json!({"schema_version":1,"input":{"branches":["feature"],"force":true}});
+    let request = serde_json::json!({"schema_version":1,"input":{"branches":["feature"]}});
     let output = json_command(
         &repo.main,
-        &["remove", "--input-output", "json"],
+        &["remove", "--force", "--input-output", "json"],
         Some(&request),
     );
     assert!(output.status.success());
@@ -3762,6 +3857,24 @@ fn json_forced_remove_requires_explicit_force_and_reports_retention() {
         git_output(&repo.main, ["branch", "--list", "feature"]),
         "feature"
     );
+}
+
+#[test]
+fn json_remove_rejects_legacy_force_in_request() {
+    let repo = Repository::new();
+    let request =
+        serde_json::json!({"schema_version":1,"input":{"branches":["feature"],"force":true}});
+    let output = json_command(
+        &repo.main,
+        &["remove", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        assert_json_pure(&output)["error"]["code"],
+        "json.invalid_request"
+    );
+    assert!(repo.linked.exists());
 }
 
 #[test]

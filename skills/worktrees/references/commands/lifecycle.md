@@ -45,7 +45,7 @@ Usage: worktrees merge [OPTIONS]
 | `--no-remove` | Keep the topic worktree/branch after a successful merge |
 | `--yolo` | Stage and commit every change with the configured generator before merging |
 
-Integrates the current clean topic into the configured target branch
+Integrates the current clean topic into the resolved target branch
 (checked out in the primary worktree) via `git merge --ff-only`. A diverged
 topic rebases onto the target by default. `--yolo` first runs the equivalent
 of `worktrees commit --stage-all` and continues only if the commit succeeds.
@@ -53,11 +53,10 @@ It supports human output only and conflicts with `--dry-run`. Phase-specific
 `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries (see
 `../config.md`).
 
-Requires `worktrees.target-branch` to be set in `.worktrees.yaml` or the
-global config — `merge` errors otherwise. This key is **not** documented in
-README.md's Configuration section; it only surfaces via the
-`require_target_branch` error message ("add worktrees.target-branch to
-.worktrees.yaml or global config").
+Uses `worktrees.target-branch` when set in `.worktrees.yaml` or the global
+config. Otherwise, it falls back to the local branch pointed to by
+`origin/HEAD`, then local `main`, then local `master`. It errors only when no
+configured or fallback branch exists.
 
 ```yaml
 # .worktrees.yaml or global config.yaml
@@ -90,4 +89,4 @@ invocations above are marked **(inferred)**.
 
 ## Structured JSON contract
 
-Agents use request mode. `remove` input contains `branches`, `force`, and `dry_run`; never send `force:true` without explicit user approval. `merge` input contains `no_rebase`, `no_remove`, and `dry_run`. Request mode rejects mixed command arguments and flags. Results distinguish dry runs, no-ops, removals, retained topics, and completed cleanup. Effects identify hook, Git, and target worktree actions; failures use stable codes with diagnostics and recovery context. Dry runs execute no hooks or mutations. Exact-leaf JSON help exposes runtime schemas and the error/action catalogs.
+Agents use request mode. `remove` input contains `branches` and `dry_run`. Force is an argv-only authorization: pass `--force` explicitly after user approval. Never put `force` in the request document. `merge` input contains `no_rebase`, `no_remove`, and `dry_run`. Request mode rejects mixed command arguments and flags. Results distinguish dry runs, no-ops, removals, retained topics, and completed cleanup. Effects identify hook, Git, and target worktree actions; failures use stable codes with diagnostics and recovery context. Dry runs execute no hooks or mutations. Exact-leaf JSON help exposes runtime schemas and the error/action catalogs.

@@ -24,7 +24,7 @@ often "work":
 | `git worktree add ...` / `git checkout -b ...` | `worktrees switch [--dry-run] [branch]` | Applies the branch-resolution order, the configured root, and post-create hooks/trust |
 | `git commit -m "<message you wrote>"` | `worktrees commit --input-output json` (omit a message in the request to let the **configured generator** write it) | If the user didn't give you a message, do not invent one yourself — let the generator write it. Only supply a literal message when the user gave you that exact text |
 | `git worktree remove ...` | `worktrees remove [--force] [--dry-run] [branch...]` | Keeps the local branch ref; runs `pre-remove` hooks |
-| `git merge ...` / `git rebase ...` onto the target | `worktrees merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Resolves the configured target branch, runs `pre-merge` hooks, and is crash-recoverable |
+| `git merge ...` / `git rebase ...` onto the target | `worktrees merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Resolves the configured target branch, or origin/HEAD, main, then master without fetching, runs `pre-merge` hooks, and is crash-recoverable |
 
 `git add`/`git add --patch` are still the right tool for **staging** — only
 the four operations above must go through `worktrees`, not `git`.
@@ -62,8 +62,7 @@ when a returned next step explicitly requires a person's approval.
 
 Requests reject unknown fields, trailing data, unsupported versions, and
 mixed command flags. Dry-run mutating requests use `input.dry_run:true`.
-Never construct a remove request with `force:true` without explicit user
-approval. JSON cannot grant hook or generator trust or authorize installer
+Force is argv-only authorization for removal. Pass `--force` only with explicit user approval; never put `force` in a remove request document. JSON cannot grant hook or generator trust or authorize installer
 writes. Structured worktree records expose nullable RFC 3339
 `last_commit_at` values and always retain Git discovery order, regardless of
 the human `worktrees.default-sort` preference. See the command references
@@ -84,7 +83,8 @@ for leaf contracts and approval rules.
 | `merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Integrate the current topic into the configured target branch | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `commit [-m MSG] [--stage-all] [--dry-run]` | Commit the existing index, optionally staging every change first | [`references/commands/commit.md`](references/commands/commit.md) |
 | `trust [--dry-run] <subcommand>` | Inspect, approve, or revoke hook-phase or commit-generation trust. Subcommands: `status`, `reset`, `commit-status`, `commit-reset`, `commit-approve` | [`references/commands/trust.md`](references/commands/trust.md) |
-| `install [--dry-run]` | Install or preview the managed zsh integration | [`references/commands/install.md`](references/commands/install.md) |
+| `install [--dry-run]` | Install or preview the managed zsh integration and global config scaffold | [`references/commands/install.md`](references/commands/install.md) |
+| `pr create` | Create a draft or ready pull request from a published topic branch | [`references/commands/pr.md`](references/commands/pr.md) |
 
 ## Common workflows
 
@@ -94,7 +94,7 @@ just install
 worktrees install
 source ${ZDOTDIR:-$HOME}/.zshrc
 ```
-`just install` installs `worktrees` with Cargo and creates `wt` as a relative symlink beside it.
+`just install` installs `worktrees` with Cargo and creates `wt` as a relative symlink beside it. `worktrees install` also adds an idempotent commented scaffold to the global config without enabling or overwriting user settings.
 Source: README.md ("Install")
 
 ### Configure a root before creating any worktrees
@@ -203,6 +203,15 @@ step; use the one the response gives you. Full error-code table in
 `references/commands/commit.md`.
 Source: `src/commit.rs` (`recovery_steps`, `emit_failure_with_context`); design
 rationale in `docs/adr/0002-render-typed-command-outcomes.md`
+
+### Create a pull request from a fork
+
+Use `worktrees pr create --remote <name>` (or `input.remote` in JSON) when the
+head branch belongs on a personal fork. Remote precedence is explicit remote,
+then the branch upstream, then `origin`, then a sole configured remote. The
+the resolved target branch must have an upstream GitHub remote, which is used as
+the base repository. Fork heads are sent to GitHub as `owner:branch`; preflight
+and dry-run resolve both repositories before any push.
 
 ### Inspect the JSON request/response schema and Schema version
 ```sh

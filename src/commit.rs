@@ -1,16 +1,15 @@
 use std::{
     env,
     ffi::OsString,
-    io::{self, IsTerminal, Write},
+    io::Write,
     os::unix::ffi::{OsStrExt, OsStringExt},
     path::Path,
     process::{Command, Output, Stdio},
-    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use cliclack::{confirm, spinner};
+use cliclack::confirm;
 use minijinja::{Environment, context};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
@@ -88,12 +87,7 @@ struct CommandFailure {
 
 struct HumanMessage {
     value: String,
-    generation: Option<GenerationFeedback>,
-}
-
-struct GenerationFeedback {
-    elapsed: Duration,
-    status_rendered: bool,
+    generated: bool,
 }
 
 /// Runs commit using the human or JSON adapter.
@@ -198,25 +192,33 @@ fn run_human(invocation: &Invocation, source: &MessageSource) -> Result<()> {
         return ui::finish(ui::success_style().apply_to("Commit preflight ready."));
     }
     if stage_all {
-        git::stage_all(&repository.current().path)?;
+        ui::run_timed(
+            true,
+            "Staging all changes...",
+            "Staged all changes",
+            "Failed to stage changes",
+            |_| git::stage_all(&repository.current().path),
+        )?;
     }
     ensure_staged(&repository)?;
     preview_staged(&repository.current().path)?;
     let message = resolve_message_human(&repository, source, config.as_ref())?;
-    git::commit(&repository.current().path, &message.value)?;
+    ui::run_timed(
+        true,
+        "Creating commit...",
+        "Created commit",
+        "Failed to create commit",
+        |_| git::commit(&repository.current().path, &message.value),
+    )?;
     let hash = git::head_commit(&repository.current().path)?;
     let rendered_message = render_commit_message(&message.value);
-    match message.generation {
-        Some(generation) if generation.status_rendered => ui::step(rendered_message)?,
-        Some(generation) => ui::step(format!(
-            "{} {}\n{rendered_message}",
-            ui::heading_style().apply_to("Generated commit message:"),
-            muted_elapsed(generation.elapsed)
-        ))?,
-        None => ui::step(format!(
+    if message.generated {
+        ui::step(rendered_message)?;
+    } else {
+        ui::step(format!(
             "{}\n{rendered_message}",
-            ui::heading_style().apply_to("Created commit")
-        ))?,
+            ui::heading_style().apply_to("Commit message")
+        ))?;
     }
     ui::finish(format!(
         "{} {}",
@@ -455,53 +457,26 @@ fn resolve_message_human(
     match source {
         MessageSource::Provided { value } => validate_message(value).map(|value| HumanMessage {
             value,
-            generation: None,
+            generated: false,
         }),
         MessageSource::ConfiguredGenerator => {
             let config = config.context("generator config missing")?;
-            let generation_started = Instant::now();
-            let spinner = io::stderr().is_terminal().then(|| {
-                let elapsed = ui::muted_style().apply_to("{elapsed}");
-                let template = format!("{{msg}} {elapsed}");
-                let spinner = spinner().with_template(&template);
-                spinner.start(ui::heading_style().apply_to("Generating commit message..."));
-                spinner
-            });
-            if spinner.is_none() {
-                ui::info(ui::heading_style().apply_to("Generating commit message..."))?;
-            }
-            let (message, _) = match run_generator(repository, config, false) {
-                Ok(result) => result,
-                Err(failure) => {
-                    if let Some(spinner) = &spinner {
-                        spinner.error("Failed to generate commit message");
-                    } else {
-                        ui::warning("Failed to generate commit message")?;
-                    }
-                    return Err(anyhow::anyhow!(failure.message));
-                }
-            };
-            let elapsed = generation_started.elapsed();
-            if let Some(spinner) = &spinner {
-                spinner.stop(format!(
-                    "{} {}",
-                    ui::heading_style().apply_to("Generated commit message:"),
-                    muted_elapsed(elapsed)
-                ));
-            }
+            let (message, _) = ui::run_timed(
+                true,
+                "Generating commit message...",
+                "Generated commit message:",
+                "Failed to generate commit message",
+                |_| {
+                    run_generator(repository, config, false)
+                        .map_err(|failure| anyhow::anyhow!(failure.message))
+                },
+            )?;
             Ok(HumanMessage {
                 value: message,
-                generation: Some(GenerationFeedback {
-                    elapsed,
-                    status_rendered: spinner.is_some(),
-                }),
+                generated: true,
             })
         }
     }
-}
-
-fn muted_elapsed(elapsed: Duration) -> impl std::fmt::Display {
-    ui::muted_style().apply_to(format!("{}s", elapsed.as_secs()))
 }
 
 fn resolve_message_json(
@@ -567,16 +542,15 @@ fn run_generator(
             message: error.to_string(),
             diagnostics: Vec::new(),
         })?;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(prompt.as_bytes())
-        .map_err(|error| CommandFailure {
+    if let Err(error) = child.stdin.take().unwrap().write_all(prompt.as_bytes())
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(CommandFailure {
             code: "commit.generator_failed",
             message: error.to_string(),
             diagnostics: Vec::new(),
-        })?;
+        });
+    }
     let output = child.wait_with_output().map_err(|error| CommandFailure {
         code: "commit.generator_failed",
         message: error.to_string(),

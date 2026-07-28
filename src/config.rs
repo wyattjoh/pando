@@ -107,6 +107,8 @@ struct GlobalConfig {
     worktrees: Option<WorktreesConfig>,
     #[serde(default)]
     commit: Option<CommitConfig>,
+    #[serde(default)]
+    pr: Option<PrConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -114,6 +116,15 @@ struct GlobalConfig {
 struct CommitConfig {
     #[serde(default)]
     generation: Option<GenerationConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrConfig {
+    #[serde(default)]
+    generation: Option<GenerationConfig>,
+    #[serde(default, rename = "pull-request-template")]
+    pull_request_template: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -134,6 +145,8 @@ struct SharedConfig {
     hooks: Option<HooksConfig>,
     #[serde(default)]
     commit: Option<CommitConfig>,
+    #[serde(default)]
+    pr: Option<PrConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -145,6 +158,8 @@ struct LocalConfig {
     hooks: Option<HooksConfig>,
     #[serde(default)]
     commit: Option<CommitConfig>,
+    #[serde(default)]
+    pr: Option<PrConfig>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -175,6 +190,8 @@ pub struct EffectiveConfig {
     pub pre_merge: Vec<HookStep>,
     pub pre_remove: Vec<HookStep>,
     pub generation: EffectiveGeneration,
+    pub pr_generation: EffectiveGeneration,
+    pub pull_request_template: Option<GenerationValue>,
 }
 
 impl EffectiveConfig {
@@ -208,6 +225,7 @@ impl EffectiveConfig {
         Self::load_for_worktree_inner(repository, worktree, true)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn load_for_worktree_inner(
         repository: &Repository,
         worktree: &Path,
@@ -220,7 +238,15 @@ impl EffectiveConfig {
         let shared: SharedConfig = read_yaml_optional(&shared_path)?;
         let shared_hooks = shared.hooks.clone().unwrap_or_default();
         validate_hooks(&shared_hooks, &shared_path)?;
-        let shared_generation = shared.commit.and_then(|commit| commit.generation);
+        let shared_generation = shared
+            .commit
+            .as_ref()
+            .and_then(|commit| commit.generation.clone());
+        let shared_pr_generation = shared.pr.as_ref().and_then(|pr| pr.generation.clone());
+        let shared_pr_template = shared
+            .pr
+            .as_ref()
+            .and_then(|pr| pr.pull_request_template.clone());
         validate_generation(shared_generation.as_ref(), &shared_path)?;
 
         let local_path = repository
@@ -244,16 +270,34 @@ impl EffectiveConfig {
             LocalConfig::default()
         };
 
-        let global_generation = global.commit.and_then(|commit| commit.generation);
+        let global_generation = global
+            .commit
+            .as_ref()
+            .and_then(|commit| commit.generation.clone());
+        let global_pr_generation = global.pr.as_ref().and_then(|pr| pr.generation.clone());
+        let global_pr_template = global
+            .pr
+            .as_ref()
+            .and_then(|pr| pr.pull_request_template.clone());
         validate_generation(global_generation.as_ref(), &global_path)?;
         let local_generation = local
             .commit
             .as_ref()
             .and_then(|commit| commit.generation.clone());
+        let local_pr_generation = local.pr.as_ref().and_then(|pr| pr.generation.clone());
+        let local_pr_template = local
+            .pr
+            .as_ref()
+            .and_then(|pr| pr.pull_request_template.clone());
         if let Some(path) = &local_path {
             validate_generation(local_generation.as_ref(), path)?;
+            validate_pull_request_template(local_pr_template.as_deref(), path)?;
         }
 
+        validate_generation(shared_pr_generation.as_ref(), &shared_path)?;
+        validate_generation(global_pr_generation.as_ref(), &global_path)?;
+        validate_pull_request_template(shared_pr_template.as_deref(), &shared_path)?;
+        validate_pull_request_template(global_pr_template.as_deref(), &global_path)?;
         let generation = EffectiveGeneration {
             command: resolve_generation_value(
                 local_generation
@@ -306,6 +350,33 @@ impl EffectiveConfig {
             pre_merge: combine(&shared_hooks, &local_hooks, HookPhase::PreMerge),
             pre_remove: combine(&shared_hooks, &local_hooks, HookPhase::PreRemove),
             generation,
+            pr_generation: EffectiveGeneration {
+                command: resolve_generation_value(
+                    local_pr_generation.as_ref().and_then(|v| v.command.clone()),
+                    shared_pr_generation
+                        .as_ref()
+                        .and_then(|v| v.command.clone()),
+                    global_pr_generation
+                        .as_ref()
+                        .and_then(|v| v.command.clone()),
+                ),
+                template: resolve_generation_value(
+                    local_pr_generation
+                        .as_ref()
+                        .and_then(|v| v.template.clone()),
+                    shared_pr_generation
+                        .as_ref()
+                        .and_then(|v| v.template.clone()),
+                    global_pr_generation
+                        .as_ref()
+                        .and_then(|v| v.template.clone()),
+                ),
+            },
+            pull_request_template: resolve_generation_value(
+                local_pr_template,
+                shared_pr_template,
+                global_pr_template,
+            ),
         })
     }
 
@@ -382,6 +453,16 @@ fn validate_generation(generation: Option<&GenerationConfig>, source_hint: &Path
                 source_hint.display()
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_pull_request_template(value: Option<&str>, source_hint: &Path) -> Result<()> {
+    if value.is_some_and(|value| value.trim().is_empty()) {
+        bail!(
+            "pr.pull-request-template cannot be empty while loading configuration near {}",
+            source_hint.display()
+        );
     }
     Ok(())
 }
