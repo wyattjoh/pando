@@ -7,9 +7,10 @@ use std::{
     env, fs,
     io::{self, IsTerminal, Read, Write},
     process::Command,
+    time::Instant,
 };
 
-use cliclack::confirm;
+use cliclack::{confirm, spinner};
 use console::{Key, Term};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize, Serialize)]
@@ -200,123 +201,6 @@ fn execute(
         .next()
         .unwrap_or_default()
         .to_owned();
-    // Resolve dirty state before generating metadata so skipped or committed changes are
-    // represented by the committed range sent to the generator.
-    let dirty = crate::git::is_dirty(&repo.current().path)?;
-    if dirty {
-        if force && !yolo {
-            return fail_dirty(json_mode);
-        }
-        if yolo {
-            crate::commit::run(crate::commit::Invocation {
-                message: None,
-                stage_all: true,
-                dry_run: false,
-                json: false,
-                request_mode: false,
-            })?;
-        } else {
-            let options = [
-                ("commit", "Commit all changes", ""),
-                ("skip", "Skip local changes", ""),
-                ("stop", "Stop", ""),
-            ];
-            loop {
-                let choice = cliclack::select("This worktree has uncommitted changes")
-                    .items(&options)
-                    .initial_value("commit")
-                    .interact()?;
-                match choice {
-                    "commit" => {
-                        crate::commit::run(crate::commit::Invocation {
-                            message: None,
-                            stage_all: false,
-                            dry_run: false,
-                            json: false,
-                            request_mode: false,
-                        })?;
-                        if !crate::git::is_dirty(&repo.current().path)? {
-                            break;
-                        }
-                    }
-                    "skip" => break,
-                    _ => {
-                        return Err(crate::ui::declined_noop(
-                            "Pull request creation cancelled; nothing was pushed or created.",
-                            "Pull request creation cancelled.",
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    if metadata_required && !dry {
-        let generator = config
-            .pr_generation
-            .command
-            .as_ref()
-            .context("PR metadata generator configuration disappeared after preflight")?;
-        let pull_request_template = resolved_pull_request_template(&repo, &config)?;
-        let repo_name = repo
-            .current()
-            .path
-            .file_name()
-            .map_or("(unknown)".into(), |v| v.to_string_lossy().into_owned());
-        let diffstat = git_cmd(&repo, &["diff", "--stat", &format!("{base}...HEAD")])?;
-        let diff = git_cmd(&repo, &["diff", &format!("{base}...HEAD")])?;
-        let subjects = git_cmd(&repo, &["log", "--format=%s", &format!("{base}..HEAD")])?;
-        let explicit_title = title.as_deref().unwrap_or("");
-        let explicit_description = body.as_deref().unwrap_or("");
-        let prompt = if let Some(template) = config.pr_generation.template.as_ref() {
-            let mut environment = Environment::new();
-            environment.add_template("pr", &template.value)?;
-            environment.get_template("pr")?.render(context! {
-                repo => repo_name, branch => head, base, git_diff_stat => diffstat,
-                git_diff => diff, git_commit_subjects => subjects,
-                explicit_title => title.as_deref().unwrap_or(""),
-                explicit_description => body.as_deref().unwrap_or(""), pull_request_template
-            })?
-        } else {
-            format!(
-                "Generate a PR metadata document. Return exactly one first-line level-one heading, followed by the description. Preserve required headings, checklists, and sections from the pull-request template; replace placeholders and instructional comments with factual content.\nRepository: {repo_name}\nTopic branch: {head}\nTarget branch: {base}\nDiffstat:\n{diffstat}\nCommitted commit subjects:\n{subjects}\nExplicit title: {explicit_title}\nExplicit description:\n{explicit_description}\nDiff:\n{diff}\nPull-request template:\n{pull_request_template}\n"
-            )
-        };
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", &generator.value])
-            .current_dir(&repo.current().path)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-        child
-            .stdin
-            .take()
-            .context("generator stdin unavailable")?
-            .write_all(prompt.as_bytes())?;
-        let out = child.wait_with_output()?;
-        if !out.status.success() {
-            return fail(
-                json_mode,
-                "pr.generator_failed",
-                "PR metadata generator failed",
-            );
-        }
-        let (generated_title, generated_body) = parse_metadata(
-            &String::from_utf8(out.stdout)
-                .map_err(|_| anyhow::anyhow!("PR generator produced non-UTF-8 output"))?,
-        )?;
-        if title.is_none() {
-            title = Some(generated_title);
-        }
-        if body.is_none() {
-            body = Some(generated_body);
-        }
-    }
-    let mut title = title.context("PR title is required")?;
-    let mut body = body.unwrap_or_default();
-    if title.trim().is_empty() {
-        bail!("PR title cannot be empty");
-    }
     if head == base {
         return fail(
             json_mode,
@@ -324,9 +208,10 @@ fn execute(
             "current branch is the configured target branch",
         );
     }
-    if !force && !io::stdout().is_terminal() && !json_mode {
+    let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
+    if !(force || dry || json_mode || interactive) {
         return fail(
-            json_mode,
+            false,
             "pr.approval_required",
             "non-interactive creation requires --force",
         );
@@ -384,9 +269,7 @@ fn execute(
     let dirty = crate::git::is_dirty(&repo.current().path)?;
     if dirty {
         if force && !yolo {
-            bail!(
-                "repository.dirty: topic worktree is dirty; commit changes first or retry with --yolo"
-            );
+            return fail_dirty(json_mode);
         }
         if yolo {
             crate::commit::run(crate::commit::Invocation {
@@ -431,6 +314,28 @@ fn execute(
             }
         }
     }
+    if metadata_required && !dry {
+        let (generated_title, generated_body) = generate_metadata(
+            &repo,
+            &config,
+            &base,
+            &head,
+            title.as_deref(),
+            body.as_deref(),
+            json_mode,
+        )?;
+        if title.is_none() {
+            title = Some(generated_title);
+        }
+        if body.is_none() {
+            body = Some(generated_body);
+        }
+    }
+    let mut title = title.context("PR title is required")?;
+    let mut body = body.unwrap_or_default();
+    if title.trim().is_empty() {
+        bail!("PR title cannot be empty");
+    }
     if !force && !dry {
         let (updated_title, updated_body) = review_metadata(
             title,
@@ -461,7 +366,22 @@ fn execute(
             None,
         );
     }
-    if let Err(error) = crate::git::push(&repo.current().path, &push_plan, !json_mode) {
+    let push_progress = (!json_mode && io::stderr().is_terminal()).then(|| {
+        let spinner = spinner();
+        spinner.start(crate::ui::heading_style().apply_to("Publishing topic branch..."));
+        spinner
+    });
+    if push_progress.is_none() && !json_mode {
+        crate::ui::info(crate::ui::heading_style().apply_to("Publishing topic branch..."))?;
+    }
+    if let Err(error) = crate::git::push(
+        &repo.current().path,
+        &push_plan,
+        !json_mode && push_progress.is_none(),
+    ) {
+        if let Some(progress) = &push_progress {
+            progress.error("Failed to publish topic branch");
+        }
         if json_mode {
             crate::protocol::write(&crate::protocol::Response {
                 schema_version: crate::protocol::SCHEMA_VERSION,
@@ -476,6 +396,19 @@ fn execute(
         }
         return fail(false, "git.push_failed", &format!("{error:#}"));
     }
+    if let Some(progress) = &push_progress {
+        progress.stop(crate::ui::heading_style().apply_to("Published topic branch"));
+    } else if !json_mode {
+        crate::ui::step(crate::ui::heading_style().apply_to("Published topic branch"))?;
+    }
+    let create_progress = (!json_mode && io::stderr().is_terminal()).then(|| {
+        let spinner = spinner();
+        spinner.start(crate::ui::heading_style().apply_to("Creating pull request..."));
+        spinner
+    });
+    if create_progress.is_none() && !json_mode {
+        crate::ui::info(crate::ui::heading_style().apply_to("Creating pull request..."))?;
+    }
     let mut cmd = Command::new("gh");
     cmd.args([
         "pr", "create", "--repo", &base_repo, "--base", &base, "--head", &head_ref, "--title",
@@ -484,8 +417,19 @@ fn execute(
     if status == Status::Draft {
         cmd.arg("--draft");
     }
-    let out = cmd.output()?;
+    let out = match cmd.output() {
+        Ok(output) => output,
+        Err(error) => {
+            if let Some(progress) = &create_progress {
+                progress.error("Failed to create pull request");
+            }
+            return Err(error).context("failed to invoke GitHub CLI");
+        }
+    };
     if !out.status.success() {
+        if let Some(progress) = &create_progress {
+            progress.error("Failed to create pull request");
+        }
         return fail(
             json_mode,
             "provider.creation_failed",
@@ -493,6 +437,11 @@ fn execute(
         );
     }
     let url = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if let Some(progress) = &create_progress {
+        progress.stop(crate::ui::heading_style().apply_to("Created pull request"));
+    } else if !json_mode {
+        crate::ui::step(crate::ui::heading_style().apply_to("Created pull request"))?;
+    }
     output(
         json_mode,
         json!({"outcome":"created","url":url,"base_repository":base_repo,"base_branch":base,"head_repository":head_owner,"head_branch":head,"remote":push_plan.remote,"draft":status==Status::Draft}),
@@ -506,6 +455,108 @@ fn execute(
     )
 }
 #[allow(clippy::too_many_arguments)]
+fn generate_metadata(
+    repo: &crate::git::Repository,
+    config: &crate::config::EffectiveConfig,
+    base: &str,
+    head: &str,
+    title: Option<&str>,
+    body: Option<&str>,
+    json_mode: bool,
+) -> Result<(String, String)> {
+    let generator = config
+        .pr_generation
+        .command
+        .as_ref()
+        .context("PR metadata generator configuration disappeared after preflight")?;
+    let pull_request_template = resolved_pull_request_template(repo, config)?;
+    let repo_name = repo
+        .current()
+        .path
+        .file_name()
+        .map_or("(unknown)".into(), |value| {
+            value.to_string_lossy().into_owned()
+        });
+    let diffstat = git_cmd(repo, &["diff", "--stat", &format!("{base}...HEAD")])?;
+    let diff = git_cmd(repo, &["diff", &format!("{base}...HEAD")])?;
+    let subjects = git_cmd(repo, &["log", "--format=%s", &format!("{base}..HEAD")])?;
+    let explicit_title = title.unwrap_or("");
+    let explicit_description = body.unwrap_or("");
+    let prompt = if let Some(template) = config.pr_generation.template.as_ref() {
+        let mut environment = Environment::new();
+        environment.add_template("pr", &template.value)?;
+        environment.get_template("pr")?.render(context! {
+            repo => repo_name, branch => head, base, git_diff_stat => diffstat,
+            git_diff => diff, git_commit_subjects => subjects,
+            explicit_title, explicit_description, pull_request_template
+        })?
+    } else {
+        format!(
+            "Generate a PR metadata document. Return exactly one first-line level-one heading, followed by the description. Preserve required headings, checklists, and sections from the pull-request template; replace placeholders and instructional comments with factual content.\nRepository: {repo_name}\nTopic branch: {head}\nTarget branch: {base}\nDiffstat:\n{diffstat}\nCommitted commit subjects:\n{subjects}\nExplicit title: {explicit_title}\nExplicit description:\n{explicit_description}\nDiff:\n{diff}\nPull-request template:\n{pull_request_template}\n"
+        )
+    };
+    let generation_started = Instant::now();
+    let progress = (!json_mode && io::stderr().is_terminal()).then(|| {
+        let elapsed = crate::ui::muted_style().apply_to("{elapsed}");
+        let template = format!("{{msg}} {elapsed}");
+        let spinner = spinner().with_template(&template);
+        spinner.start(crate::ui::heading_style().apply_to("Generating pull request metadata..."));
+        spinner
+    });
+    if progress.is_none() && !json_mode {
+        crate::ui::info(
+            crate::ui::heading_style().apply_to("Generating pull request metadata..."),
+        )?;
+    }
+    let result = (|| {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", &generator.value])
+            .current_dir(&repo.current().path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .context("generator stdin unavailable")?
+            .write_all(prompt.as_bytes())?;
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            bail!("PR metadata generator failed");
+        }
+        parse_metadata(
+            &String::from_utf8(output.stdout)
+                .map_err(|_| anyhow::anyhow!("PR generator produced non-UTF-8 output"))?,
+        )
+    })();
+    let elapsed =
+        crate::ui::muted_style().apply_to(format!("{}s", generation_started.elapsed().as_secs()));
+    match result {
+        Ok(metadata) => {
+            let completed = format!(
+                "{} {elapsed}",
+                crate::ui::heading_style().apply_to("Generated pull request metadata:")
+            );
+            if let Some(progress) = &progress {
+                progress.stop(completed);
+            } else if !json_mode {
+                crate::ui::step(completed)?;
+            }
+            Ok(metadata)
+        }
+        Err(error) => {
+            if let Some(progress) = &progress {
+                progress.error("Failed to generate pull request metadata");
+            } else if !json_mode {
+                crate::ui::warning("Failed to generate pull request metadata")?;
+            }
+            Err(error)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn review_metadata(
     mut title: String,
     mut body: String,
@@ -517,21 +568,22 @@ fn review_metadata(
     status: Status,
 ) -> Result<(String, String)> {
     loop {
-        crate::ui::info(crate::ui::heading_style().apply_to("Review pull request"))?;
-        crate::ui::step(format!("base: {base_repo} ({base})"))?;
-        crate::ui::step(format!("head: {head_repo} ({head})"))?;
-        crate::ui::step(format!("push remote: {remote}"))?;
-        crate::ui::step(format!(
-            "status: {}",
-            if status == Status::Draft {
-                "draft"
-            } else {
-                "ready"
-            }
-        ))?;
-        crate::ui::step(crate::ui::heading_style().apply_to(format!("# {title}")))?;
-        render_markdown(&body)?;
-        crate::ui::info("Press Enter to create, Ctrl-G to edit, or Escape to cancel.")?;
+        let status = if status == Status::Draft {
+            "draft"
+        } else {
+            "ready"
+        };
+        let preview = format!(
+            "{}\nbase: {base_repo} ({base})\nhead: {head_repo} ({head})\npush remote: {remote}\nstatus: {status}\n\n{}\n{}",
+            crate::ui::heading_style().apply_to("Review pull request"),
+            crate::ui::heading_style().apply_to(format!("# {title}")),
+            render_markdown(&body)
+        );
+        crate::ui::step(preview)?;
+        crate::ui::finish(
+            crate::ui::muted_style()
+                .apply_to("Press Enter to create, Ctrl-G to edit, or Escape to cancel."),
+        )?;
         match Term::stderr()
             .read_key()
             .context("failed to read PR review input")?
@@ -607,18 +659,19 @@ fn resolve_editor() -> Result<String> {
     bail!("pr.editor_missing: configure core.editor, GIT_EDITOR, VISUAL, or EDITOR")
 }
 
-fn render_markdown(body: &str) -> Result<()> {
-    for line in body.lines() {
-        let rendered = if line.starts_with('#') || line.starts_with("```") {
-            crate::ui::heading_style().apply_to(line).to_string()
-        } else if line.starts_with("- ") || line.starts_with("* ") {
-            crate::ui::worktree_data_style().apply_to(line).to_string()
-        } else {
-            line.to_owned()
-        };
-        crate::ui::info(rendered)?;
-    }
-    Ok(())
+fn render_markdown(body: &str) -> String {
+    body.lines()
+        .map(|line| {
+            if line.starts_with('#') || line.starts_with("```") {
+                crate::ui::heading_style().apply_to(line).to_string()
+            } else if line.starts_with("- ") || line.starts_with("* ") {
+                crate::ui::worktree_data_style().apply_to(line).to_string()
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn resolved_pull_request_template(
