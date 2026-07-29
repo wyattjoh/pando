@@ -62,9 +62,17 @@ Branch resolution is local and has no implicit fetch:
 
 New branches start from the invoking worktree's committed `HEAD`, including when it is detached. Staged, unstaged, and untracked changes stay in the source worktree and produce a warning; they are not copied. Git validates names before prompting or mutation. Bare repositories may switch among existing linked worktrees, but cannot create new ones.
 
+`worktrees create` runs the same resolution and setup, but skips step 5's confirmation:
+
+```zsh
+worktrees create feature/login
+```
+
+It reports the branch it is about to create instead of asking, so it works without a terminal, and it refuses a branch that already has a registered worktree rather than entering it. Post-create hook approval is unaffected and still requires a human. Unlike `switch`, `create` requires a branch name and has no picker.
+
 Created worktrees use the complete branch name below the configured root, so `feature/login` becomes `<root>/feature/login`. Existing destinations and broken registered worktrees are rejected; the tool never adopts, repairs, prunes, moves, backs up, or deletes them.
 
-The Rust binary writes only a successful destination to stdout. Setup messages and child output use stderr. The installed zsh function forwards all `switch` arguments, changes directory whenever a destination is returned, and preserves a nonzero setup status after the directory change.
+The Rust binary writes only a successful destination to stdout. Setup messages and child output use stderr. The installed zsh function forwards all `switch` and `create` arguments, changes directory whenever a destination is returned, and preserves a nonzero setup status after the directory change.
 
 ## Configuration
 

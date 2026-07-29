@@ -42,6 +42,14 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Create a worktree for a branch and print its path, without confirming a new branch.
+    Create {
+        /// Branch to create a worktree for.
+        branch: Option<String>,
+        /// Validate and preview without mutation.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Print one current-worktree property.
     Get {
         #[arg(value_enum)]
@@ -194,7 +202,7 @@ fn main() {
 fn command_id(args: &[std::ffi::OsString]) -> Option<String> {
     let words: Vec<_> = args.iter().filter_map(|arg| arg.to_str()).collect();
     for command in [
-        "list", "switch", "get", "remove", "merge", "commit", "install", "pr",
+        "list", "switch", "create", "get", "remove", "merge", "commit", "install", "pr",
     ] {
         if words.contains(&command) {
             return Some(command.into());
@@ -232,6 +240,20 @@ fn run(cli: Cli) -> Result<()> {
             branch,
             dry_run: true,
         } => smart::switch_dry_run(branch),
+        Commands::Create { branch, dry_run } if json => {
+            machine::create(request_mode, branch, dry_run)
+        }
+        Commands::Create {
+            branch,
+            dry_run: false,
+        } => {
+            smart::create(&branch.context("create requires a branch")?)?;
+            ui::finish_open_sequence(ui::success_style().apply_to("Worktree destination printed."))
+        }
+        Commands::Create {
+            branch,
+            dry_run: true,
+        } => smart::create_dry_run(&branch.context("create requires a branch")?),
         Commands::Get { property } if json => machine::get(
             request_mode,
             property.map(|p| match p {

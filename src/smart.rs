@@ -57,9 +57,32 @@ pub enum TrustCommand {
 pub fn switch(branch: Option<String>) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     match branch {
-        Some(branch) => resolve_and_switch(&git::repository(&cwd)?, &branch),
+        Some(branch) => resolve_and_switch(&git::repository(&cwd)?, &branch, Intent::Switch),
         None => pick_and_switch(&git::repository_with_metadata(&cwd)?),
     }
+}
+
+/// Creates a worktree for `branch` and emits its destination.
+///
+/// Unlike [`switch`], a genuinely new branch is created without confirmation, and an
+/// already-registered branch is refused rather than entered.
+///
+/// # Errors
+///
+/// Returns an error when the branch is already registered, or when repository planning,
+/// hook approval, creation, or setup fails.
+pub fn create(branch: &str) -> Result<()> {
+    let cwd = env::current_dir().context("failed to read the current directory")?;
+    resolve_and_switch(&git::repository(&cwd)?, branch, Intent::Create)
+}
+
+/// Distinguishes the two entry points that share worktree resolution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Intent {
+    /// Enter an existing worktree, and confirm before creating a new branch.
+    Switch,
+    /// Refuse an existing worktree, and create a new branch without confirmation.
+    Create,
 }
 
 enum GetValue {
@@ -115,14 +138,29 @@ pub fn get(property: GetProperty) -> Result<()> {
 /// Returns an error when the branch or repository cannot be resolved.
 pub fn switch_dry_run(branch: Option<String>) -> Result<()> {
     let branch = branch.context("switch --dry-run requires a branch")?;
+    plan_dry_run(&branch, Intent::Switch)
+}
+
+/// Previews creation without creating directories, worktrees, trust, or setup records.
+///
+/// # Errors
+/// Returns an error when the branch is already registered or cannot be resolved.
+pub fn create_dry_run(branch: &str) -> Result<()> {
+    plan_dry_run(branch, Intent::Create)
+}
+
+fn plan_dry_run(branch: &str, intent: Intent) -> Result<()> {
     let repository =
         git::repository(&env::current_dir().context("failed to read the current directory")?)?;
-    git::validate_branch(&repository.current().path, &branch)?;
+    git::validate_branch(&repository.current().path, branch)?;
     if let Some(existing) = repository
         .worktrees
         .iter()
-        .find(|w| matches!(&w.kind, WorktreeKind::Branch(value) if value == &branch))
+        .find(|w| matches!(&w.kind, WorktreeKind::Branch(value) if value == branch))
     {
+        if intent == Intent::Create {
+            return Err(already_registered(branch, &existing.path));
+        }
         return ui::finish(format!(
             "Would enter {}; no changes made.",
             existing.path.display()
@@ -130,7 +168,7 @@ pub fn switch_dry_run(branch: Option<String>) -> Result<()> {
     }
     let destination = EffectiveConfig::load(&repository)?
         .require_root()?
-        .join(&branch);
+        .join(branch);
     if destination.exists() || repository.worktrees.iter().any(|w| w.path == destination) {
         bail!("the configured destination already exists or is registered");
     }
@@ -304,7 +342,7 @@ fn pick_and_switch(repository: &Repository) -> Result<()> {
         }
         PickerChoice::Create => {
             let branch = read_branch_name()?;
-            resolve_and_switch(repository, &branch)
+            resolve_and_switch(repository, &branch, Intent::Switch)
         }
     }
 }
@@ -901,7 +939,7 @@ fn read_branch_name() -> Result<String> {
     Ok(value.trim().to_owned())
 }
 
-fn resolve_and_switch(repository: &Repository, branch: &str) -> Result<()> {
+fn resolve_and_switch(repository: &Repository, branch: &str, intent: Intent) -> Result<()> {
     git::validate_branch(&repository.current().path, branch)?;
     if let Some(worktree) = repository
         .worktrees
@@ -914,6 +952,9 @@ fn resolve_and_switch(repository: &Repository, branch: &str) -> Result<()> {
                 worktree.path.display(),
                 worktree.state_label()
             );
+        }
+        if intent == Intent::Create {
+            return Err(already_registered(branch, &worktree.path));
         }
         return enter_existing(repository, &worktree.path, Some(branch));
     }
@@ -935,7 +976,14 @@ fn resolve_and_switch(repository: &Repository, branch: &str) -> Result<()> {
         }
     };
 
-    create(repository, branch, &plan)
+    create_worktree(repository, branch, &plan, intent)
+}
+
+fn already_registered(branch: &str, path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "branch {branch:?} is already registered at {}; enter it with 'worktrees switch {branch}'",
+        path.display()
+    )
 }
 
 fn choose_remote(remotes: &[String], branch: &str) -> Result<String> {
@@ -964,7 +1012,12 @@ enum CreationKind {
     New { head: String },
 }
 
-fn create(repository: &Repository, branch: &str, kind: &CreationKind) -> Result<()> {
+fn create_worktree(
+    repository: &Repository,
+    branch: &str,
+    kind: &CreationKind,
+    intent: Intent,
+) -> Result<()> {
     let config = EffectiveConfig::load(repository)?;
     let destination = config.require_root()?.join(branch);
     let destination = git::canonical_or_normalized(&destination)
@@ -972,7 +1025,10 @@ fn create(repository: &Repository, branch: &str, kind: &CreationKind) -> Result<
     validate_destination(repository, branch, &destination)?;
 
     if let CreationKind::New { head } = kind {
-        confirm_new_branch(repository, branch, head, &destination)?;
+        match intent {
+            Intent::Switch => confirm_new_branch(repository, branch, head, &destination)?,
+            Intent::Create => announce_new_branch(repository, branch, head, &destination)?,
+        }
     }
     approve_hooks(repository, HookPhase::PostCreate, &config.post_create)?;
 
@@ -1057,18 +1113,12 @@ fn confirm_new_branch(
     destination: &Path,
 ) -> Result<()> {
     ui::ensure_interactive("new branch creation requires confirmation")?;
-    let source = match &repository.current().kind {
-        WorktreeKind::Branch(source) => format!("branch {source:?} at {head}"),
-        WorktreeKind::Detached => format!("detached commit {head}"),
-        _ => format!("commit {head}"),
-    };
     ui::info(format!(
-        "Create branch {branch:?} from {source} at {}?",
+        "Create branch {branch:?} from {} at {}?",
+        new_branch_source(repository, head),
         destination.display()
     ))?;
-    if git::is_dirty(&repository.current().path)? {
-        ui::warning("Staged, unstaged, and untracked changes remain in the source worktree.")?;
-    }
+    warn_dirty_source(repository)?;
     let confirmed = ui::prompt_result(
         confirm("Create this branch and worktree?")
             .initial_value(false)
@@ -1080,6 +1130,36 @@ fn confirm_new_branch(
         return Err(ui::declined(
             "branch creation declined; no worktree was created",
         ));
+    }
+    Ok(())
+}
+
+/// Reports the branch about to be created without asking to confirm it.
+fn announce_new_branch(
+    repository: &Repository,
+    branch: &str,
+    head: &str,
+    destination: &Path,
+) -> Result<()> {
+    ui::info(format!(
+        "Creating branch {branch:?} from {} at {}.",
+        new_branch_source(repository, head),
+        destination.display()
+    ))?;
+    warn_dirty_source(repository)
+}
+
+fn new_branch_source(repository: &Repository, head: &str) -> String {
+    match &repository.current().kind {
+        WorktreeKind::Branch(source) => format!("branch {source:?} at {head}"),
+        WorktreeKind::Detached => format!("detached commit {head}"),
+        _ => format!("commit {head}"),
+    }
+}
+
+fn warn_dirty_source(repository: &Repository) -> Result<()> {
+    if git::is_dirty(&repository.current().path)? {
+        ui::warning("Staged, unstaged, and untracked changes remain in the source worktree.")?;
     }
     Ok(())
 }

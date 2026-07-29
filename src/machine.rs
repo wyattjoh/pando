@@ -100,15 +100,54 @@ fn switch_request(
     }
 }
 
+/// Distinguishes the two JSON entry points that share worktree resolution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Intent {
+    /// Enter an existing worktree; refuse to create a genuinely new branch.
+    Switch,
+    /// Refuse an existing worktree; create a genuinely new branch unattended.
+    Create,
+}
+
+impl Intent {
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Switch => "switch",
+            Self::Create => "create",
+        }
+    }
+}
+
 /// Runs the non-interactive switch interface.
 ///
 /// # Errors
 /// Returns an error only when response output fails or an underlying Git operation cannot be represented locally.
-#[allow(clippy::too_many_lines)]
 pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Result<()> {
+    resolve(Intent::Switch, request_mode, branch, dry_run)
+}
+
+/// Runs the non-interactive create interface.
+///
+/// Unlike [`switch`], this is the one machine entry point permitted to create a genuinely
+/// new branch without a human confirmation.
+///
+/// # Errors
+/// Returns an error only when response output fails or an underlying Git operation cannot be represented locally.
+pub fn create(request_mode: bool, branch: Option<String>, dry_run: bool) -> Result<()> {
+    resolve(Intent::Create, request_mode, branch, dry_run)
+}
+
+#[allow(clippy::too_many_lines)]
+fn resolve(
+    intent: Intent,
+    request_mode: bool,
+    branch: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    let command = intent.id();
     if request_mode && dry_run {
         return emit_err(
-            "switch",
+            command,
             None,
             "json.invalid_request",
             "command options are forbidden with --input-output json",
@@ -116,20 +155,28 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
     }
     let (id, mut input) = match switch_request(request_mode, branch) {
         Ok(value) => value,
-        Err(error) => return emit_err("switch", None, "json.invalid_request", error),
+        Err(error) => return emit_err(command, None, "json.invalid_request", error),
     };
     if !request_mode {
         input.dry_run = dry_run;
     }
-    let repo = match if input.branch.is_none() {
+    let repo = match if input.branch.is_none() && intent == Intent::Switch {
         navigation_repository()
     } else {
         repository()
     } {
         Ok(value) => value,
-        Err(error) => return emit_err("switch", id, "repository.invalid", format!("{error:#}")),
+        Err(error) => return emit_err(command, id, "repository.invalid", format!("{error:#}")),
     };
     let Some(branch) = input.branch else {
+        if intent == Intent::Create {
+            return emit_err(
+                command,
+                id,
+                "create.branch_required",
+                "create requires a branch name in input.branch",
+            );
+        }
         let choices: Vec<_> = repo
             .worktrees
             .iter()
@@ -169,7 +216,12 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
         return emit(response, true);
     };
     if let Err(error) = git::validate_branch(&repo.current().path, &branch) {
-        return emit_err("switch", id, "switch.invalid_branch", format!("{error:#}"));
+        return emit_err(
+            command,
+            id,
+            &format!("{command}.invalid_branch"),
+            format!("{error:#}"),
+        );
     }
     if let Some(worktree) = repo
         .worktrees
@@ -178,23 +230,41 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
     {
         if input.remote.is_some() {
             return emit_err(
-                "switch",
+                command,
                 id,
-                "switch.irrelevant_remote",
+                &format!("{command}.irrelevant_remote"),
                 "remote is only valid when resolving a remote-tracking branch",
             );
         }
         if !worktree.navigable() {
             return emit_err(
-                "switch",
+                command,
                 id,
-                "switch.destination_unavailable",
+                &format!("{command}.destination_unavailable"),
                 format!("registered destination is {}", worktree.state_label()),
             );
         }
+        if intent == Intent::Create {
+            let mut response = protocol::failure(
+                command,
+                id,
+                "create.branch_registered",
+                "the branch already has a registered worktree; create will not adopt or replace it",
+            );
+            response.context =
+                json!({"branch":branch,"destination":BytePath::path(&worktree.path)});
+            response.next_steps.push(protocol::NextStep {
+                action: "switch".into(),
+                description: "Enter the registered worktree instead of creating one".into(),
+                mutation: "none".into(),
+                requires_human_approval: false,
+                invocation: json!({"argv":["worktrees","--input-output","json","switch"],"stdin":{"schema_version":1,"input":{"branch":branch}},"working_directory":BytePath::path(&repo.current().path)}),
+            });
+            return emit(response, true);
+        }
         return emit(
             protocol::success(
-                "switch",
+                command,
                 id,
                 json!({"outcome":"existing","branch":branch,"destination":BytePath::path(&worktree.path),"dry_run":input.dry_run}),
                 json!({}),
@@ -205,7 +275,7 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
     }
     let Some(primary) = repo.primary.as_ref() else {
         return emit_err(
-            "switch",
+            command,
             id,
             "repository.primary_unavailable",
             "a bare repository cannot create a worktree",
@@ -213,13 +283,20 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
     };
     let config = match EffectiveConfig::load(&repo) {
         Ok(value) => value,
-        Err(error) => return emit_err("switch", id, "switch.config_invalid", format!("{error:#}")),
+        Err(error) => {
+            return emit_err(
+                command,
+                id,
+                &format!("{command}.config_invalid"),
+                format!("{error:#}"),
+            );
+        }
     };
     let root = match config.require_root() {
         Ok(value) => value,
         Err(error) => {
             return emit_err(
-                "switch",
+                command,
                 id,
                 "repository.root_unavailable",
                 format!("{error:#}"),
@@ -230,18 +307,18 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
         Ok(value) => value,
         Err(error) => {
             return emit_err(
-                "switch",
+                command,
                 id,
-                "switch.destination_invalid",
+                &format!("{command}.destination_invalid"),
                 format!("{error:#}"),
             );
         }
     };
     if destination.exists() || repo.worktrees.iter().any(|w| w.path == destination) {
         return emit_err(
-            "switch",
+            command,
             id,
-            "switch.destination_collision",
+            &format!("{command}.destination_collision"),
             "the configured destination already exists or is registered",
         );
     }
@@ -251,12 +328,13 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
     } else {
         git::remote_matches(&repo.current().path, &branch)?
     };
+    let mut new_head = None;
     let selected_remote = if local {
         if input.remote.is_some() {
             return emit_err(
-                "switch",
+                command,
                 id,
-                "switch.irrelevant_remote",
+                &format!("{command}.irrelevant_remote"),
                 "remote does not apply to an existing local branch",
             );
         }
@@ -264,44 +342,48 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
     } else if remotes.is_empty() {
         if input.remote.is_some() {
             return emit_err(
-                "switch",
+                command,
                 id,
-                "switch.unknown_remote",
+                &format!("{command}.unknown_remote"),
                 "remote does not match a fetched remote-tracking branch",
             );
         }
         let head = git::head_commit(&repo.current().path)?;
-        if input.dry_run {
-            return emit(
-                protocol::success(
-                    "switch",
-                    id,
-                    json!({"outcome":"creation_plan","kind":"new","branch":branch,"destination":BytePath::path(&destination),"start_point":head,"approval_required":true}),
-                    json!({}),
-                    vec![
-                        Effect {
-                            action: "create_branch".into(),
-                            attempted: false,
-                            completed: false,
-                            details: None,
-                        },
-                        Effect {
-                            action: "create_worktree".into(),
-                            attempted: false,
-                            completed: false,
-                            details: None,
-                        },
-                    ],
-                ),
-                false,
+        if intent == Intent::Switch {
+            if input.dry_run {
+                return emit(
+                    protocol::success(
+                        "switch",
+                        id,
+                        json!({"outcome":"creation_plan","kind":"new","branch":branch,"destination":BytePath::path(&destination),"start_point":head,"approval_required":true}),
+                        json!({}),
+                        vec![
+                            Effect {
+                                action: "create_branch".into(),
+                                attempted: false,
+                                completed: false,
+                                details: None,
+                            },
+                            Effect {
+                                action: "create_worktree".into(),
+                                attempted: false,
+                                completed: false,
+                                details: None,
+                            },
+                        ],
+                    ),
+                    false,
+                );
+            }
+            return emit_err(
+                "switch",
+                id,
+                "switch.approval_required",
+                "creating a genuinely new branch requires a manual human invocation",
             );
         }
-        return emit_err(
-            "switch",
-            id,
-            "switch.approval_required",
-            "creating a genuinely new branch requires a manual human invocation",
-        );
+        new_head = Some(head);
+        None
     } else {
         match input.remote {
             Some(remote)
@@ -316,18 +398,18 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
             }
             Some(_) => {
                 return emit_err(
-                    "switch",
+                    command,
                     id,
-                    "switch.unknown_remote",
+                    &format!("{command}.unknown_remote"),
                     "explicit remote does not match an available fetched branch",
                 );
             }
             None if remotes.len() == 1 => Some(remotes[0].clone()),
             None => {
                 let mut response = protocol::failure(
-                    "switch",
+                    command,
                     id,
-                    "switch.remote_selection_required",
+                    &format!("{command}.remote_selection_required"),
                     "multiple fetched remotes match this branch",
                 );
                 response.context = json!({"branch":branch,"remotes":remotes});
@@ -339,18 +421,27 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
         && !trust::is_trusted(&repo, HookPhase::PostCreate, &config.post_create)?
     {
         return emit_err(
-            "switch",
+            command,
             id,
             "trust.approval_required",
             "post-create hooks require manual review and approval before mutation",
         );
     }
-    let effects = vec![Effect {
+    let mut effects = Vec::new();
+    if new_head.is_some() {
+        effects.push(Effect {
+            action: "create_branch".into(),
+            attempted: !input.dry_run,
+            completed: !input.dry_run,
+            details: Some(json!({"branch":branch,"start_point":new_head})),
+        });
+    }
+    effects.push(Effect {
         action: "create_worktree".into(),
         attempted: !input.dry_run,
         completed: !input.dry_run,
         details: Some(json!({"destination":BytePath::path(&destination)})),
-    }];
+    });
     let mut diagnostics = Vec::new();
     if !input.dry_run {
         if let Some(parent) = destination.parent() {
@@ -365,7 +456,9 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
                 &destination,
             )?)
         };
-        let creation = if local {
+        let creation = if let Some(head) = new_head.as_deref() {
+            git::add_new_worktree(primary, &destination, &branch, head)
+        } else if local {
             git::add_existing_worktree(primary, &destination, &branch)
         } else {
             git::add_tracking_worktree(
@@ -381,7 +474,12 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
             if let Some(pending) = pending {
                 pending.cancel()?;
             }
-            return emit_err("switch", id, "switch.creation_failed", format!("{error:#}"));
+            return emit_err(
+                command,
+                id,
+                &format!("{command}.creation_failed"),
+                format!("{error:#}"),
+            );
         }
         let identity = git::worktree_identity(&destination)?;
         if let Some(pending) = pending {
@@ -393,9 +491,9 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
             diagnostics = output;
             if outcome != crate::setup::HookOutcome::Success {
                 let mut response = protocol::failure(
-                    "switch",
+                    command,
                     id,
-                    "switch.setup_failed",
+                    &format!("{command}.setup_failed"),
                     format!("post-create hook outcome: {outcome:?}; setup remains incomplete"),
                 );
                 response.context = json!({"branch":branch,"destination":BytePath::path(&destination),"setup":"incomplete"});
@@ -404,19 +502,18 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
                     push_diagnostic(&mut response, "hook", "stdout", &stdout);
                     push_diagnostic(&mut response, "hook", "stderr", &stderr);
                 }
-                response.next_steps.push(protocol::NextStep { action:"switch.recover_setup".into(), description:"Inspect the worktree and retry or explicitly complete setup interactively".into(), mutation:"setup".into(), requires_human_approval:true, invocation:json!({"argv":["worktrees","switch",branch],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}) });
+                response.next_steps.push(protocol::NextStep { action:format!("{command}.recover_setup"), description:"Inspect the worktree and retry or explicitly complete setup interactively".into(), mutation:"setup".into(), requires_human_approval:true, invocation:json!({"argv":["worktrees","switch",branch],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}) });
                 return emit(response, true);
             }
             crate::setup::clear(&repo.common_dir, &identity, Some(&branch))?;
         }
     }
-    let mut response = protocol::success(
-        "switch",
-        id,
-        json!({"outcome":if input.dry_run{"creation_plan"}else{"created"},"branch":branch,"destination":BytePath::path(&destination),"remote":selected_remote}),
-        json!({}),
-        effects,
-    );
+    let mut result = json!({"outcome":if input.dry_run{"creation_plan"}else{"created"},"branch":branch,"destination":BytePath::path(&destination),"remote":selected_remote});
+    if let Some(head) = new_head {
+        result["kind"] = json!("new");
+        result["start_point"] = json!(head);
+    }
+    let mut response = protocol::success(command, id, result, json!({}), effects);
     for (stdout, stderr) in diagnostics {
         push_diagnostic(&mut response, "hook", "stdout", &stdout);
         push_diagnostic(&mut response, "hook", "stderr", &stderr);

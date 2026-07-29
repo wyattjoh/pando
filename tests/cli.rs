@@ -1551,6 +1551,67 @@ fn installed_zsh_wt_function_changes_the_invoking_shell_directory() {
 }
 
 #[test]
+fn installed_zsh_wt_function_enters_a_created_worktree() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        eprintln!("skipping: zsh is not installed");
+        return;
+    }
+    let repo = Repository::new();
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let installed = run_install(home.path(), xdg.path(), None, b"y\r");
+    assert!(installed.status.success(), "{}", installed.stderr);
+    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let root = repo.temp.path().join("created");
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    let binary = PathBuf::from(
+        Command::cargo_bin("worktrees")
+            .unwrap()
+            .get_program()
+            .to_owned(),
+    );
+    let bin = tempfile::tempdir().unwrap();
+    symlink(&binary, bin.path().join("wt")).unwrap();
+    let script = format!(
+        "source {}; wt create zsh-topic || exit $?; builtin pwd -P",
+        shell_quote(&integration)
+    );
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+
+    let output = run_pty_command(
+        {
+            let mut command = Command::new("zsh");
+            command
+                .args(["-f", "-i", "-c", &script])
+                .current_dir(&repo.main)
+                .env("PATH", path)
+                .env("HOME", home.path())
+                .env("XDG_CONFIG_HOME", xdg.path());
+            command
+        },
+        b"",
+    );
+
+    assert!(output.status.success(), "{}", output.stderr);
+    let destination = root.join("zsh-topic").canonicalize().unwrap();
+    assert!(
+        output
+            .stdout
+            .contains(&format!("{}\n", destination.display())),
+        "the shell should end up inside the created worktree: {}",
+        output.stdout
+    );
+}
+
+#[test]
 fn installed_zsh_function_passes_merge_help_through_without_changing_directory() {
     if Command::new("zsh").arg("--version").output().is_err() {
         eprintln!("skipping: zsh is not installed");
@@ -1870,6 +1931,203 @@ fn switch_creates_an_existing_branch_at_the_configured_root() {
         format!("{}\n", destination.canonicalize().unwrap().display()).as_bytes()
     );
     assert!(destination.join(".git").exists());
+}
+
+/// Points global configuration at `root` and returns the configuration home to pass through.
+fn config_home_with_root(root: &Path) -> TempDir {
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    xdg
+}
+
+fn create_command(repo: &Repository, xdg: &TempDir, args: &[&str]) -> std::process::Output {
+    Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(args)
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn create_makes_a_new_branch_without_confirmation() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+
+    // No PTY: a confirmation prompt here would fail the interactivity preflight.
+    let output = create_command(&repo, &xdg, &["create", "topic/fresh"]);
+    let destination = root.join("topic/fresh");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", destination.canonicalize().unwrap().display()).as_bytes()
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Creating branch \"topic/fresh\""),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("Create this branch and worktree?"),
+        "{stderr}"
+    );
+    assert!(destination.join(".git").exists());
+    assert!(
+        git_output(&repo.main, ["branch", "--list", "topic/fresh"]).contains("topic/fresh"),
+        "create should leave the branch behind"
+    );
+}
+
+#[test]
+fn create_checks_out_an_existing_local_branch_without_announcing_a_new_one() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "existing"]);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+
+    let output = create_command(&repo, &xdg, &["create", "existing"]);
+    let destination = root.join("existing");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", destination.canonicalize().unwrap().display()).as_bytes()
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("Creating branch"), "{stderr}");
+}
+
+#[test]
+fn create_refuses_a_branch_that_already_has_a_worktree() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+
+    let output = create_command(&repo, &xdg, &["create", "feature"]);
+
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "a refusal must not print a destination"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("already registered"), "{stderr}");
+    assert!(stderr.contains("worktrees switch feature"), "{stderr}");
+}
+
+#[test]
+fn create_dry_run_previews_a_new_branch_and_refuses_a_registered_one() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+
+    let preview = create_command(&repo, &xdg, &["create", "topic/preview", "--dry-run"]);
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    assert!(preview.stdout.is_empty());
+    assert!(
+        String::from_utf8(preview.stderr)
+            .unwrap()
+            .contains("Would create a worktree for topic/preview")
+    );
+    assert!(!root.exists(), "a preview must not create the root");
+    assert!(git_output(&repo.main, ["branch", "--list", "topic/preview"]).is_empty());
+
+    let registered = create_command(&repo, &xdg, &["create", "feature", "--dry-run"]);
+    assert!(!registered.status.success());
+    assert!(registered.stdout.is_empty());
+    assert!(
+        String::from_utf8(registered.stderr)
+            .unwrap()
+            .contains("already registered")
+    );
+}
+
+#[test]
+fn create_requires_a_branch() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+
+    let output = create_command(&repo, &xdg, &["create"]);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("create requires a branch")
+    );
+}
+
+#[test]
+fn create_runs_post_create_hooks_like_switch() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - name: prepare\n      command: printf hook-ran > hook.txt\n",
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["create", "hooked"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    // Hook approval is a separate trust boundary that `create` still prompts for.
+    let output = run_pty_command(command, b"y\r");
+    let destination = root.join("hooked");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", destination.canonicalize().unwrap().display())
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("hook.txt")).unwrap(),
+        "hook-ran"
+    );
+}
+
+#[test]
+fn create_refuses_post_create_hooks_without_a_terminal() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - name: prepare\n      command: true\n",
+    )
+    .unwrap();
+
+    let output = create_command(&repo, &xdg, &["create", "hooked"]);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!root.join("hooked").exists());
 }
 
 #[test]
@@ -3822,6 +4080,72 @@ fn json_switch_new_branch_dry_run_is_nonmutating_and_execution_requires_approval
         assert_json_pure(&execute)["error"]["code"],
         "switch.approval_required"
     );
+}
+
+#[test]
+fn json_create_makes_a_new_branch_and_reports_both_effects() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("topics");
+    let xdg = config_home_with_root(&root);
+    let head = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    let preview = create_command(
+        &repo,
+        &xdg,
+        &["create", "new-topic", "--dry-run", "--output", "json"],
+    );
+    assert!(preview.status.success());
+    let value = assert_json_pure(&preview);
+    assert_eq!(value["command"], "create");
+    assert_eq!(value["result"]["outcome"], "creation_plan");
+    assert_eq!(value["result"]["kind"], "new");
+    assert_eq!(value["result"]["start_point"], head);
+    assert_eq!(value["effects"][0]["action"], "create_branch");
+    assert_eq!(value["effects"][0]["attempted"], false);
+    assert!(!root.exists());
+
+    let execute = create_command(&repo, &xdg, &["create", "new-topic", "--output", "json"]);
+    assert!(execute.status.success());
+    let value = assert_json_pure(&execute);
+    assert_eq!(value["result"]["outcome"], "created");
+    assert_eq!(value["result"]["start_point"], head);
+    assert_eq!(value["effects"][0]["action"], "create_branch");
+    assert_eq!(value["effects"][0]["completed"], true);
+    assert_eq!(value["effects"][1]["action"], "create_worktree");
+    assert!(root.join("new-topic/.git").exists());
+    assert!(git_output(&repo.main, ["branch", "--list", "new-topic"]).contains("new-topic"));
+}
+
+#[test]
+fn json_create_refuses_a_registered_branch_and_points_at_switch() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("topics");
+    let xdg = config_home_with_root(&root);
+
+    let output = create_command(&repo, &xdg, &["create", "feature", "--output", "json"]);
+
+    assert!(!output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["error"]["code"], "create.branch_registered");
+    assert_eq!(value["next_steps"][0]["action"], "switch");
+    assert!(value["effects"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn json_create_request_mode_requires_a_branch() {
+    let repo = Repository::new();
+    let request = serde_json::json!({"schema_version":1,"request_id":"create-1","input":{}});
+    let output = json_command(
+        &repo.main,
+        &["create", "--input-output", "json"],
+        Some(&request),
+    );
+
+    assert!(!output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["command"], "create");
+    assert_eq!(value["request_id"], "create-1");
+    assert_eq!(value["error"]["code"], "create.branch_required");
 }
 
 #[test]

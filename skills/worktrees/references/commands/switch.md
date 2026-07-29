@@ -1,8 +1,8 @@
-# `list`, `switch`, `get` — navigation
+# `list`, `switch`, `create`, `get` — navigation
 
 **Never create or switch worktrees with raw `git worktree add` /
-`git checkout -b`.** Use `worktrees switch` so branch resolution, the
-configured root, and post-create hooks/trust all apply.
+`git checkout -b`.** Use `worktrees switch` or `worktrees create` so branch
+resolution, the configured root, and post-create hooks/trust all apply.
 
 ## `worktrees list`
 
@@ -71,6 +71,39 @@ worktrees switch feature/login
 worktrees switch
 ```
 
+## `worktrees create <BRANCH>`
+
+```
+Usage: worktrees create [OPTIONS] <BRANCH>
+```
+
+| Arg | Required | Purpose |
+|---|---|---|
+| `<BRANCH>` | yes | Branch to create a worktree for; there is no picker |
+
+Same resolution, destination, stdout contract, and post-create hooks as
+`switch`, with two differences:
+
+- step 5 does **not** confirm. The branch, start point, and destination are
+  reported on stderr and creation proceeds, so `create` works without a
+  terminal.
+- an already-registered branch is a hard error instead of being entered. Use
+  `switch` to enter one.
+
+Post-create hook approval is unchanged: untrusted hooks still require an
+interactive human, and `create` fails rather than running them unattended.
+
+`--dry-run` previews the destination without creating anything, and refuses
+an already-registered branch.
+
+Both JSON modes are supported; agents use versioned request mode. This is
+the one machine entry point permitted to create a genuinely new branch
+unattended — `switch` still answers `switch.approval_required`.
+
+```zsh
+worktrees create feature/login
+```
+
 ## `worktrees get <PROPERTY>`
 
 ```
@@ -109,6 +142,6 @@ echo "PORT=$(worktrees get port)" > .env.local
 
 ## Structured JSON contract
 
-Agents use `--input-output json`. `list` accepts `{"schema_version":1,"request_id":"…"}` with omitted `input`, or an empty `input` object. `get` requires `input.property`; JSON names are `branch`, `port`, `worktree_path`, `primary_worktree_path`, and `worktree_root`. `switch` accepts `input.branch`, `input.remote`, and `input.dry_run`. Request mode rejects simultaneous command arguments or flags.
+Agents use `--input-output json`. `list` accepts `{"schema_version":1,"request_id":"…"}` with omitted `input`, or an empty `input` object. `get` requires `input.property`; JSON names are `branch`, `port`, `worktree_path`, `primary_worktree_path`, and `worktree_root`. `switch` accepts `input.branch`, `input.remote`, and `input.dry_run`. `create` accepts the same input, but `input.branch` is required (`create.branch_required`) and its error codes are namespaced `create.*`. Request mode rejects simultaneous command arguments or flags.
 
-Responses identify as `list`, `get`, or `switch`; paths are UTF-8/base64 tagged objects. Every structured `list` worktree and `switch.selection_required` choice includes nullable `last_commit_at`, an RFC 3339 HEAD committer timestamp with an explicit offset. These arrays retain Git discovery order under every personal default sort. A systemic metadata failure leaves timestamps null and adds one bounded diagnostic without ordinary stderr. Switch may return an existing destination, a creation plan, or typed selection/remote/approval errors with retry context. Dry runs perform no creation or hooks and report unattempted effects. Exact-leaf `--help --output json` returns runtime request/response schemas and complete error/action catalogs. JSON writes one document to stdout and no ordinary stderr.
+Responses identify as `list`, `get`, `switch`, or `create`; paths are UTF-8/base64 tagged objects. Every structured `list` worktree and `switch.selection_required` choice includes nullable `last_commit_at`, an RFC 3339 HEAD committer timestamp with an explicit offset. These arrays retain Git discovery order under every personal default sort. A systemic metadata failure leaves timestamps null and adds one bounded diagnostic without ordinary stderr. Switch may return an existing destination, a creation plan, or typed selection/remote/approval errors with retry context. Create returns a `created` or `creation_plan` result carrying `kind`, `start_point`, and both `create_branch` and `create_worktree` effects for a genuinely new branch, or fails with `create.branch_registered` plus a `switch` next step. Dry runs perform no creation or hooks and report unattempted effects. Exact-leaf `--help --output json` returns runtime request/response schemas and complete error/action catalogs. JSON writes one document to stdout and no ordinary stderr.
