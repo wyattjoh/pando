@@ -2,7 +2,12 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -11,7 +16,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macos-latest disabled: private repo, macOS runners bill at 10x.
+        # Re-add to restore coverage of /bin/sh (bash vs dash), path
+        # canonicalization under /private, and case-insensitive APFS.
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Install zsh on Linux
