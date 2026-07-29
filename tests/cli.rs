@@ -12,6 +12,7 @@ use std::{
 
 use nix::{
     pty::{Winsize, openpty},
+    sys::termios::{InputFlags, SetArg, tcgetattr, tcsetattr},
     unistd::dup,
 };
 
@@ -730,6 +731,28 @@ fn switch_ctrl_s_preserves_selection_and_stdout_purity() {
     assert!(stderr.contains("last commit newest-first"), "{stderr}");
     assert!(stderr.contains("path A-Z"), "{stderr}");
     assert!(stderr.matches("Git order").count() >= 2, "{stderr}");
+}
+
+/// Guards the PTY flow-control setup in `start_pty_command`.
+///
+/// Writing the keys immediately after spawn guarantees they reach the line
+/// discipline before the picker enters raw mode, which is the losing side of
+/// the race that used to wedge `switch_ctrl_s_preserves_selection_and_stdout_purity`
+/// under CI scheduling. With IXON left enabled the child suspends on XOFF and
+/// blocks in `write` forever, so this test hangs rather than fails.
+#[test]
+fn switch_ctrl_s_before_raw_mode_is_not_treated_as_flow_control() {
+    let repo = Repository::new();
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .arg("switch")
+        .current_dir(&repo.main)
+        .env("NO_COLOR", "1");
+
+    let output = run_pty_command_with_size(command, b"\x1b[B\x13\x13\x13\x13\r", 24, 600);
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(!output.stdout.is_empty());
 }
 
 #[test]
@@ -3003,6 +3026,18 @@ struct PtySession {
 
 fn start_pty_command(mut command: Command, window: Winsize) -> PtySession {
     let pty = openpty(Some(&window), None).unwrap();
+    // A fresh PTY enables IXON, so the line discipline treats Ctrl-S (`\x13`,
+    // XOFF) as flow control and suspends output until it sees XON. Tests that
+    // drive Ctrl-S never send XON, so any byte landing while the child is in
+    // cooked mode wedges it forever in `write`. `console` only clears IXON for
+    // the duration of a single `read_key` and restores cooked mode in between,
+    // so that window reopens after every keystroke. Disable flow control up
+    // front and Ctrl-S is delivered to the picker as an ordinary byte.
+    let mut termios = tcgetattr(&pty.slave).unwrap();
+    termios
+        .input_flags
+        .remove(InputFlags::IXON | InputFlags::IXOFF | InputFlags::IXANY);
+    tcsetattr(&pty.slave, SetArg::TCSANOW, &termios).unwrap();
     let stdin_fd = dup(&pty.slave).unwrap();
     let stderr_fd = dup(&pty.slave).unwrap();
     let master_writer = fs::File::from(dup(&pty.master).unwrap());

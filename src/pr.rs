@@ -4,8 +4,10 @@ use minijinja::{Environment, context};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
+    borrow::Cow,
     env, fs,
     io::{self, IsTerminal, Read, Write},
+    path::Path,
     process::Command,
 };
 
@@ -473,27 +475,74 @@ fn generate_metadata(
         "Generated pull request metadata:",
         "Failed to generate pull request metadata",
         |_| {
-            let mut child = Command::new("/bin/sh")
-                .args(["-c", &generator.value])
-                .current_dir(&repo.current().path)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()?;
-            child
-                .stdin
-                .take()
-                .context("generator stdin unavailable")?
-                .write_all(prompt.as_bytes())?;
-            let output = child.wait_with_output()?;
-            if !output.status.success() {
-                bail!("PR metadata generator failed");
-            }
-            parse_metadata(
-                &String::from_utf8(output.stdout)
-                    .map_err(|_| anyhow::anyhow!("PR generator produced non-UTF-8 output"))?,
-            )
+            generate_with_retries(&prompt, |attempt_prompt| {
+                run_generator(&generator.value, &repo.current().path, attempt_prompt)
+            })
         },
+    )
+}
+
+/// Number of times the PR metadata generator is invoked before giving up.
+///
+/// Generators are language models, so a rejected document is usually a
+/// one-off formatting slip rather than a persistent failure.
+const GENERATION_ATTEMPTS: u32 = 3;
+
+/// Runs `attempt` until it produces a usable document or
+/// [`GENERATION_ATTEMPTS`] is exhausted.
+///
+/// Every failure is retried — a nonzero exit and a malformed document are
+/// equally transient for a language-model generator. Each retry re-sends the
+/// prompt with the previous rejection appended, so the generator can correct
+/// itself rather than reroll blindly. Retries are silent because the caller's
+/// progress indicator owns the only terminal state; the attempt count is
+/// reported on the final error instead.
+fn generate_with_retries(
+    prompt: &str,
+    mut attempt: impl FnMut(&str) -> Result<(String, String)>,
+) -> Result<(String, String)> {
+    let mut remaining = GENERATION_ATTEMPTS;
+    let mut previous: Option<anyhow::Error> = None;
+    loop {
+        let attempt_prompt = match &previous {
+            None => Cow::Borrowed(prompt),
+            Some(error) => Cow::Owned(format!(
+                "{prompt}\nThe previous attempt was rejected: {error:#}. Return only the corrected document, beginning with a single line of the form \"# Title\" and followed by the description.\n"
+            )),
+        };
+        remaining -= 1;
+        match attempt(&attempt_prompt) {
+            Ok(metadata) => return Ok(metadata),
+            Err(error) if remaining > 0 => previous = Some(error),
+            Err(error) => {
+                return Err(error.context(format!(
+                    "PR metadata generation failed after {GENERATION_ATTEMPTS} attempts"
+                )));
+            }
+        }
+    }
+}
+
+fn run_generator(command: &str, dir: &Path, prompt: &str) -> Result<(String, String)> {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", command])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .context("generator stdin unavailable")?
+        .write_all(prompt.as_bytes())?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        bail!("PR metadata generator failed");
+    }
+    parse_metadata(
+        &String::from_utf8(output.stdout)
+            .map_err(|_| anyhow::anyhow!("PR generator produced non-UTF-8 output"))?,
     )
 }
 
@@ -656,8 +705,23 @@ fn git_cmd(repo: &crate::git::Repository, args: &[&str]) -> Result<String> {
     String::from_utf8(output.stdout).context("git output was not UTF-8")
 }
 
+/// Strips a fence that wraps the *entire* document, which generators
+/// routinely add when asked for markdown. A fence opening a description is
+/// left alone, so only a leading fence with a matching final closing line is
+/// removed.
+fn unwrap_code_fence(value: &str) -> &str {
+    let (first, rest) = value.split_once('\n').unwrap_or((value, ""));
+    if !first.starts_with("```") {
+        return value;
+    }
+    rest.trim_end()
+        .rsplit_once('\n')
+        .filter(|(_, last)| last.trim() == "```")
+        .map_or(value, |(inner, _)| inner)
+}
+
 fn parse_metadata(value: &str) -> Result<(String, String)> {
-    let mut lines = value.lines();
+    let mut lines = unwrap_code_fence(value.trim()).trim().lines();
     let first = lines
         .next()
         .context("PR generator output is missing a title")?;
@@ -813,6 +877,94 @@ mod tests {
             parse_metadata("# title\nbody").unwrap(),
             ("title".into(), "body".into())
         );
+    }
+
+    #[test]
+    fn generation_retries_a_rejected_document_up_to_three_times() {
+        let mut prompts = Vec::new();
+        let metadata = generate_with_retries("PROMPT", |prompt| {
+            prompts.push(prompt.to_owned());
+            if prompts.len() < 3 {
+                parse_metadata("Here is the PR:\n# title\nbody")
+            } else {
+                parse_metadata("# title\nbody")
+            }
+        })
+        .unwrap();
+
+        assert_eq!(metadata, ("title".into(), "body".into()));
+        assert_eq!(prompts.len(), 3);
+        assert_eq!(prompts[0], "PROMPT");
+        for prompt in &prompts[1..] {
+            assert!(prompt.starts_with("PROMPT"), "{prompt}");
+            assert!(
+                prompt.contains("level-one heading"),
+                "retry prompt should report why the last document was rejected: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn generation_gives_up_after_three_failures() {
+        let mut attempts = 0;
+        let error = generate_with_retries("PROMPT", |_| {
+            attempts += 1;
+            bail!("PR metadata generator failed")
+        })
+        .unwrap_err();
+
+        assert_eq!(attempts, 3);
+        assert!(
+            format!("{error:#}").contains("failed after 3 attempts"),
+            "{error:#}"
+        );
+        assert!(
+            format!("{error:#}").contains("PR metadata generator failed"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn generation_does_not_retry_a_document_that_parses() {
+        let mut attempts = 0;
+        generate_with_retries("PROMPT", |_| {
+            attempts += 1;
+            parse_metadata("# title\nbody")
+        })
+        .unwrap();
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn metadata_tolerates_leading_blank_lines_and_a_wrapping_fence() {
+        assert_eq!(
+            parse_metadata("\n\n# title\nbody\n").unwrap(),
+            ("title".into(), "body".into())
+        );
+        assert_eq!(
+            parse_metadata("```markdown\n# title\nbody\n```\n").unwrap(),
+            ("title".into(), "body".into())
+        );
+        assert_eq!(
+            parse_metadata("```\n# title\nbody\n```").unwrap(),
+            ("title".into(), "body".into())
+        );
+    }
+
+    #[test]
+    fn metadata_preserves_a_fence_inside_the_description() {
+        assert_eq!(
+            parse_metadata("# title\nbody\n\n```sh\nls\n```").unwrap(),
+            ("title".into(), "body\n\n```sh\nls\n```".into())
+        );
+        // An unterminated leading fence is not a wrapper, so it still fails.
+        assert!(parse_metadata("```markdown\n# title\nbody").is_err());
+    }
+
+    #[test]
+    fn metadata_still_rejects_a_missing_level_one_heading() {
+        assert!(parse_metadata("## title\nbody").is_err());
+        assert!(parse_metadata("Here is the PR:\n# title\nbody").is_err());
     }
 
     #[test]
