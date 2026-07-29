@@ -3,7 +3,7 @@ use std::env;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use worktrees::{
-    commit,
+    Row, commit,
     config::EffectiveConfig,
     git, install, machine, pr, render,
     smart::{self, GetProperty, TrustCommand},
@@ -33,11 +33,18 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// List worktrees belonging to the current repository.
-    List,
+    List {
+        /// List local branches instead of worktrees.
+        #[arg(short = 'b', long)]
+        branches: bool,
+    },
     /// Choose, create, or switch to a worktree and print its path.
     Switch {
         /// Branch to switch to; omit it to use the interactive picker.
         branch: Option<String>,
+        /// Open the interactive picker in branch view.
+        #[arg(short = 'b', long)]
+        branches: bool,
         /// Validate and preview without mutation.
         #[arg(long)]
         dry_run: bool,
@@ -224,20 +231,26 @@ fn run(cli: Cli) -> Result<()> {
         anyhow::bail!("--input-output only supports json");
     }
     match cli.command {
-        Commands::List if json => machine::list(request_mode),
-        Commands::List => list(),
-        Commands::Switch { branch, dry_run } if json => {
-            machine::switch(request_mode, branch, dry_run)
-        }
+        Commands::List { branches: false } if json => machine::list(request_mode),
+        Commands::List { branches: true } if json => machine::list_branches(request_mode),
+        Commands::List { branches: false } => list(),
+        Commands::List { branches: true } => list_branches(),
         Commands::Switch {
             branch,
+            branches: _,
+            dry_run,
+        } if json => machine::switch(request_mode, branch, dry_run),
+        Commands::Switch {
+            branch,
+            branches,
             dry_run: false,
         } => {
-            smart::switch(branch)?;
+            smart::switch(branch, branches)?;
             ui::finish_open_sequence(ui::success_style().apply_to("Worktree destination printed."))
         }
         Commands::Switch {
             branch,
+            branches: _,
             dry_run: true,
         } => smart::switch_dry_run(branch),
         Commands::Create { branch, dry_run } if json => {
@@ -410,12 +423,56 @@ fn list() -> Result<()> {
     if let Some(warning) = &repository.metadata_warning {
         ui::warning(warning)?;
     }
+    let rows: Vec<Row> = repository
+        .worktrees
+        .iter()
+        .map(Row::from_worktree)
+        .collect();
     ui::info(format!(
         "{}\n{}",
         ui::heading_style().apply_to(format!("Worktrees ({})", default_sort.label())),
-        render::table(&repository.worktrees, default_sort)
+        render::table(&rows, default_sort)
     ))?;
     ui::finish(list_summary(&repository.worktrees))
+}
+
+fn list_branches() -> Result<()> {
+    let cwd = env::current_dir().context("failed to read the current directory")?;
+    let branches = git::repository_with_branches(&cwd)?;
+    let repository = &branches.repository;
+    let default_sort = EffectiveConfig::load_default_sort(repository)?;
+    if let Some(warning) = &repository.metadata_warning {
+        ui::warning(warning)?;
+    }
+    let rows: Vec<Row> = branches
+        .branches
+        .iter()
+        .map(|branch| Row::from_branch(branch, &repository.worktrees))
+        .collect();
+    ui::info(format!(
+        "{}\n{}",
+        ui::heading_style().apply_to(format!("Branches ({})", default_sort.label())),
+        render::table(&rows, default_sort)
+    ))?;
+    ui::finish(branch_summary(&rows))
+}
+
+fn branch_summary(rows: &[Row]) -> String {
+    let noun = if rows.len() == 1 {
+        "branch"
+    } else {
+        "branches"
+    };
+    let mut summary = vec![format!("{} {noun}", rows.len())];
+    let checked_out = rows.iter().filter(|row| row.path.is_some()).count();
+    if checked_out > 0 {
+        summary.push(format!("{checked_out} checked out"));
+    }
+    let dirty = rows.iter().filter(|row| row.is_dirty()).count();
+    if dirty > 0 {
+        summary.push(format!("{dirty} dirty"));
+    }
+    ui::muted_style().apply_to(summary.join(", ")).to_string()
 }
 
 fn list_summary(worktrees: &[worktrees::Worktree]) -> String {

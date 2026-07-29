@@ -65,7 +65,11 @@ mixed command flags. Dry-run mutating requests use `input.dry_run:true`.
 Force is argv-only authorization for removal. Pass `--force` only with explicit user approval; never put `force` in a remove request document. JSON cannot grant hook or generator trust or authorize installer
 writes. Structured worktree records expose nullable RFC 3339
 `last_commit_at` values and always retain Git discovery order, regardless of
-the human `worktrees.default-sort` preference. See the command references
+the human `worktrees.default-sort` preference. `worktrees list --branches
+--output json` emits a distinct `result.branches` payload (branch, head,
+nullable `last_commit_at`/`path`/`condition`, `current`) in `for-each-ref`
+order, also independent of the personal default sort; `path`/`condition`
+are `null` for a branch with no worktree. See the command references
 for leaf contracts and approval rules.
 
 ## Anatomy
@@ -76,8 +80,8 @@ for leaf contracts and approval rules.
 
 | Command | Purpose | Reference |
 |---|---|---|
-| `list` | List worktrees belonging to the current repository | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
-| `switch [--dry-run] [branch]` | Choose, create, or switch to a worktree and print its path | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
+| `list [-b\|--branches]` | List worktrees belonging to the current repository, or local branches (including unattached ones) with `--branches` | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
+| `switch [-b\|--branches] [--dry-run] [branch]` | Choose, create, or switch to a worktree and print its path; `--branches` opens the picker in branch view | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `create [--dry-run] <branch>` | Create a worktree and print its path, without confirming a new branch | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `get <property>` | Print one current-worktree property | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `remove [--force] [--dry-run] [branches...]` | Remove one or more topic worktrees while retaining their branches | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
@@ -114,11 +118,16 @@ Source: README.md ("Global placement")
 ```zsh
 worktrees switch feature/login   # exact branch
 worktrees switch                 # interactive picker
+worktrees switch --branches      # interactive picker, starting in branch view
 worktrees create feature/login   # create without confirming; fails if it exists
 ```
 The picker shows local HEAD committer timestamps and starts in the configured
 sort mode. Ctrl-S cycles Git order, branch A-Z, last commit newest-first, and
-path A-Z without persisting the change or losing the filter/selection.
+path A-Z without persisting the change or losing the filter/selection. Ctrl-B
+toggles between worktree view and branch view (local branches, including
+ones with no worktree yet) for the current invocation only — selecting an
+unattached branch creates a worktree for it through the same resolver
+`worktrees switch <branch>` uses.
 Source: README.md ("Switching and creating")
 
 ### Stage deliberately, then commit as an agent — `--input-output json`
