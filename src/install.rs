@@ -59,7 +59,7 @@ worktrees_dispatch() {
   done
   if [[ ! -o interactive ]] || [[ "$structured" == true ]] || [[ "$passthrough" == true ]]; then
     command "$executable" "$@"
-  elif [[ "$1" == "switch" || "$1" == "remove" || "$1" == "merge" ]]; then
+  elif [[ "$1" == "switch" || "$1" == "create" || "$1" == "remove" || "$1" == "merge" ]]; then
     local destination
     destination="$(command "$executable" "$@")"
     local exit_status=$?

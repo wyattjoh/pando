@@ -1,6 +1,6 @@
 ---
 name: worktrees
-description: 'Kickstart usage of the `worktrees` CLI — inspecting, creating, and navigating Git worktrees. Triggers on "worktrees", "worktrees switch", "worktrees commit", "worktrees get", "worktrees trust", "worktrees merge", "worktrees install", ".worktrees.yaml", ".worktrees.local.yaml", "worktrees config.yaml".'
+description: 'Kickstart usage of the `worktrees` CLI — inspecting, creating, and navigating Git worktrees. Triggers on "worktrees", "worktrees switch", "worktrees create", "worktrees commit", "worktrees get", "worktrees trust", "worktrees merge", "worktrees install", ".worktrees.yaml", ".worktrees.local.yaml", "worktrees config.yaml".'
 allowed-tools: Bash, Read
 effort: medium
 ---
@@ -21,7 +21,7 @@ often "work":
 
 | Don't | Do | Why the wrapper matters |
 |---|---|---|
-| `git worktree add ...` / `git checkout -b ...` | `worktrees switch [--dry-run] [branch]` | Applies the branch-resolution order, the configured root, and post-create hooks/trust |
+| `git worktree add ...` / `git checkout -b ...` | `worktrees switch [--dry-run] [branch]`, or `worktrees create [--dry-run] <branch>` to skip the new-branch confirmation | Applies the branch-resolution order, the configured root, and post-create hooks/trust |
 | `git commit -m "<message you wrote>"` | `worktrees commit --input-output json` (omit a message in the request to let the **configured generator** write it) | If the user didn't give you a message, do not invent one yourself — let the generator write it. Only supply a literal message when the user gave you that exact text |
 | `git worktree remove ...` | `worktrees remove [--force] [--dry-run] [branch...]` | Keeps the local branch ref; runs `pre-remove` hooks |
 | `git merge ...` / `git rebase ...` onto the target | `worktrees merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Resolves the configured target branch, or origin/HEAD, main, then master without fetching, runs `pre-merge` hooks, and is crash-recoverable |
@@ -33,7 +33,7 @@ the four operations above must go through `worktrees`, not `git`.
 
 - Binaries: `worktrees` and its `wt` symlink on `PATH` when installed with `just install` (pinned during generation: **v0.1.0**).
 - The installed zsh integration wraps both `worktrees` and `wt` so
-  `switch`/`remove`/`merge` can `cd` to the destination the selected binary
+  `switch`/`create`/`remove`/`merge` can `cd` to the destination the selected binary
   prints. `command worktrees ...` and `command wt ...` bypass the wrappers.
 - Config files the CLI reads (see `references/config.md`):
   `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml`,
@@ -78,6 +78,7 @@ for leaf contracts and approval rules.
 |---|---|---|
 | `list` | List worktrees belonging to the current repository | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `switch [--dry-run] [branch]` | Choose, create, or switch to a worktree and print its path | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
+| `create [--dry-run] <branch>` | Create a worktree and print its path, without confirming a new branch | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `get <property>` | Print one current-worktree property | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `remove [--force] [--dry-run] [branches...]` | Remove one or more topic worktrees while retaining their branches | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Integrate the current topic into the configured target branch | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
@@ -113,6 +114,7 @@ Source: README.md ("Global placement")
 ```zsh
 worktrees switch feature/login   # exact branch
 worktrees switch                 # interactive picker
+worktrees create feature/login   # create without confirming; fails if it exists
 ```
 The picker shows local HEAD committer timestamps and starts in the configured
 sort mode. Ctrl-S cycles Git order, branch A-Z, last commit newest-first, and
@@ -221,7 +223,7 @@ Source: README.md ("Structured (JSON) usage")
 
 ## References
 
-- [`references/commands/switch.md`](references/commands/switch.md) — navigation commands: `list`, `switch`, `get`
+- [`references/commands/switch.md`](references/commands/switch.md) — navigation commands: `list`, `switch`, `create`, `get`
 - [`references/commands/lifecycle.md`](references/commands/lifecycle.md) — `remove`, `merge`
 - [`references/commands/commit.md`](references/commands/commit.md) — `commit`, including the JSON request/response contract
 - [`references/commands/trust.md`](references/commands/trust.md) — `trust` and its subcommands

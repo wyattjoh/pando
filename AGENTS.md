@@ -34,7 +34,7 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 | `lib.rs` | `Worktree`/`WorktreeKind`/`Condition`/`SortMode` domain types, display/navigability rules, and stable worktree sorting |
 | `git.rs` | Every `git` subprocess call; parses `worktree list --porcelain -z`; batches HEAD committer metadata; `Repository` context |
 | `config.rs` | Strict three-layer YAML config parsing and effective value resolution |
-| `smart.rs` | Command implementations for `switch`/`get`/`trust`; all interactive prompts |
+| `smart.rs` | Command implementations for `switch`/`create`/`get`/`trust`; all interactive prompts |
 | `trust.rs` | Post-create hook approval: command hashing, XDG `trust.json`, atomic writes |
 | `setup.rs` | Post-create hook execution and the incomplete-setup journal |
 | `install.rs` | Managed zsh integration; marker-block rewriting of `.zshrc` |
@@ -62,6 +62,8 @@ Shared hooks run before local hooks; the local root and default sort override th
 **Port hashing is pinned for compatibility.** `smart::port_for_branch` uses `SipHasher13` explicitly rather than `DefaultHasher` so a future std change cannot move ports away from Worktrunk v0.66.0. Golden values are asserted in `smart.rs` tests — treat them as a compatibility contract.
 
 **Branch resolution order** in `resolve_and_switch`: existing registered worktree → existing local branch → single already-fetched remote match → prompt among multiple remotes → confirm a genuinely new branch from the invoking `HEAD`. The tool never adopts, repairs, prunes, moves, or deletes an existing destination or a broken worktree record.
+
+**`switch` and `create` share one resolver, parameterized by `Intent`** — in `smart.rs` for humans and `machine.rs` for JSON. `Intent::Create` skips only the genuinely-new-branch confirmation and refuses an already-registered branch; remote selection and post-create hook trust still prompt, and `create` is the sole JSON entry point allowed to create a branch unattended (`switch` still answers `switch.approval_required`). Anything `create` changes in the shared path changes `switch` too, so keep the intent checks narrow.
 
 ### Testing
 
