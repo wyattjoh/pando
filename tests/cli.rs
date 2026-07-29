@@ -801,6 +801,11 @@ fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
         "{}",
         output.stderr
     );
+    assert!(
+        output.stderr.contains("Worktree destination printed."),
+        "the picker opens a sequence, so the outro must close it: {}",
+        output.stderr
+    );
     let discovery = worktrees::git::discover_with_metadata(&repo.main).unwrap();
     let choices: Vec<_> = discovery
         .worktrees
@@ -1698,10 +1703,10 @@ fn switch_explicitly_enters_an_existing_worktree() {
         output.stdout,
         format!("{}\n", repo.linked.canonicalize().unwrap().display()).as_bytes()
     );
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("Worktree destination printed.")
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr, "",
+        "entering an existing worktree reports nothing, so no outro closes an unopened sequence"
     );
 }
 
