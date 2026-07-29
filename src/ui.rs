@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fmt::{self, Display},
     io::{self, IsTerminal},
+    sync::atomic::{AtomicBool, Ordering},
     time::Instant,
 };
 
@@ -13,6 +14,13 @@ use console::{
 };
 
 struct WorktreesTheme;
+
+/// Whether this run has opened a terminal UI sequence that an outro must close.
+static SEQUENCE_OPEN: AtomicBool = AtomicBool::new(false);
+
+fn open_sequence() {
+    SEQUENCE_OPEN.store(true, Ordering::Relaxed);
+}
 
 #[derive(Debug)]
 enum InteractionKind {
@@ -208,6 +216,7 @@ pub fn ensure_interactive(reason: &str) -> Result<()> {
 /// Returns a cancellation [`InteractionError`] for Escape or Ctrl-C and
 /// preserves other terminal failures with operation context.
 pub fn prompt_result<T>(result: io::Result<T>, cancelled: &str, failure: &str) -> Result<T> {
+    open_sequence();
     match result {
         Ok(value) => Ok(value),
         Err(error) if error.kind() == io::ErrorKind::Interrupted => {
@@ -250,6 +259,7 @@ pub fn run_timed<T>(
         return operation(false);
     }
 
+    open_sequence();
     let started = Instant::now();
     let progress = io::stderr().is_terminal().then(|| {
         let elapsed = muted_style().apply_to("{elapsed}");
@@ -291,6 +301,7 @@ pub fn run_timed<T>(
 ///
 /// Returns an error when the terminal cannot be written.
 pub fn info(message: impl Display) -> Result<()> {
+    open_sequence();
     log::info(message).context("failed to write terminal message")
 }
 
@@ -300,6 +311,7 @@ pub fn info(message: impl Display) -> Result<()> {
 ///
 /// Returns an error when the terminal cannot be written.
 pub fn success(message: impl Display) -> Result<()> {
+    open_sequence();
     log::success(success_style().apply_to(message)).context("failed to write terminal message")
 }
 
@@ -309,6 +321,7 @@ pub fn success(message: impl Display) -> Result<()> {
 ///
 /// Returns an error when the terminal cannot be written.
 pub fn warning(message: impl Display) -> Result<()> {
+    open_sequence();
     log::warning(warning_style().apply_to(message)).context("failed to write terminal message")
 }
 
@@ -318,6 +331,7 @@ pub fn warning(message: impl Display) -> Result<()> {
 ///
 /// Returns an error when the terminal cannot be written.
 pub fn error(message: impl Display) -> Result<()> {
+    open_sequence();
     log::error(error_style().apply_to(message)).context("failed to write terminal message")
 }
 
@@ -327,6 +341,7 @@ pub fn error(message: impl Display) -> Result<()> {
 ///
 /// Returns an error when the terminal cannot be written.
 pub fn step(message: impl Display) -> Result<()> {
+    open_sequence();
     log::step(message).context("failed to write terminal message")
 }
 
@@ -337,6 +352,23 @@ pub fn step(message: impl Display) -> Result<()> {
 /// Returns an error when the terminal cannot be written.
 pub fn finish(message: impl Display) -> Result<()> {
     outro(message).context("failed to write terminal message")
+}
+
+/// Closes an open terminal UI sequence, staying silent when none was opened.
+///
+/// Commands whose only human-facing output is the outro itself would otherwise
+/// print a lone closing bar for a run that reported nothing — noise under the
+/// shell integration, which captures stdout and leaves stderr on the terminal.
+///
+/// # Errors
+///
+/// Returns an error when the terminal cannot be written.
+pub fn finish_open_sequence(message: impl Display) -> Result<()> {
+    if SEQUENCE_OPEN.load(Ordering::Relaxed) {
+        finish(message)
+    } else {
+        Ok(())
+    }
 }
 
 /// Writes a cancellation outro without presenting an operational error.

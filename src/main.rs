@@ -226,7 +226,7 @@ fn run(cli: Cli) -> Result<()> {
             dry_run: false,
         } => {
             smart::switch(branch)?;
-            ui::finish(ui::success_style().apply_to("Worktree destination printed."))
+            ui::finish_open_sequence(ui::success_style().apply_to("Worktree destination printed."))
         }
         Commands::Switch {
             branch,
