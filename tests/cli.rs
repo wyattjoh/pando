@@ -1377,8 +1377,13 @@ fn install_preserves_zshrc_and_is_idempotent() {
     assert!(generated_config.contains("#     command: pi --no-session --no-tools"));
     let integration = xdg.path().join("worktrees/worktrees.zsh");
     let generated = fs::read_to_string(&integration).unwrap();
-    assert!(generated.contains("worktrees() { _worktrees_dispatch worktrees \"$@\"; }"));
-    assert!(generated.contains("wt() { _worktrees_dispatch wt \"$@\"; }"));
+    assert!(generated.contains("worktrees() { worktrees_dispatch worktrees \"$@\"; }"));
+    assert!(generated.contains("wt() { worktrees_dispatch wt \"$@\"; }"));
+    assert!(
+        !generated.contains("\n_"),
+        "no integration function may use the zsh completion `_name` prefix, which \
+         function-table snapshots drop: {generated}"
+    );
     assert!(generated.contains("builtin cd -- \"$destination\""));
     assert!(generated.contains("command \"$executable\" \"$@\""));
 
