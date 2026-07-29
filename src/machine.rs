@@ -1,5 +1,5 @@
 use crate::{
-    Condition, Worktree, WorktreeKind,
+    Condition, Row, Worktree, WorktreeKind,
     config::{EffectiveConfig, HookPhase},
     git, install,
     protocol::{self, BytePath, Effect, EmptyInput},
@@ -54,6 +54,31 @@ struct ListResult {
     outcome: &'static str,
     worktrees: Vec<WorktreeRecord>,
     summary: ListSummary,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+struct BranchRecord {
+    branch: String,
+    head: String,
+    /// RFC 3339 committer timestamp for the branch tip commit.
+    last_commit_at: Option<String>,
+    path: Option<BytePath>,
+    condition: Option<String>,
+    current: bool,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+struct BranchListSummary {
+    total: usize,
+    checked_out: usize,
+    dirty: usize,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+struct BranchListResult {
+    outcome: &'static str,
+    branches: Vec<BranchRecord>,
+    summary: BranchListSummary,
 }
 
 #[derive(Debug, JsonSchema, Serialize)]
@@ -550,6 +575,10 @@ fn navigation_repository() -> Result<git::Repository> {
     git::repository_with_metadata(&env::current_dir().context("failed to read current directory")?)
 }
 
+fn navigation_branches() -> Result<git::RepositoryBranches> {
+    git::repository_with_branches(&env::current_dir().context("failed to read current directory")?)
+}
+
 fn condition(value: Condition) -> &'static str {
     match value {
         Condition::Clean => "clean",
@@ -651,6 +680,78 @@ pub fn list(request_mode: bool) -> Result<()> {
         );
     }
     emit(response, false)
+}
+
+/// Emits the structured branch list, in `for-each-ref` order.
+///
+/// # Errors
+/// Returns an error when stdout cannot be written.
+pub fn list_branches(request_mode: bool) -> Result<()> {
+    let id = if request_mode {
+        match protocol::read_optional_request::<EmptyInput>() {
+            Ok(r) => {
+                if r.schema_version != 1 {
+                    return emit_err(
+                        "list",
+                        r.request_id,
+                        "json.unsupported_schema_version",
+                        "unsupported schema version",
+                    );
+                }
+                r.request_id
+            }
+            Err(e) => return emit_err("list", None, "json.invalid_request", e),
+        }
+    } else {
+        None
+    };
+    let branches = match navigation_branches() {
+        Ok(v) => v,
+        Err(e) => return emit_err("list", id, "repository.invalid", format!("{e:#}")),
+    };
+    let repo = &branches.repository;
+    let records: Vec<_> = branches
+        .branches
+        .iter()
+        .map(|record| branch_record(record, &repo.worktrees))
+        .collect();
+    let checked_out = records.iter().filter(|r| r.path.is_some()).count();
+    let dirty = records
+        .iter()
+        .filter(|r| r.condition.as_deref() == Some(condition(Condition::Dirty)))
+        .count();
+    let result = BranchListResult {
+        outcome: "listed",
+        summary: BranchListSummary {
+            total: records.len(),
+            checked_out,
+            dirty,
+        },
+        branches: records,
+    };
+    let mut response =
+        protocol::success("list", id, serde_json::to_value(result)?, json!({}), vec![]);
+    if let Some(warning) = &repo.metadata_warning {
+        push_diagnostic(
+            &mut response,
+            "git.commit_metadata",
+            "metadata",
+            warning.as_bytes(),
+        );
+    }
+    emit(response, false)
+}
+
+fn branch_record(record: &git::BranchRecord, worktrees: &[Worktree]) -> BranchRecord {
+    let row = Row::from_branch(record, worktrees);
+    BranchRecord {
+        branch: record.branch.clone(),
+        head: record.head.clone(),
+        last_commit_at: row.machine_last_commit_at(),
+        path: row.path.as_deref().map(BytePath::path),
+        condition: row.condition.map(|value| condition(value).to_owned()),
+        current: row.current,
+    }
 }
 
 /// Emits one naturally typed current-worktree property.

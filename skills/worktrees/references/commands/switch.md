@@ -24,6 +24,23 @@ Both JSON modes are supported; agents use versioned request mode.
 worktrees list
 ```
 
+### `worktrees list -b` / `worktrees list --branches`
+
+Lists local branches (`refs/heads`) instead of worktrees — including a
+branch that has never been checked out anywhere. Remote-tracking branches
+are never listed and no fetch happens. Each row shows the branch name, the
+tip commit's committer timestamp, and the worktree path where the branch is
+checked out; the `PATH` cell is blank for a branch with no worktree. A
+checked-out branch keeps its current `*` and dirty markers; an unattached
+branch shows no condition marker, since there is no working tree to
+inspect. Detached and bare worktrees have no branch and so never appear in
+this view — it is not a superset of `worktrees list`. Sorting behaves as it
+does for worktrees, with unattached branches ordering last under path sort.
+
+```sh
+worktrees list --branches
+```
+
 ## `worktrees switch [BRANCH]`
 
 ```
@@ -45,6 +62,27 @@ cycles Git order, branch A-Z, last commit newest-first, and path A-Z for the
 current invocation only. Re-sorting preserves the active filter and selected
 worktree identity; the create action stays pinned last. Escape cancels
 without changing directory.
+
+`worktrees switch -b` / `worktrees switch --branches` opens the picker in
+branch view instead of worktree view — the same columns as `worktrees list
+--branches`, with the heading and no-matches hint reading "branch" instead
+of "worktree". The flag only sets the picker's initial view: `worktrees
+switch -b <branch>` behaves exactly like `worktrees switch <branch>` since
+no picker opens. Inside the picker, Ctrl-B toggles between worktree view and
+branch view for the current invocation only — nothing is persisted, and
+there is no configuration key for the default view. Toggling never touches
+Git, preserves the typed filter, and keeps the highlighted selection
+whenever it exists in both views (a checked-out branch is the same choice
+either way); otherwise the selection falls back to the top of the list.
+Selecting an already-checked-out branch navigates to its worktree exactly as
+worktree view does. Selecting a branch with no worktree creates one for it
+through the same resolver `worktrees switch <branch>` uses, including the
+post-create hook trust prompt — no new switching or creation path is
+introduced.
+
+```zsh
+worktrees switch --branches
+```
 
 Branch resolution order (no implicit fetch):
 
@@ -145,3 +183,5 @@ echo "PORT=$(worktrees get port)" > .env.local
 Agents use `--input-output json`. `list` accepts `{"schema_version":1,"request_id":"…"}` with omitted `input`, or an empty `input` object. `get` requires `input.property`; JSON names are `branch`, `port`, `worktree_path`, `primary_worktree_path`, and `worktree_root`. `switch` accepts `input.branch`, `input.remote`, and `input.dry_run`. `create` accepts the same input, but `input.branch` is required (`create.branch_required`) and its error codes are namespaced `create.*`. Request mode rejects simultaneous command arguments or flags.
 
 Responses identify as `list`, `get`, `switch`, or `create`; paths are UTF-8/base64 tagged objects. Every structured `list` worktree and `switch.selection_required` choice includes nullable `last_commit_at`, an RFC 3339 HEAD committer timestamp with an explicit offset. These arrays retain Git discovery order under every personal default sort. A systemic metadata failure leaves timestamps null and adds one bounded diagnostic without ordinary stderr. Switch may return an existing destination, a creation plan, or typed selection/remote/approval errors with retry context. Create returns a `created` or `creation_plan` result carrying `kind`, `start_point`, and both `create_branch` and `create_worktree` effects for a genuinely new branch, or fails with `create.branch_registered` plus a `switch` next step. Dry runs perform no creation or hooks and report unattempted effects. Exact-leaf `--help --output json` returns runtime request/response schemas and complete error/action catalogs. JSON writes one document to stdout and no ordinary stderr.
+
+`worktrees list --branches --output json` emits a distinct payload: `result.branches` (not `result.worktrees`), each record carrying `branch`, `head`, nullable `last_commit_at`, nullable `path`, nullable `condition`, and `current`; `path`/`condition` are `null` for a branch with no worktree. `result.summary` reports `total`, `checked_out`, and `dirty`. Branch records are always in `for-each-ref` order — never the caller's personal default sort — regardless of `input-output` mode. `worktrees list --output json` without `--branches` is unchanged.

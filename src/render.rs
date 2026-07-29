@@ -1,49 +1,48 @@
 use unicode_width::UnicodeWidthStr;
 
-use crate::{Condition, SortMode, Worktree, sorted_worktree_indices, ui};
+use crate::{Row, SortMode, sorted_row_indices, ui};
 
 const LAST_COMMIT_WIDTH: usize = 16;
 
 #[must_use]
-pub fn table(worktrees: &[Worktree], sort: SortMode) -> String {
-    let worktree_refs: Vec<_> = worktrees.iter().collect();
-    let branch_width = branch_width(&worktree_refs);
+pub fn table(rows: &[Row], sort: SortMode) -> String {
+    let row_refs: Vec<_> = rows.iter().collect();
+    let branch_width = branch_width(&row_refs);
     let mut output = format!(
         "  {}  {}  {}\n",
         ui::muted_style().apply_to(pad(branch_header(sort), branch_width)),
         ui::muted_style().apply_to(pad(last_commit_header(sort), LAST_COMMIT_WIDTH)),
         ui::muted_style().apply_to(path_header(sort)),
     );
-    for index in sorted_worktree_indices(&worktree_refs, sort) {
-        output.push_str(&styled_row(worktree_refs[index], branch_width));
+    for index in sorted_row_indices(&row_refs, sort) {
+        output.push_str(&styled_row(row_refs[index], branch_width));
         output.push('\n');
     }
     output
 }
 
 #[must_use]
-pub fn menu_labels(worktrees: &[&Worktree]) -> Vec<String> {
-    let branch_width = branch_width(worktrees);
-    worktrees
-        .iter()
-        .map(|worktree| {
+pub fn menu_labels(rows: &[&Row]) -> Vec<String> {
+    let branch_width = branch_width(rows);
+    rows.iter()
+        .map(|row| {
             format!(
                 "{}  {}  {}",
-                styled_branch_label(worktree, branch_width, true),
+                styled_branch_label(row, branch_width, true),
                 ui::interactive(ui::muted_style())
-                    .apply_to(pad(&worktree.human_last_commit_at(), LAST_COMMIT_WIDTH)),
+                    .apply_to(pad(&row.human_last_commit_at(), LAST_COMMIT_WIDTH)),
                 ui::interactive(ui::worktree_data_style())
-                    .apply_to(abbreviated_path(&worktree.path)),
+                    .apply_to(abbreviated_path(row.path.as_deref())),
             )
         })
         .collect()
 }
 
 #[must_use]
-pub fn menu_header(worktrees: &[&Worktree], sort: SortMode) -> String {
+pub fn menu_header(rows: &[&Row], sort: SortMode) -> String {
     format!(
         "{}  {}  {}",
-        pad(branch_header(sort), branch_width(worktrees)),
+        pad(branch_header(sort), branch_width(rows)),
         pad(last_commit_header(sort), LAST_COMMIT_WIDTH),
         path_header(sort),
     )
@@ -73,38 +72,36 @@ fn path_header(sort: SortMode) -> &'static str {
     }
 }
 
-fn branch_width(worktrees: &[&Worktree]) -> usize {
-    worktrees
-        .iter()
-        .map(|worktree| UnicodeWidthStr::width(marked_branch_label(worktree).as_str()))
+fn branch_width(rows: &[&Row]) -> usize {
+    rows.iter()
+        .map(|row| UnicodeWidthStr::width(marked_branch_label(row).as_str()))
         .max()
         .unwrap_or(0)
         .max(UnicodeWidthStr::width("BRANCH ↑"))
 }
 
-fn styled_row(worktree: &Worktree, branch_width: usize) -> String {
-    let current_marker = if worktree.current {
+fn styled_row(row: &Row, branch_width: usize) -> String {
+    let current_marker = if row.current {
         ui::accent_style().bold().apply_to("*").to_string()
     } else {
         " ".to_owned()
     };
     format!(
         "{current_marker} {}  {}  {}",
-        styled_branch_label(worktree, branch_width, false),
-        ui::muted_style().apply_to(pad(&worktree.human_last_commit_at(), LAST_COMMIT_WIDTH)),
-        ui::worktree_data_style().apply_to(abbreviated_path(&worktree.path)),
+        styled_branch_label(row, branch_width, false),
+        ui::muted_style().apply_to(pad(&row.human_last_commit_at(), LAST_COMMIT_WIDTH)),
+        ui::worktree_data_style().apply_to(abbreviated_path(row.path.as_deref())),
     )
 }
 
-fn styled_branch_label(worktree: &Worktree, width: usize, force: bool) -> String {
-    let label = worktree.branch_label();
+fn styled_branch_label(row: &Row, width: usize, force: bool) -> String {
     let maybe_interactive = |style| {
         if force { ui::interactive(style) } else { style }
     };
     let mut output = maybe_interactive(ui::worktree_data_style().bold())
-        .apply_to(label)
+        .apply_to(&row.label)
         .to_string();
-    if worktree.condition == Condition::Dirty {
+    if row.is_dirty() {
         output.push(' ');
         output.push_str(
             &maybe_interactive(ui::warning_style())
@@ -112,21 +109,26 @@ fn styled_branch_label(worktree: &Worktree, width: usize, force: bool) -> String
                 .to_string(),
         );
     }
-    output.push_str(&" ".repeat(width.saturating_sub(UnicodeWidthStr::width(
-        marked_branch_label(worktree).as_str(),
-    ))));
+    output.push_str(
+        &" ".repeat(
+            width.saturating_sub(UnicodeWidthStr::width(marked_branch_label(row).as_str())),
+        ),
+    );
     output
 }
 
-fn marked_branch_label(worktree: &Worktree) -> String {
-    if worktree.condition == Condition::Dirty {
-        format!("{} *", worktree.branch_label())
+fn marked_branch_label(row: &Row) -> String {
+    if row.is_dirty() {
+        format!("{} *", row.label)
     } else {
-        worktree.branch_label().to_owned()
+        row.label.clone()
     }
 }
 
-fn abbreviated_path(path: &std::path::Path) -> String {
+fn abbreviated_path(path: Option<&std::path::Path>) -> String {
+    let Some(path) = path else {
+        return String::new();
+    };
     let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
         return path.display().to_string();
     };

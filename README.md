@@ -52,6 +52,8 @@ worktrees switch
 
 The picker lists navigable worktrees with aligned branch, last-commit, and path columns, defaults to the current worktree, and ends with **Create or switch branch…**. Last commit means the HEAD commit's committer time and is shown in local time as `YYYY-MM-DD HH:MM`, or `unknown` when it cannot be resolved. The initial order comes from `worktrees.default-sort` and falls back to Git order. Ctrl-S cycles temporarily through Git order, branch A-Z, last commit newest-first, and path A-Z while preserving the filter and selected worktree. Escape cancels without changing directory.
 
+`worktrees switch --branches` (or `-b`) opens the picker in **branch view**: local branches instead of worktrees, including ones that have never been checked out anywhere. Ctrl-B toggles between worktree view and branch view for the current invocation only — nothing persists, and there is no configuration key for the default view. Toggling never touches Git, keeps the typed filter, and keeps the highlighted selection whenever it exists in both views; a highlighted worktree or branch with no counterpart in the other view falls back to the top of the list. Selecting an already-checked-out branch in branch view navigates to its worktree exactly as worktree view does. Selecting a branch with no worktree runs the same resolution below, creating a worktree for it.
+
 Branch resolution is local and has no implicit fetch:
 
 1. enter the registered worktree for an exact local branch;
@@ -280,6 +282,12 @@ worktrees list
 ```
 
 The aligned table shows `BRANCH`, `LAST COMMIT AT`, and `PATH`, plus the current `*` marker, dirty state, and exceptional detached, bare, locked, prunable, missing, inaccessible, or unknown states. Last-commit values use each HEAD commit's committer timestamp in local `YYYY-MM-DD HH:MM` form, or `unknown` when metadata is unavailable. The active branch, last-commit, or path sort has a direction arrow; Git order is named in the heading. Human ordering follows `worktrees.default-sort`, while structured JSON always preserves Git's discovery order.
+
+```sh
+worktrees list --branches
+```
+
+`worktrees list --branches` (or `-b`) lists local branches (`refs/heads`) instead of worktrees, so a branch that has never been checked out anywhere is still visible. Remote-tracking branches never appear and no fetch happens. The `PATH` cell is blank for a branch with no worktree, and an unattached branch shows no condition marker — there is no working tree to call clean or dirty. Detached and bare worktrees have no branch and so are absent from this view; it is not a superset of `worktrees list`. `worktrees list --branches --output json` emits a distinct `branches` payload, always in `for-each-ref` order.
 
 ## `wt` short name
 

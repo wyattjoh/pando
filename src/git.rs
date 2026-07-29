@@ -148,8 +148,27 @@ fn enrich_last_commit_at(cwd: &Path, worktrees: &mut [Worktree]) -> Result<()> {
         .filter_map(|worktree| worktree.head.as_deref())
         .filter_map(normalized_head)
         .collect();
-    if heads.is_empty() {
-        return Ok(());
+    let resolved = resolve_commit_timestamps(cwd, &heads)?;
+    for worktree in worktrees {
+        worktree.last_commit_at = worktree
+            .head
+            .as_deref()
+            .and_then(normalized_head)
+            .and_then(|head| resolved.get(&head).copied());
+    }
+    Ok(())
+}
+
+/// Resolves committer timestamps for a batch of commit object ids in one `cat-file` call.
+///
+/// `oids` must already be normalized (lowercase, valid hex). An empty set resolves
+/// without starting a subprocess.
+fn resolve_commit_timestamps(
+    cwd: &Path,
+    oids: &BTreeSet<String>,
+) -> Result<HashMap<String, DateTime<FixedOffset>>> {
+    if oids.is_empty() {
+        return Ok(HashMap::new());
     }
 
     let mut child = Command::new("git")
@@ -164,7 +183,7 @@ fn enrich_last_commit_at(cwd: &Path, worktrees: &mut [Worktree]) -> Result<()> {
         .stdin
         .take()
         .context("failed to open git cat-file input")?;
-    let requests = heads
+    let requests = oids
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>()
@@ -179,16 +198,138 @@ fn enrich_last_commit_at(cwd: &Path, worktrees: &mut [Worktree]) -> Result<()> {
     let output = output.context("failed to read git cat-file output")?;
     ensure_success(&output, "git cat-file --batch")?;
     writer?;
-    let resolved = parse_commit_batch(&output.stdout, &heads)?;
+    parse_commit_batch(&output.stdout, oids)
+}
 
-    for worktree in worktrees {
-        worktree.last_commit_at = worktree
-            .head
-            .as_deref()
-            .and_then(normalized_head)
-            .and_then(|head| resolved.get(&head).copied());
+/// One local branch (`refs/heads`) as reported by `git for-each-ref`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchRecord {
+    pub branch: String,
+    pub head: String,
+    pub last_commit_at: Option<DateTime<FixedOffset>>,
+}
+
+/// A repository's worktrees together with its local branches.
+///
+/// Both share committer timestamps resolved in a single `cat-file --batch` pass,
+/// so building this costs exactly one additional Git subprocess (`for-each-ref`)
+/// over [`repository_with_metadata`].
+#[derive(Debug)]
+pub struct RepositoryBranches {
+    pub repository: Repository,
+    pub branches: Vec<BranchRecord>,
+}
+
+/// Discovers the repository's worktrees and local branches together.
+///
+/// Only `refs/heads` is inspected; no fetch happens and no remote-tracking
+/// refs are considered. A ref whose short name is not valid UTF-8 is excluded
+/// and reported in the metadata warning rather than silently dropped.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot run or its worktree or ref output is invalid.
+pub fn repository_with_branches(cwd: &Path) -> Result<RepositoryBranches> {
+    let mut worktrees = discover_worktrees(cwd)?;
+    let (mut branches, non_utf8) = discover_branch_refs(cwd)?;
+
+    let worktree_heads = worktrees
+        .iter()
+        .filter_map(|worktree| worktree.head.as_deref())
+        .filter_map(normalized_head);
+    let branch_heads = branches
+        .iter()
+        .filter_map(|branch| normalized_head(&branch.head));
+    let all_heads: BTreeSet<_> = worktree_heads.chain(branch_heads).collect();
+
+    let mut metadata_warning = match resolve_commit_timestamps(cwd, &all_heads) {
+        Ok(resolved) => {
+            for worktree in &mut worktrees {
+                worktree.last_commit_at = worktree
+                    .head
+                    .as_deref()
+                    .and_then(normalized_head)
+                    .and_then(|head| resolved.get(&head).copied());
+            }
+            for branch in &mut branches {
+                branch.last_commit_at =
+                    normalized_head(&branch.head).and_then(|head| resolved.get(&head).copied());
+            }
+            None
+        }
+        Err(error) => Some(format!("failed to load last-commit metadata: {error:#}")),
+    };
+    if !non_utf8.is_empty() {
+        let suffix = format!("excluded non-UTF-8 branch name(s): {}", non_utf8.join(", "));
+        metadata_warning = Some(
+            metadata_warning.map_or(suffix.clone(), |existing| format!("{existing}; {suffix}")),
+        );
     }
-    Ok(())
+
+    let repository = repository_from_worktrees(
+        cwd,
+        Discovery {
+            worktrees,
+            metadata_warning,
+        },
+    )?;
+    Ok(RepositoryBranches {
+        repository,
+        branches,
+    })
+}
+
+/// Discovers local branches without resolving commit timestamps.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot list local refs.
+pub fn discover_branches(cwd: &Path) -> Result<Vec<BranchRecord>> {
+    Ok(discover_branch_refs(cwd)?.0)
+}
+
+fn discover_branch_refs(cwd: &Path) -> Result<(Vec<BranchRecord>, Vec<String>)> {
+    let output = run_git(
+        cwd,
+        [
+            "for-each-ref",
+            "--format=%(objectname)%00%(refname:short)%00",
+            "refs/heads",
+        ],
+    )
+    .context("failed to list local branches")?;
+    ensure_success(&output, "git for-each-ref")?;
+    Ok(parse_branch_refs(&output.stdout))
+}
+
+/// Parses NUL-delimited `<objectname>\0<refname:short>\0` records.
+fn parse_branch_refs(bytes: &[u8]) -> (Vec<BranchRecord>, Vec<String>) {
+    let mut records = Vec::new();
+    let mut excluded = Vec::new();
+    let mut fields = bytes.split(|byte| *byte == 0);
+    loop {
+        let Some(raw_head) = fields.next() else {
+            break;
+        };
+        let head_field = raw_head.strip_prefix(b"\n").unwrap_or(raw_head);
+        if head_field.is_empty() {
+            break;
+        }
+        let Some(raw_branch) = fields.next() else {
+            break;
+        };
+        let branch_field = raw_branch.strip_prefix(b"\n").unwrap_or(raw_branch);
+        let head = String::from_utf8_lossy(head_field).into_owned();
+        match std::str::from_utf8(branch_field) {
+            Ok(branch) => records.push(BranchRecord {
+                branch: branch.to_owned(),
+                head,
+                last_commit_at: None,
+            }),
+            Err(_) => excluded.push(String::from_utf8_lossy(branch_field).into_owned()),
+        }
+    }
+    (records, excluded)
 }
 
 fn normalized_head(head: &str) -> Option<String> {
@@ -1163,8 +1304,36 @@ pub fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>> {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{parse_commit_batch, parse_committer_timestamp, parse_porcelain};
+    use super::{
+        parse_branch_refs, parse_commit_batch, parse_committer_timestamp, parse_porcelain,
+    };
     use crate::WorktreeKind;
+
+    #[test]
+    fn parses_nul_delimited_branch_refs() {
+        let input = b"aaaa\0feature/a\0\nbbbb\0main\0\n";
+
+        let (records, excluded) = parse_branch_refs(input);
+
+        assert!(excluded.is_empty());
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].branch, "feature/a");
+        assert_eq!(records[0].head, "aaaa");
+        assert_eq!(records[1].branch, "main");
+        assert_eq!(records[1].head, "bbbb");
+    }
+
+    #[test]
+    fn excludes_non_utf8_branch_names_without_dropping_them_silently() {
+        let mut input = b"aaaa\0".to_vec();
+        input.extend_from_slice(&[0xFF, 0xFE]);
+        input.extend_from_slice(b"\0\n");
+
+        let (records, excluded) = parse_branch_refs(&input);
+
+        assert!(records.is_empty());
+        assert_eq!(excluded.len(), 1);
+    }
 
     #[test]
     fn parses_optional_porcelain_attributes() {

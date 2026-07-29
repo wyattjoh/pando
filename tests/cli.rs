@@ -119,6 +119,133 @@ fn list_shows_current_repository_worktrees_from_nested_directory() {
 }
 
 #[test]
+fn list_branches_shows_attached_and_unattached_branches() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "untracked-branch"]);
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["list", "--branches"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Branches ("), "{stderr}");
+    assert!(stderr.contains("feature"), "{stderr}");
+    assert!(stderr.contains(repo.linked.to_str().unwrap()), "{stderr}");
+    assert!(stderr.contains("untracked-branch"), "{stderr}");
+    let untracked_line = stderr
+        .lines()
+        .find(|line| line.contains("untracked-branch"))
+        .unwrap();
+    assert!(
+        !untracked_line.contains(repo.temp.path().to_str().unwrap()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("3 branches"), "{stderr}");
+    assert!(stderr.contains("2 checked out"), "{stderr}");
+}
+
+#[test]
+fn list_branches_json_reports_null_path_for_unattached_branch() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "untracked-branch"]);
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["list", "--branches", "--output", "json"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = assert_json_pure(&output);
+    let branches = json["result"]["branches"].as_array().unwrap();
+    assert_eq!(branches.len(), 3);
+    let names: Vec<_> = branches
+        .iter()
+        .map(|b| b["branch"].as_str().unwrap())
+        .collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "expected for-each-ref (alphabetical) order");
+
+    let untracked = branches
+        .iter()
+        .find(|b| b["branch"] == "untracked-branch")
+        .unwrap();
+    assert_eq!(untracked["path"], serde_json::Value::Null);
+    assert_eq!(untracked["condition"], serde_json::Value::Null);
+    assert_eq!(untracked["current"], false);
+
+    let feature = branches.iter().find(|b| b["branch"] == "feature").unwrap();
+    assert_ne!(feature["path"], serde_json::Value::Null);
+    assert_ne!(feature["condition"], serde_json::Value::Null);
+
+    assert_eq!(json["result"]["summary"]["total"], 3);
+    assert_eq!(json["result"]["summary"]["checked_out"], 2);
+}
+
+#[test]
+fn list_branches_json_ignores_a_configured_default_sort() {
+    let repo = Repository::new();
+    // Named so that last-commit order (newest first) differs from for-each-ref
+    // (alphabetical) order: "z-newest" commits after "feature".
+    let z_newest = repo.temp.path().join("z-newest-worktree");
+    add_worktree(&repo.main, &z_newest, "z-newest");
+    fs::write(z_newest.join("touch.txt"), "touch\n").unwrap();
+    git(&z_newest, ["add", "touch.txt"]);
+    commit_with_dates(
+        &z_newest,
+        "z-newest touch",
+        "2032-01-01T00:00:00+0000",
+        "2032-01-01T00:00:00+0000",
+    );
+
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        "worktrees:\n  default-sort: last-commit-at\n",
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["list", "--branches", "--output", "json"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = assert_json_pure(&output);
+    let branches = json["result"]["branches"].as_array().unwrap();
+    let names: Vec<_> = branches
+        .iter()
+        .map(|b| b["branch"].as_str().unwrap())
+        .collect();
+    // for-each-ref order is alphabetical; last-commit order would put
+    // "z-newest" first. The configured personal sort must not apply.
+    assert_eq!(names, vec!["feature", "main", "z-newest"], "{names:?}");
+}
+
+#[test]
 fn list_uses_committer_timestamp_and_converts_it_to_local_time() {
     let repo = Repository::new();
     fs::write(repo.main.join("timestamp.txt"), "timestamp\n").unwrap();
@@ -727,10 +854,105 @@ fn switch_ctrl_s_preserves_selection_and_stdout_purity() {
     let stderr = console::strip_ansi_codes(&output.stderr);
     assert!(stderr.contains("BRANCH ↑"), "{stderr}");
     assert!(stderr.contains("Ctrl-S sort"), "{stderr}");
-    assert!(stderr.contains("branch A-Z"), "{stderr}");
-    assert!(stderr.contains("last commit newest-first"), "{stderr}");
-    assert!(stderr.contains("path A-Z"), "{stderr}");
-    assert!(stderr.matches("Git order").count() >= 2, "{stderr}");
+    assert!(stderr.contains("Ctrl-B branches"), "{stderr}");
+    assert!(stderr.contains("LAST COMMIT AT ↓"), "{stderr}");
+    assert!(stderr.contains("PATH ↑"), "{stderr}");
+    assert!(!stderr.contains("branch A-Z"), "{stderr}");
+    assert!(!stderr.contains("last commit newest-first"), "{stderr}");
+    assert!(!stderr.contains("path A-Z"), "{stderr}");
+    assert!(!stderr.contains("Git order"), "{stderr}");
+}
+
+#[test]
+fn switch_branches_flag_opens_directly_in_branch_view() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "untracked-branch"]);
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "--branches"])
+        .current_dir(&repo.main);
+    let output = run_pty_command(command, b"\x1b");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = console::strip_ansi_codes(&output.stderr);
+    assert!(stderr.contains("Choose a branch"), "{stderr}");
+    assert!(!stderr.contains("Choose a worktree"), "{stderr}");
+    assert!(stderr.contains("untracked-branch"), "{stderr}");
+}
+
+#[test]
+fn switch_branches_selecting_an_attached_branch_navigates_to_its_worktree() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "untracked-branch"]);
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "--branches"])
+        .current_dir(&repo.main);
+    let output = run_pty_command(command, b"feature\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", repo.linked.canonicalize().unwrap().display())
+    );
+    let stderr = console::strip_ansi_codes(&output.stderr);
+    assert!(stderr.contains("Choose a branch"), "{stderr}");
+}
+
+#[test]
+fn switch_ctrl_b_toggles_between_worktree_and_branch_view() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "untracked-branch"]);
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command.arg("switch").current_dir(&repo.main);
+    // Toggle to branch view, then back to worktree view, then cancel.
+    let output = run_pty_command(command, b"\x02\x02\x1b");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = console::strip_ansi_codes(&output.stderr);
+    assert!(stderr.contains("Choose a worktree"), "{stderr}");
+    assert!(stderr.contains("Choose a branch"), "{stderr}");
+    assert!(stderr.contains("untracked-branch"), "{stderr}");
+    let last_heading = stderr.rfind("Choose a").unwrap();
+    assert!(
+        stderr[last_heading..].starts_with("Choose a worktree"),
+        "expected the picker to end back in worktree view: {stderr}"
+    );
+}
+
+#[test]
+fn switch_branches_selecting_an_unattached_branch_creates_its_worktree() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "untracked-branch"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "--branches"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = run_pty_command(command, b"untracked\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    let destination = root.join("untracked-branch");
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", destination.canonicalize().unwrap().display())
+    );
+    assert!(destination.exists(), "{}", output.stderr);
 }
 
 /// Guards the PTY flow-control setup in `start_pty_command`.
@@ -812,7 +1034,12 @@ fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
         .iter()
         .filter(|worktree| worktree.navigable())
         .collect();
-    let labels = worktrees::render::menu_labels(&choices);
+    let rows: Vec<_> = choices
+        .iter()
+        .map(|worktree| worktrees::Row::from_worktree(worktree))
+        .collect();
+    let row_refs: Vec<_> = rows.iter().collect();
+    let labels = worktrees::render::menu_labels(&row_refs);
     let current = choices
         .iter()
         .position(|worktree| worktree.current)
