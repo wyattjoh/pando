@@ -20,7 +20,7 @@ use crate::{
     config::{EffectiveConfig, GenerationSource},
     git::{self, Repository},
     protocol::{self, Diagnostic, Effect, ErrorBody, NextStep, Response},
-    trust, ui,
+    render, trust, ui,
 };
 
 const SCHEMA_VERSION: u32 = 1;
@@ -672,19 +672,8 @@ fn preview_staged(cwd: &Path) -> Result<()> {
     ui::info(format!(
         "{}\n{}",
         ui::heading_style().apply_to("Staged changes:"),
-        colorize_diffstat(&stat)
+        render::git_output(&stat)
     ))
-}
-
-fn colorize_diffstat(output: &str) -> String {
-    trim_git_margin(output)
-        .lines()
-        .map(|line| match line.split_once(" | ") {
-            Some((path, stat)) => format!("{} | {stat}", ui::worktree_data_style().apply_to(path)),
-            None => ui::muted_style().apply_to(line).to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn validate_template(template: &str) -> Result<()> {
@@ -720,14 +709,6 @@ fn render_commit_message(message: &str) -> String {
             .to_string(),
     }
 }
-fn trim_git_margin(output: &str) -> String {
-    output
-        .lines()
-        .map(|line| line.strip_prefix(' ').unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn context_json(repository: &Repository) -> Value {
     let path = &repository.current().path;
     let status = status_bytes(path).unwrap_or_default();

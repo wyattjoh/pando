@@ -48,6 +48,23 @@ pub fn menu_header(rows: &[&Row], sort: SortMode) -> String {
     )
 }
 
+/// Styles captured Git output for presentation inside the terminal UI rail.
+///
+/// Diffstat rows keep their path highlighted; every other line stays muted so
+/// Git's own prose never competes with the command's own reporting.
+#[must_use]
+pub fn git_output(output: &str) -> String {
+    output
+        .lines()
+        .map(|line| line.strip_prefix(' ').unwrap_or(line))
+        .map(|line| match line.split_once(" | ") {
+            Some((path, stat)) => format!("{} | {stat}", ui::worktree_data_style().apply_to(path)),
+            None => ui::muted_style().apply_to(line).to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn branch_header(sort: SortMode) -> &'static str {
     if sort == SortMode::Branch {
         "BRANCH ↑"

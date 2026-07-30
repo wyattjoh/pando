@@ -16,6 +16,7 @@ use crate::{
     git::{self, Repository},
     hash,
     protocol::BytePath,
+    render,
     setup::{self, HookOutcome},
     smart::approve_hooks,
     trust, ui,
@@ -446,7 +447,13 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
     }
 
     if rebase_active {
-        git::rebase_continue(&repository.current().path)?;
+        report(&ui::run_timed(
+            true,
+            "Continuing rebase...",
+            "Continued rebase",
+            "Failed to continue the rebase",
+            |animated| git::rebase_continue(&repository.current().path, !animated),
+        )?)?;
     }
     if !git::is_ancestor(&repository.current().path, &target, &source)? {
         if no_rebase {
@@ -454,7 +461,13 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
                 "the topic is not fast-forwardable onto {target:?}; rerun without --no-rebase to rebase it"
             );
         }
-        git::rebase_onto(&repository.current().path, &target)?;
+        report(&ui::run_timed(
+            true,
+            &format!("Rebasing onto {target}..."),
+            &format!("Rebased onto {target}"),
+            &format!("Failed to rebase onto {target}"),
+            |animated| git::rebase_onto(&repository.current().path, &target, !animated),
+        )?)?;
     }
     let refreshed = git::head_commit(&repository.current().path)?;
     let target_commit = git::head_commit(primary)?;
@@ -484,7 +497,13 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
     if !git::is_ancestor(&repository.current().path, &target, &refreshed)? {
         bail!("the target advanced during validation; rerun merge to revalidate the new candidate");
     }
-    git::merge_ff_only(primary, &source)?;
+    report(&ui::run_timed(
+        true,
+        &format!("Merging into {target}..."),
+        &format!("Merged into {target}"),
+        &format!("Failed to merge into {target}"),
+        |animated| git::merge_ff_only(primary, &source, !animated),
+    )?)?;
     if state.no_remove {
         remove_journal(&repository.common_dir, &state.topic_identity)?;
         return ui::finish(merge_summary(&state, MergeWorktreeOutcome::Retained));
@@ -492,6 +511,17 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
     state.cleanup_pending = true;
     write_journal(&repository.common_dir, &state)?;
     cleanup_merge(&repository, &state)
+}
+
+/// Renders a captured Git transcript inside the terminal UI rail.
+///
+/// Nothing is written when the operation streamed its own output to stderr or
+/// had nothing to say, so a plain-stderr run never doubles up on Git's output.
+fn report(transcript: &str) -> Result<()> {
+    if transcript.trim().is_empty() {
+        return Ok(());
+    }
+    ui::step(render::git_output(transcript.trim_end()))
 }
 
 fn cleanup_merge(repository: &Repository, state: &MergeJournal) -> Result<()> {
