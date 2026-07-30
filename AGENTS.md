@@ -38,7 +38,7 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 | `trust.rs` | Post-create hook approval: command hashing, XDG `trust.json`, atomic writes |
 | `setup.rs` | Post-create hook execution and the incomplete-setup journal |
 | `install.rs` | Managed zsh integration; marker-block rewriting of `.zshrc` |
-| `render.rs` | Column alignment shared by `list` output and the picker's menu labels |
+| `render.rs` | Column alignment shared by `list` output and the picker's menu labels, plus the shared styling for captured Git output |
 | `hash.rs` | Hex encoding shared by `trust.rs` and `setup.rs` |
 
 ### Load-bearing invariants

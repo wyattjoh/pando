@@ -1410,6 +1410,124 @@ fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
 }
 
 #[test]
+fn merge_renders_git_output_inside_the_terminal_ui_rail() {
+    let repo = Repository::new();
+    fs::write(repo.main.join("main.txt"), "main\n").unwrap();
+    git(&repo.main, ["add", "main.txt"]);
+    git(&repo.main, ["commit", "-m", "main advances"]);
+    fs::write(repo.linked.join("feature.txt"), "feature\n").unwrap();
+    git(&repo.linked, ["add", "feature.txt"]);
+    git(&repo.linked, ["commit", "-m", "feature change"]);
+
+    let mut merge = Command::cargo_bin("worktrees").unwrap();
+    merge
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("CLICOLOR_FORCE", "1");
+    let merged = run_pty_command(merge, b"");
+
+    assert!(merged.status.success(), "{}", merged.stderr);
+    assert!(merged.stdout.is_empty(), "{}", merged.stdout);
+    for progress in [
+        "Rebasing onto main...",
+        "Rebased onto main",
+        "Merging into main...",
+        "Merged into main",
+    ] {
+        assert!(
+            merged
+                .stderr
+                .contains(&forced_style(worktrees::ui::heading_style(), progress)),
+            "missing {progress:?} in {}",
+            merged.stderr
+        );
+    }
+    // Git's own reporting is rendered as rail steps rather than streamed raw.
+    let plain = console::strip_ansi_codes(&merged.stderr);
+    for line in [
+        "│  Fast-forward",
+        "│  feature.txt | 1 +",
+        "│  1 file changed, 1 insertion(+)",
+    ] {
+        assert!(plain.contains(line), "missing {line:?} in {plain}");
+    }
+    assert!(
+        merged.stderr.contains(&forced_style(
+            worktrees::ui::worktree_data_style(),
+            "feature.txt"
+        )),
+        "{}",
+        merged.stderr
+    );
+    // Git redraws its counters with carriage returns, which a captured pipe
+    // preserves; only the final revision of each line may survive.
+    assert!(
+        plain.contains("Successfully rebased and updated refs/heads/feature."),
+        "{plain}"
+    );
+    assert!(!plain.contains("Rebasing (1/1)"), "{plain}");
+}
+
+#[test]
+fn merge_reports_a_rebase_conflict_and_resumes_without_an_editor() {
+    let repo = Repository::new();
+    fs::write(repo.main.join("README.md"), "main version\n").unwrap();
+    git(&repo.main, ["add", "README.md"]);
+    git(&repo.main, ["commit", "-m", "main edits readme"]);
+    fs::write(repo.linked.join("README.md"), "feature version\n").unwrap();
+    git(&repo.linked, ["add", "README.md"]);
+    git(&repo.linked, ["commit", "-m", "feature edits readme"]);
+
+    let mut conflicting = Command::cargo_bin("worktrees").unwrap();
+    conflicting
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("CLICOLOR_FORCE", "1");
+    let conflicted = run_pty_command(conflicting, b"");
+
+    assert!(!conflicted.status.success(), "{}", conflicted.stderr);
+    assert!(conflicted.stdout.is_empty(), "{}", conflicted.stdout);
+    let plain = console::strip_ansi_codes(&conflicted.stderr);
+    for line in [
+        "│  CONFLICT (content): Merge conflict in README.md",
+        "│  hint: Resolve all conflicts manually, mark them as resolved with",
+    ] {
+        assert!(plain.contains(line), "missing {line:?} in {plain}");
+    }
+
+    fs::write(repo.linked.join("README.md"), "resolved\n").unwrap();
+    git(&repo.linked, ["add", "README.md"]);
+    // A captured continuation has no terminal for an editor. `GIT_EDITOR=false`
+    // stands in for an inherited interactive editor: the run must neutralize it
+    // and reuse the recorded message rather than hand it a pipe.
+    let mut resuming = Command::cargo_bin("worktrees").unwrap();
+    resuming
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("CLICOLOR_FORCE", "1")
+        .env("GIT_EDITOR", "false");
+    let resumed = run_pty_command(resuming, b"");
+
+    assert!(resumed.status.success(), "{}", resumed.stderr);
+    assert!(
+        resumed.stderr.contains(&forced_style(
+            worktrees::ui::heading_style(),
+            "Continued rebase"
+        )),
+        "{}",
+        resumed.stderr
+    );
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s"]),
+        "feature edits readme"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.main.join("README.md")).unwrap(),
+        "resolved\n"
+    );
+}
+
+#[test]
 fn merge_falls_back_to_main_without_target_configuration() {
     let repo = Repository::new();
     fs::write(repo.linked.join("feature.txt"), "feature\n").unwrap();

@@ -70,6 +70,12 @@ rebase/cleanup policy under Git's common state directory. A later invocation
 resumes the same operation with the pinned target/policy, including continuing
 through rebase conflicts or retrying cleanup after a completed integration.
 
+Human mode runs the rebase, rebase continuation, and fast-forward merge under
+timed progress indicators and renders Git's own output as terminal UI steps on
+stderr rather than streaming it raw. A failure folds the same Git output into
+the reported error, so rebase conflicts stay readable. The continuation
+neutralizes `GIT_EDITOR`, keeping the commit message Git already recorded.
+
 After the default successful cleanup, stdout contains only the primary
 worktree's byte-preserving path plus a trailing newline, so the zsh wrapper
 can `cd` there. With `--no-remove`, the topic is retained and no destination is

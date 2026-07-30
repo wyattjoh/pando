@@ -746,44 +746,93 @@ pub fn head_commit(cwd: &Path) -> Result<String> {
         .context("failed to resolve the invoking worktree's HEAD")
 }
 
-/// Runs a fast-forward-only merge, preserving Git output on the caller's stderr.
+/// Runs a fast-forward-only merge, returning Git's captured output.
 ///
 /// # Errors
 ///
 /// Returns an error when Git cannot execute the merge.
-pub fn merge_ff_only(cwd: &Path, branch: &str) -> Result<()> {
-    run_git_inherit(cwd, ["merge", "--ff-only", branch], "fast-forward merge")
+pub fn merge_ff_only(cwd: &Path, branch: &str, inherit: bool) -> Result<String> {
+    run_lifecycle_git(
+        cwd,
+        &["merge", "--ff-only", branch],
+        "fast-forward merge",
+        inherit,
+    )
 }
 
-/// Rebases the current branch onto `target`, preserving Git output on stderr.
+/// Rebases the current branch onto `target`, returning Git's captured output.
 ///
 /// # Errors
 ///
 /// Returns an error when Git cannot execute the rebase.
-pub fn rebase_onto(cwd: &Path, target: &str) -> Result<()> {
-    run_git_inherit(cwd, ["rebase", target], "rebase")
+pub fn rebase_onto(cwd: &Path, target: &str, inherit: bool) -> Result<String> {
+    run_lifecycle_git(cwd, &["rebase", target], "rebase", inherit)
 }
 
-/// Continues an already active rebase, preserving Git output on stderr.
+/// Continues an already active rebase, returning Git's captured output.
 ///
 /// # Errors
 ///
 /// Returns an error when Git cannot continue the rebase.
-pub fn rebase_continue(cwd: &Path) -> Result<()> {
-    run_git_inherit(cwd, ["rebase", "--continue"], "rebase continuation")
+pub fn rebase_continue(cwd: &Path, inherit: bool) -> Result<String> {
+    run_lifecycle_git(
+        cwd,
+        &["rebase", "--continue"],
+        "rebase continuation",
+        inherit,
+    )
 }
 
-/// Runs a lifecycle Git operation with stdin closed and both streams captured.
+/// Runs a lifecycle Git operation, capturing its output unless `inherit` is set.
 ///
-/// # Errors
-/// Returns an error only when Git cannot be started.
-pub fn lifecycle_git_captured(cwd: &Path, args: &[&str]) -> Result<Output> {
-    Command::new("git")
+/// Captured output is returned on success and folded into the error on failure,
+/// so a caller rendering progress owns every line Git produced. A captured run
+/// has no terminal to hand an editor, so `GIT_EDITOR` is neutralized — it
+/// outranks `core.editor`, and an inherited `EDITOR=nvim` would otherwise leave
+/// `rebase --continue` drawing a full-screen editor into a pipe. Continuation
+/// therefore reuses the commit message Git already recorded.
+fn run_lifecycle_git(cwd: &Path, args: &[&str], operation: &str, inherit: bool) -> Result<String> {
+    if inherit {
+        return run_git_inherit(cwd, args, operation).map(|()| String::new());
+    }
+    let output = Command::new("git")
         .args(args)
         .current_dir(cwd)
+        .env("GIT_EDITOR", "true")
         .stdin(Stdio::null())
         .output()
-        .context("failed to start lifecycle Git operation")
+        .with_context(|| format!("failed to start git {operation}"))?;
+    let transcript = combined_output(&output);
+    if output.status.success() {
+        return Ok(transcript);
+    }
+    if transcript.is_empty() {
+        bail!("git {operation} failed with {}", output.status);
+    }
+    bail!(
+        "git {operation} failed with {}\n{transcript}",
+        output.status
+    );
+}
+
+/// Joins a captured command's streams in the order Git presents them.
+///
+/// Git redraws counters such as `Rebasing (1/3)` with carriage returns, which a
+/// pipe preserves verbatim. Only each line's final revision survives, so the
+/// transcript reads the way it would have on a terminal.
+fn combined_output(output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    [stdout.trim_end(), stderr.trim_end()]
+        .into_iter()
+        .filter(|stream| !stream.is_empty())
+        .flat_map(|stream| stream.lines())
+        .map(|line| {
+            let line = line.trim_end_matches('\r');
+            line.rsplit('\r').next().unwrap_or(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Removes a registered worktree without deleting its branch.
@@ -1121,7 +1170,7 @@ fn open_stderr() -> Result<fs::File> {
         .map_err(Into::into)
 }
 
-fn run_git_inherit<const N: usize>(cwd: &Path, args: [&str; N], operation: &str) -> Result<()> {
+fn run_git_inherit(cwd: &Path, args: &[&str], operation: &str) -> Result<()> {
     let status = Command::new("git")
         .args(args)
         .current_dir(cwd)
