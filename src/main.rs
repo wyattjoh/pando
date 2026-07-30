@@ -278,9 +278,9 @@ fn run(cli: Cli) -> Result<()> {
             }),
         ),
         Commands::Get { property } => {
-            let property = property.context("get requires a property")?;
-            smart::get(property)?;
-            ui::finish(ui::muted_style().apply_to(format!("{property:?} printed.")))
+            // `get` is a query: the requested value on stdout is the whole
+            // output, so no outro closes a sequence it never opened.
+            smart::get(property.context("get requires a property")?)
         }
         Commands::Commit {
             message,

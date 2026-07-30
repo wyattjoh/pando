@@ -2134,13 +2134,9 @@ fn machine_readable_commands_keep_themed_feedback_off_stdout() {
     assert!(queried.status.success(), "{}", queried.stderr);
     assert_eq!(queried.stdout, "main\n");
     assert!(!queried.stdout.contains('\u{1b}'));
-    assert!(
-        queried.stderr.contains(&forced_style(
-            worktrees::ui::muted_style(),
-            "Branch printed."
-        )),
-        "{}",
-        queried.stderr
+    assert_eq!(
+        queried.stderr, "",
+        "get answers with the requested value alone, so nothing reaches stderr"
     );
 
     let xdg = tempfile::tempdir().unwrap();
@@ -2199,8 +2195,10 @@ fn get_prints_exact_current_context_values_and_stable_ports() {
             format!("{expected}\n").as_bytes(),
             "{property}"
         );
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.contains("printed."), "{property}: {stderr}");
+        assert_eq!(
+            output.stderr, b"",
+            "{property}: get writes only the requested value"
+        );
     }
 }
 
