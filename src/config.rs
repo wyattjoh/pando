@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::{
-    SortMode,
+    BaseMode, SortMode,
     git::{self, Repository},
 };
 
@@ -62,6 +62,8 @@ struct LocalWorktreesConfig {
     root: Option<PathBuf>,
     #[serde(default, rename = "default-sort")]
     default_sort: Option<SortMode>,
+    #[serde(default)]
+    base: Option<BaseMode>,
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,12 +74,16 @@ struct WorktreesConfig {
     target_branch: Option<String>,
     #[serde(default, rename = "default-sort")]
     default_sort: Option<SortMode>,
+    #[serde(default)]
+    base: Option<BaseMode>,
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TargetConfig {
     #[serde(default, rename = "target-branch")]
     target_branch: Option<String>,
+    #[serde(default)]
+    base: Option<BaseMode>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -186,6 +192,7 @@ pub struct EffectiveConfig {
     pub root: Option<PathBuf>,
     pub target_branch: Option<String>,
     pub default_sort: SortMode,
+    pub base: BaseMode,
     pub post_create: Vec<HookStep>,
     pub pre_merge: Vec<HookStep>,
     pub pre_remove: Vec<HookStep>,
@@ -335,17 +342,28 @@ impl EffectiveConfig {
         }
         let target_branch = shared
             .worktrees
-            .and_then(|section| section.target_branch)
+            .as_ref()
+            .and_then(|section| section.target_branch.clone())
             .or_else(|| {
                 global
                     .worktrees
                     .as_ref()
                     .and_then(|section| section.target_branch.clone())
             });
+        // Unlike placement, the base is legal in every layer: local wins, then
+        // the committed project convention, then the personal global default.
+        let base = local
+            .worktrees
+            .as_ref()
+            .and_then(|section| section.base)
+            .or_else(|| shared.worktrees.as_ref().and_then(|section| section.base))
+            .or_else(|| global.worktrees.as_ref().and_then(|section| section.base))
+            .unwrap_or_default();
         Ok(Self {
             root,
             target_branch,
             default_sort,
+            base,
             post_create: combine(&shared_hooks, &local_hooks, HookPhase::PostCreate),
             pre_merge: combine(&shared_hooks, &local_hooks, HookPhase::PreMerge),
             pre_remove: combine(&shared_hooks, &local_hooks, HookPhase::PreRemove),

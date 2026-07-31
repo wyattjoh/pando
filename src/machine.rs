@@ -1,5 +1,5 @@
 use crate::{
-    Condition, Row, Worktree, WorktreeKind,
+    BaseMode, Condition, Row, Worktree, WorktreeKind,
     config::{EffectiveConfig, HookPhase},
     git, install,
     protocol::{self, BytePath, Effect, EmptyInput},
@@ -18,6 +18,9 @@ struct SwitchInput {
     branch: Option<String>,
     #[serde(default)]
     remote: Option<String>,
+    /// Refresh the resolved base ref before creating a genuinely new branch.
+    #[serde(default)]
+    fetch: bool,
     #[serde(default)]
     dry_run: bool,
 }
@@ -119,9 +122,23 @@ fn switch_request(
             SwitchInput {
                 branch,
                 remote: None,
+                fetch: false,
                 dry_run: false,
             },
         ))
+    }
+}
+
+/// Describes the single base-ref refresh `fetch` performs, attempted or planned.
+fn fetch_effect(base: &git::NewBranchBase, attempted: bool) -> Effect {
+    Effect {
+        action: "fetch_base_ref".into(),
+        attempted,
+        completed: attempted,
+        details: base
+            .base_ref
+            .as_ref()
+            .map(|base_ref| json!({"ref": base_ref.reference()})),
     }
 }
 
@@ -147,8 +164,13 @@ impl Intent {
 ///
 /// # Errors
 /// Returns an error only when response output fails or an underlying Git operation cannot be represented locally.
-pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Result<()> {
-    resolve(Intent::Switch, request_mode, branch, dry_run)
+pub fn switch(
+    request_mode: bool,
+    branch: Option<String>,
+    fetch: bool,
+    dry_run: bool,
+) -> Result<()> {
+    resolve(Intent::Switch, request_mode, branch, fetch, dry_run)
 }
 
 /// Runs the non-interactive create interface.
@@ -158,8 +180,13 @@ pub fn switch(request_mode: bool, branch: Option<String>, dry_run: bool) -> Resu
 ///
 /// # Errors
 /// Returns an error only when response output fails or an underlying Git operation cannot be represented locally.
-pub fn create(request_mode: bool, branch: Option<String>, dry_run: bool) -> Result<()> {
-    resolve(Intent::Create, request_mode, branch, dry_run)
+pub fn create(
+    request_mode: bool,
+    branch: Option<String>,
+    fetch: bool,
+    dry_run: bool,
+) -> Result<()> {
+    resolve(Intent::Create, request_mode, branch, fetch, dry_run)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -167,10 +194,11 @@ fn resolve(
     intent: Intent,
     request_mode: bool,
     branch: Option<String>,
+    fetch: bool,
     dry_run: bool,
 ) -> Result<()> {
     let command = intent.id();
-    if request_mode && dry_run {
+    if request_mode && (dry_run || fetch) {
         return emit_err(
             command,
             None,
@@ -184,6 +212,7 @@ fn resolve(
     };
     if !request_mode {
         input.dry_run = dry_run;
+        input.fetch = fetch;
     }
     let repo = match if input.branch.is_none() && intent == Intent::Switch {
         navigation_repository()
@@ -259,6 +288,14 @@ fn resolve(
                 id,
                 &format!("{command}.irrelevant_remote"),
                 "remote is only valid when resolving a remote-tracking branch",
+            );
+        }
+        if let Err(error) = git::reject_fetch(input.fetch, git::FETCH_REGISTERED_WORKTREE) {
+            return emit_err(
+                command,
+                id,
+                &format!("{command}.fetch_not_applicable"),
+                format!("{error:#}"),
             );
         }
         if !worktree.navigable() {
@@ -353,7 +390,22 @@ fn resolve(
     } else {
         git::remote_matches(&repo.current().path, &branch)?
     };
-    let mut new_head = None;
+    if let Err(error) = git::reject_fetch(
+        input.fetch && (local || !remotes.is_empty()),
+        if local {
+            git::FETCH_LOCAL_BRANCH
+        } else {
+            git::FETCH_REMOTE_BRANCH
+        },
+    ) {
+        return emit_err(
+            command,
+            id,
+            &format!("{command}.fetch_not_applicable"),
+            format!("{error:#}"),
+        );
+    }
+    let mut new_base: Option<git::NewBranchBase> = None;
     let selected_remote = if local {
         if input.remote.is_some() {
             return emit_err(
@@ -373,33 +425,18 @@ fn resolve(
                 "remote does not match a fetched remote-tracking branch",
             );
         }
-        let head = git::head_commit(&repo.current().path)?;
-        if intent == Intent::Switch {
-            if input.dry_run {
-                return emit(
-                    protocol::success(
-                        "switch",
-                        id,
-                        json!({"outcome":"creation_plan","kind":"new","branch":branch,"destination":BytePath::path(&destination),"start_point":head,"approval_required":true}),
-                        json!({}),
-                        vec![
-                            Effect {
-                                action: "create_branch".into(),
-                                attempted: false,
-                                completed: false,
-                                details: None,
-                            },
-                            Effect {
-                                action: "create_worktree".into(),
-                                attempted: false,
-                                completed: false,
-                                details: None,
-                            },
-                        ],
-                    ),
-                    false,
-                );
-            }
+        if let Err(error) = git::reject_fetch(
+            input.fetch && config.base == BaseMode::Head,
+            git::FETCH_HEAD_BASE,
+        ) {
+            return emit_err(
+                command,
+                id,
+                &format!("{command}.fetch_not_applicable"),
+                format!("{error:#}"),
+            );
+        }
+        if intent == Intent::Switch && !input.dry_run {
             return emit_err(
                 "switch",
                 id,
@@ -407,7 +444,50 @@ fn resolve(
                 "creating a genuinely new branch requires a manual human invocation",
             );
         }
-        new_head = Some(head);
+        // A dry run resolves the same base the real run would, but never fetches.
+        let base = match git::plan_new_branch_base(
+            &repo.current().path,
+            config.base,
+            config.target_branch.as_deref(),
+            input.fetch && !input.dry_run,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                return emit_err(
+                    command,
+                    id,
+                    &format!("{command}.base_unavailable"),
+                    format!("{error:#}"),
+                );
+            }
+        };
+        if intent == Intent::Switch {
+            let mut effects = Vec::new();
+            if input.fetch {
+                effects.push(fetch_effect(&base, false));
+            }
+            effects.push(Effect {
+                action: "create_branch".into(),
+                attempted: false,
+                completed: false,
+                details: None,
+            });
+            effects.push(Effect {
+                action: "create_worktree".into(),
+                attempted: false,
+                completed: false,
+                details: None,
+            });
+            let mut result = json!({"outcome":"creation_plan","kind":"new","branch":branch,"destination":BytePath::path(&destination),"start_point":base.commit,"approval_required":true});
+            if let Some(base_ref) = &base.base_ref {
+                result["base_ref"] = json!(base_ref.reference());
+            }
+            return emit(
+                protocol::success("switch", id, result, json!({}), effects),
+                false,
+            );
+        }
+        new_base = Some(base);
         None
     } else {
         match input.remote {
@@ -453,12 +533,19 @@ fn resolve(
         );
     }
     let mut effects = Vec::new();
-    if new_head.is_some() {
+    if let Some(base) = &new_base {
+        if input.fetch {
+            effects.push(fetch_effect(base, !input.dry_run));
+        }
+        let mut details = json!({"branch":branch,"start_point":base.commit});
+        if let Some(base_ref) = &base.base_ref {
+            details["base_ref"] = json!(base_ref.reference());
+        }
         effects.push(Effect {
             action: "create_branch".into(),
             attempted: !input.dry_run,
             completed: !input.dry_run,
-            details: Some(json!({"branch":branch,"start_point":new_head})),
+            details: Some(details),
         });
     }
     effects.push(Effect {
@@ -481,8 +568,8 @@ fn resolve(
                 &destination,
             )?)
         };
-        let creation = if let Some(head) = new_head.as_deref() {
-            git::add_new_worktree(primary, &destination, &branch, head)
+        let creation = if let Some(base) = new_base.as_ref() {
+            git::add_new_worktree(primary, &destination, &branch, &base.commit)
         } else if local {
             git::add_existing_worktree(primary, &destination, &branch)
         } else {
@@ -534,9 +621,12 @@ fn resolve(
         }
     }
     let mut result = json!({"outcome":if input.dry_run{"creation_plan"}else{"created"},"branch":branch,"destination":BytePath::path(&destination),"remote":selected_remote});
-    if let Some(head) = new_head {
+    if let Some(base) = new_base {
         result["kind"] = json!("new");
-        result["start_point"] = json!(head);
+        result["start_point"] = json!(base.commit);
+        if let Some(base_ref) = &base.base_ref {
+            result["base_ref"] = json!(base_ref.reference());
+        }
     }
     let mut response = protocol::success(command, id, result, json!({}), effects);
     for (stdout, stderr) in diagnostics {
@@ -1530,7 +1620,7 @@ pub fn help(command: &str) -> Value {
         "list" | "trust.status" | "trust.commit_status" => json!(schemars::schema_for!(
             protocol::OptionalInputRequest<EmptyInput>
         )),
-        "switch" => json!(schemars::schema_for!(protocol::Request<SwitchInput>)),
+        "switch" | "create" => json!(schemars::schema_for!(protocol::Request<SwitchInput>)),
         "get" => json!(schemars::schema_for!(protocol::Request<GetInput>)),
         "remove" => json!(schemars::schema_for!(protocol::Request<RemoveInput>)),
         "merge" => json!(schemars::schema_for!(protocol::Request<MergeInput>)),
@@ -1570,10 +1660,31 @@ pub fn help(command: &str) -> Value {
                 "switch.destination_unavailable",
                 "switch.destination_collision",
                 "switch.remote_selection_required",
+                "switch.fetch_not_applicable",
+                "switch.base_unavailable",
                 "switch.approval_required",
                 "trust.approval_required",
             ],
-            &["create_branch", "create_worktree"],
+            &["fetch_base_ref", "create_branch", "create_worktree"],
+        ),
+        "create" => (
+            &[
+                "json.invalid_request",
+                "json.unsupported_schema_version",
+                "repository.invalid",
+                "create.branch_required",
+                "create.invalid_branch",
+                "create.branch_registered",
+                "create.destination_unavailable",
+                "create.destination_collision",
+                "create.remote_selection_required",
+                "create.fetch_not_applicable",
+                "create.base_unavailable",
+                "create.creation_failed",
+                "create.setup_failed",
+                "trust.approval_required",
+            ],
+            &["fetch_base_ref", "create_branch", "create_worktree"],
         ),
         "remove" => (
             &[

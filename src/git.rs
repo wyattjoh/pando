@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, FixedOffset};
 
-use crate::{Condition, Worktree, WorktreeKind};
+use crate::{BaseMode, Condition, Worktree, WorktreeKind};
 
 #[derive(Debug)]
 pub struct Discovery {
@@ -598,15 +598,7 @@ pub fn resolve_target_branch(cwd: &Path, configured: Option<&str>) -> Result<Str
     if let Some(branch) = configured {
         return Ok(branch.to_owned());
     }
-    let origin_head = git_stdout(cwd, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
-        .ok()
-        .and_then(|value| {
-            value
-                .trim()
-                .strip_prefix("refs/remotes/origin/")
-                .map(str::to_owned)
-        });
-    let origin_head = match origin_head {
+    let origin_head = match origin_head_branch(cwd) {
         Some(branch) if local_branch_exists(cwd, &branch)? => Some(branch),
         _ => None,
     };
@@ -660,6 +652,163 @@ mod target_branch_tests {
             Some("master")
         );
     }
+}
+
+/// The remote-tracking ref a `fresh` new branch is cut from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BaseRef {
+    /// The remote that owns the ref, always `origin`.
+    pub remote: String,
+    /// The target branch name on that remote.
+    pub branch: String,
+}
+
+impl BaseRef {
+    /// Returns the short remote-tracking ref name, for example `origin/main`.
+    #[must_use]
+    pub fn reference(&self) -> String {
+        format!("{}/{}", self.remote, self.branch)
+    }
+}
+
+/// Resolves the remote-tracking ref that `worktrees.base: fresh` branches from.
+///
+/// Reads only local refs: the configured target branch when set, otherwise the
+/// branch named by the remote's `origin/HEAD` symbolic ref.
+///
+/// # Errors
+/// Returns an error when neither source names a branch.
+pub fn resolve_base_ref(cwd: &Path, configured_target: Option<&str>) -> Result<BaseRef> {
+    let branch = match configured_target {
+        Some(branch) => branch.to_owned(),
+        None => origin_head_branch(cwd).context(
+            "worktrees.base is 'fresh' but no base branch could be resolved: set worktrees.target-branch, or record the remote's default branch with 'git remote set-head origin -a'",
+        )?,
+    };
+    Ok(BaseRef {
+        remote: "origin".to_owned(),
+        branch,
+    })
+}
+
+fn origin_head_branch(cwd: &Path) -> Option<String> {
+    git_stdout(cwd, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
+        .ok()
+        .and_then(|value| {
+            value
+                .trim()
+                .strip_prefix("refs/remotes/origin/")
+                .map(str::to_owned)
+        })
+        .filter(|branch| !branch.is_empty())
+}
+
+/// Why a requested base-ref fetch cannot apply.
+///
+/// A fetch is only meaningful for a genuinely new branch cut from a `fresh`
+/// base, so both the human and JSON adapters reject it from this one list
+/// rather than each inventing its own wording.
+pub const FETCH_REGISTERED_WORKTREE: &str = "the branch already has a registered worktree";
+pub const FETCH_LOCAL_BRANCH: &str = "the branch already exists locally";
+pub const FETCH_REMOTE_BRANCH: &str = "the branch already has a remote-tracking ref";
+pub const FETCH_HEAD_BASE: &str =
+    "the effective worktrees.base is 'head', which branches from the invoking worktree";
+
+/// Refuses a fetch that would silently do nothing.
+///
+/// # Errors
+/// Returns an error naming `because` when `inapplicable` holds.
+pub fn reject_fetch(inapplicable: bool, because: &str) -> Result<()> {
+    if inapplicable {
+        bail!(
+            "a base-ref fetch only applies to a genuinely new branch on a 'fresh' base, but {because}"
+        );
+    }
+    Ok(())
+}
+
+/// The start point a genuinely new branch will be cut from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewBranchBase {
+    /// The commit the branch starts at.
+    pub commit: String,
+    /// The remote-tracking ref the commit came from, absent in `head` mode.
+    pub base_ref: Option<BaseRef>,
+    /// Git's captured output from an explicit `--fetch`, when one ran.
+    pub fetch_output: Option<String>,
+}
+
+/// Plans the start point for a genuinely new branch under the effective base mode.
+///
+/// This is the single place either interface resolves a start point, so human
+/// `switch`/`create`, their dry runs, and the JSON variants cannot diverge.
+/// `fetch` refreshes exactly the resolved base ref first; it is the caller's job
+/// to reject it before reaching here when the mode is `head` or the branch is
+/// not genuinely new.
+///
+/// # Errors
+/// Returns an error when `HEAD`, the base ref, or its commit cannot be resolved.
+pub fn plan_new_branch_base(
+    cwd: &Path,
+    mode: BaseMode,
+    configured_target: Option<&str>,
+    fetch: bool,
+) -> Result<NewBranchBase> {
+    if mode == BaseMode::Head {
+        return Ok(NewBranchBase {
+            commit: head_commit(cwd)?,
+            base_ref: None,
+            fetch_output: None,
+        });
+    }
+    let base_ref = resolve_base_ref(cwd, configured_target)?;
+    let fetch_output = fetch.then(|| fetch_base_ref(cwd, &base_ref)).transpose()?;
+    Ok(NewBranchBase {
+        commit: base_ref_commit(cwd, &base_ref)?,
+        base_ref: Some(base_ref),
+        fetch_output,
+    })
+}
+
+/// Resolves the commit a fresh base ref points at, without fetching.
+///
+/// # Errors
+/// Returns an error naming the fix when the ref has never been fetched.
+pub fn base_ref_commit(cwd: &Path, base: &BaseRef) -> Result<String> {
+    let reference = base.reference();
+    git_stdout(
+        cwd,
+        [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{reference}^{{commit}}"),
+        ],
+    )
+    .with_context(|| {
+        format!(
+            "the base ref {reference:?} has not been fetched into this clone; run 'git fetch {} {}' or pass --fetch",
+            base.remote, base.branch
+        )
+    })
+}
+
+/// Fetches exactly the one base ref, leaving every other remote-tracking ref alone.
+///
+/// # Errors
+/// Returns an error, including Git's captured output, when the fetch fails.
+pub fn fetch_base_ref(cwd: &Path, base: &BaseRef) -> Result<String> {
+    let refspec = format!(
+        "+refs/heads/{branch}:refs/remotes/{remote}/{branch}",
+        branch = base.branch,
+        remote = base.remote,
+    );
+    run_lifecycle_git(
+        cwd,
+        &["fetch", &base.remote, &refspec],
+        &format!("fetch of {}", base.reference()),
+        false,
+    )
 }
 
 /// Returns the configured URL for a named remote.

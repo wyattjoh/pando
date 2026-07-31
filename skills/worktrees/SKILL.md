@@ -81,8 +81,8 @@ for leaf contracts and approval rules.
 | Command | Purpose | Reference |
 |---|---|---|
 | `list [-b\|--branches]` | List worktrees belonging to the current repository, or local branches (including unattached ones) with `--branches` | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
-| `switch [-b\|--branches] [--dry-run] [branch]` | Choose, create, or switch to a worktree and print its path; `--branches` opens the picker in branch view | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
-| `create [--dry-run] <branch>` | Create a worktree and print its path, without confirming a new branch | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
+| `switch [-b\|--branches] [--fetch] [--dry-run] [branch]` | Choose, create, or switch to a worktree and print its path; `--branches` opens the picker in branch view, `--fetch` refreshes the fresh base ref | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
+| `create [--fetch] [--dry-run] <branch>` | Create a worktree and print its path, without confirming a new branch | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `get <property>` | Print one current-worktree property | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `remove [--force] [--dry-run] [branches...]` | Remove one or more topic worktrees while retaining their branches | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Integrate the current topic into the configured target branch | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
@@ -109,9 +109,11 @@ No root is ever created automatically — this is required before the first `swi
 worktrees:
   root: ../worktrees
   default-sort: last-commit-at # git, branch, last-commit-at, or path
+  base: head                   # head (default) or fresh
 ```
-The ignored `.worktrees.local.yaml` overlay may override both values; committed
-`.worktrees.yaml` cannot set the personal `default-sort` preference.
+The ignored `.worktrees.local.yaml` overlay may override all three values;
+committed `.worktrees.yaml` cannot set the personal `default-sort` preference,
+though it may set `base` and `target-branch`.
 Source: README.md ("Global placement")
 
 ### Switch to / create a branch worktree
@@ -120,7 +122,12 @@ worktrees switch feature/login   # exact branch
 worktrees switch                 # interactive picker
 worktrees switch --branches      # interactive picker, starting in branch view
 worktrees create feature/login   # create without confirming; fails if it exists
+worktrees create --fetch topic   # refresh the fresh base ref first (base: fresh only)
 ```
+New branches start at the invoking worktree's `HEAD` unless `worktrees.base`
+is `fresh`, which cuts them from the target branch's remote-tracking ref
+instead. Nothing is fetched implicitly; `--fetch` refreshes exactly that one
+ref. See [`references/config.md`](references/config.md).
 The picker shows local HEAD committer timestamps and starts in the configured
 sort mode. Ctrl-S cycles Git order, branch A-Z, last commit newest-first, and
 path A-Z without persisting the change or losing the filter/selection. Ctrl-B

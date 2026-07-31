@@ -15,7 +15,7 @@ use siphasher::sip::SipHasher13;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    Row, SortMode, Worktree, WorktreeKind,
+    BaseMode, Row, SortMode, Worktree, WorktreeKind,
     config::{EffectiveConfig, HookPhase, HookStep},
     git::{self, Repository},
     render,
@@ -54,7 +54,8 @@ pub enum TrustCommand {
 /// # Errors
 ///
 /// Returns an error when repository planning, user approval, creation, or setup fails.
-pub fn switch(branch: Option<String>, branches: bool) -> Result<()> {
+pub fn switch(branch: Option<String>, branches: bool, fetch: bool) -> Result<()> {
+    let fetch = FetchIntent::new(fetch, false);
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let Some(branch) = branch else {
         let initial_view = if branches {
@@ -62,9 +63,9 @@ pub fn switch(branch: Option<String>, branches: bool) -> Result<()> {
         } else {
             PickerView::Worktree
         };
-        return pick_and_switch(&git::repository_with_branches(&cwd)?, initial_view);
+        return pick_and_switch(&git::repository_with_branches(&cwd)?, initial_view, fetch);
     };
-    resolve_and_switch(&git::repository(&cwd)?, &branch, Intent::Switch)
+    resolve_and_switch(&git::repository(&cwd)?, &branch, Intent::Switch, fetch)
 }
 
 /// Creates a worktree for `branch` and emits its destination.
@@ -76,9 +77,14 @@ pub fn switch(branch: Option<String>, branches: bool) -> Result<()> {
 ///
 /// Returns an error when the branch is already registered, or when repository planning,
 /// hook approval, creation, or setup fails.
-pub fn create(branch: &str) -> Result<()> {
+pub fn create(branch: &str, fetch: bool) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
-    resolve_and_switch(&git::repository(&cwd)?, branch, Intent::Create)
+    resolve_and_switch(
+        &git::repository(&cwd)?,
+        branch,
+        Intent::Create,
+        FetchIntent::new(fetch, false),
+    )
 }
 
 /// Distinguishes the two entry points that share worktree resolution.
@@ -141,20 +147,20 @@ pub fn get(property: GetProperty) -> Result<()> {
 ///
 /// # Errors
 /// Returns an error when the branch or repository cannot be resolved.
-pub fn switch_dry_run(branch: Option<String>) -> Result<()> {
+pub fn switch_dry_run(branch: Option<String>, fetch: bool) -> Result<()> {
     let branch = branch.context("switch --dry-run requires a branch")?;
-    plan_dry_run(&branch, Intent::Switch)
+    plan_dry_run(&branch, Intent::Switch, FetchIntent::new(fetch, true))
 }
 
 /// Previews creation without creating directories, worktrees, trust, or setup records.
 ///
 /// # Errors
 /// Returns an error when the branch is already registered or cannot be resolved.
-pub fn create_dry_run(branch: &str) -> Result<()> {
-    plan_dry_run(branch, Intent::Create)
+pub fn create_dry_run(branch: &str, fetch: bool) -> Result<()> {
+    plan_dry_run(branch, Intent::Create, FetchIntent::new(fetch, true))
 }
 
-fn plan_dry_run(branch: &str, intent: Intent) -> Result<()> {
+fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> {
     let repository =
         git::repository(&env::current_dir().context("failed to read the current directory")?)?;
     git::validate_branch(&repository.current().path, branch)?;
@@ -163,6 +169,7 @@ fn plan_dry_run(branch: &str, intent: Intent) -> Result<()> {
         .iter()
         .find(|w| matches!(&w.kind, WorktreeKind::Branch(value) if value == branch))
     {
+        git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE)?;
         if intent == Intent::Create {
             return Err(already_registered(branch, &existing.path));
         }
@@ -171,14 +178,33 @@ fn plan_dry_run(branch: &str, intent: Intent) -> Result<()> {
             existing.path.display()
         ));
     }
-    let destination = EffectiveConfig::load(&repository)?
-        .require_root()?
-        .join(branch);
+    let config = EffectiveConfig::load(&repository)?;
+    let destination = config.require_root()?.join(branch);
     if destination.exists() || repository.worktrees.iter().any(|w| w.path == destination) {
         bail!("the configured destination already exists or is registered");
     }
+    // A dry run never resolves a remote choice: the existing arms already
+    // preview identically, and only the new-branch arm depends on the base.
+    let Resolution::New = classify(&repository, branch, fetch)? else {
+        return ui::finish(format!(
+            "Would create a worktree for {branch} at {}; no changes made.",
+            destination.display()
+        ));
+    };
+    // Resolve the same start point the real run would, but never fetch: a dry
+    // run reports the refresh as something it would have done.
+    let base = plan_new_branch(&repository, &config, fetch)?;
+    if let Some(base_ref) = &base.base_ref
+        && fetch.requested()
+    {
+        ui::info(format!(
+            "Would fetch {} before branching; no changes made.",
+            base_ref.reference()
+        ))?;
+    }
     ui::finish(format!(
-        "Would create a worktree for {branch} at {}; no changes made.",
+        "Would create a worktree for {branch} from {} at {}; no changes made.",
+        new_branch_source(&repository, &base),
         destination.display()
     ))
 }
@@ -320,6 +346,7 @@ pub fn trust_command(command: TrustCommand) -> Result<()> {
 fn pick_and_switch(
     repository_branches: &git::RepositoryBranches,
     initial_view: PickerView,
+    fetch: FetchIntent,
 ) -> Result<()> {
     let repository = &repository_branches.repository;
     let choices: Vec<_> = repository
@@ -354,12 +381,15 @@ fn pick_and_switch(
                 WorktreeKind::Branch(branch) => Some(branch.as_str()),
                 _ => None,
             };
+            git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE)?;
             enter_existing(repository, &chosen.path, branch)
         }
-        PickerChoice::Branch(branch) => resolve_and_switch(repository, &branch, Intent::Switch),
+        PickerChoice::Branch(branch) => {
+            resolve_and_switch(repository, &branch, Intent::Switch, fetch)
+        }
         PickerChoice::Create => {
             let branch = read_branch_name()?;
-            resolve_and_switch(repository, &branch, Intent::Switch)
+            resolve_and_switch(repository, &branch, Intent::Switch, fetch)
         }
     }
 }
@@ -1129,13 +1159,19 @@ fn read_branch_name() -> Result<String> {
     Ok(value.trim().to_owned())
 }
 
-fn resolve_and_switch(repository: &Repository, branch: &str, intent: Intent) -> Result<()> {
+fn resolve_and_switch(
+    repository: &Repository,
+    branch: &str,
+    intent: Intent,
+    fetch: FetchIntent,
+) -> Result<()> {
     git::validate_branch(&repository.current().path, branch)?;
     if let Some(worktree) = repository
         .worktrees
         .iter()
         .find(|worktree| matches!(&worktree.kind, WorktreeKind::Branch(name) if name == branch))
     {
+        git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE)?;
         if !worktree.navigable() {
             bail!(
                 "branch {branch:?} is registered at {} but that worktree is {}; inspect it with 'git worktree list' and repair or prune it explicitly with Git",
@@ -1153,20 +1189,112 @@ fn resolve_and_switch(repository: &Repository, branch: &str, intent: Intent) -> 
         bail!("creating worktrees from a bare repository is not supported");
     }
 
-    let plan = if git::local_branch_exists(&repository.current().path, branch)? {
-        CreationKind::Local
-    } else {
-        let remotes = git::remote_matches(&repository.current().path, branch)?;
-        match remotes.len() {
-            0 => CreationKind::New {
-                head: git::head_commit(&repository.current().path)?,
-            },
-            1 => CreationKind::Remote(remotes[0].clone()),
-            _ => CreationKind::Remote(choose_remote(&remotes, branch)?),
-        }
+    let config = EffectiveConfig::load(repository)?;
+    let plan = match classify(repository, branch, fetch)? {
+        Resolution::Local => CreationKind::Local,
+        Resolution::Remotes(remotes) => CreationKind::Remote(if remotes.len() == 1 {
+            remotes.into_iter().next().expect("one remote match")
+        } else {
+            choose_remote(&remotes, branch)?
+        }),
+        Resolution::New => CreationKind::New {
+            base: plan_new_branch(repository, &config, fetch)?,
+        },
     };
 
-    create_worktree(repository, branch, &plan, intent)
+    create_worktree(repository, &config, branch, &plan, intent)
+}
+
+/// Whether `--fetch` was passed, and whether this run may act on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FetchIntent {
+    /// `--fetch` was not passed.
+    None,
+    /// Refresh the resolved base ref before branching.
+    Refresh,
+    /// `--fetch` was passed to a dry run, which only reports it.
+    Preview,
+}
+
+impl FetchIntent {
+    const fn new(fetch: bool, dry_run: bool) -> Self {
+        match (fetch, dry_run) {
+            (false, _) => Self::None,
+            (true, false) => Self::Refresh,
+            (true, true) => Self::Preview,
+        }
+    }
+
+    const fn requested(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    const fn refreshes(self) -> bool {
+        matches!(self, Self::Refresh)
+    }
+}
+
+/// Which arm of the resolution order a branch with no registered worktree falls into.
+///
+/// Classification runs no prompt and resolves no start point, so a dry run can
+/// share it with a real run without either resolving a remote choice.
+enum Resolution {
+    Local,
+    Remotes(Vec<String>),
+    New,
+}
+
+/// Classifies a branch and rejects a `--fetch` that could not apply to it.
+///
+/// The order — existing local branch, fetched remote matches, then a genuinely
+/// new branch — is fixed; only the new-branch arm's start point is configurable.
+fn classify(repository: &Repository, branch: &str, fetch: FetchIntent) -> Result<Resolution> {
+    let cwd = &repository.current().path;
+    if git::local_branch_exists(cwd, branch)? {
+        git::reject_fetch(fetch.requested(), git::FETCH_LOCAL_BRANCH)?;
+        return Ok(Resolution::Local);
+    }
+    let remotes = git::remote_matches(cwd, branch)?;
+    if remotes.is_empty() {
+        return Ok(Resolution::New);
+    }
+    git::reject_fetch(fetch.requested(), git::FETCH_REMOTE_BRANCH)?;
+    Ok(Resolution::Remotes(remotes))
+}
+
+/// Resolves the start point for a genuinely new branch, refreshing it when asked.
+fn plan_new_branch(
+    repository: &Repository,
+    config: &EffectiveConfig,
+    fetch: FetchIntent,
+) -> Result<git::NewBranchBase> {
+    let cwd = &repository.current().path;
+    git::reject_fetch(
+        fetch.requested() && config.base == BaseMode::Head,
+        git::FETCH_HEAD_BASE,
+    )?;
+    let base = ui::run_timed(
+        fetch.refreshes(),
+        "Fetching base ref...",
+        "Fetched base ref",
+        "Failed to fetch base ref",
+        |_| {
+            git::plan_new_branch_base(
+                cwd,
+                config.base,
+                config.target_branch.as_deref(),
+                fetch.refreshes(),
+            )
+        },
+    )?;
+    if let Some(output) = base
+        .fetch_output
+        .as_deref()
+        .filter(|output| !output.trim().is_empty())
+    {
+        ui::step(render::git_output(output))?;
+    }
+    Ok(base)
 }
 
 fn already_registered(branch: &str, path: &Path) -> anyhow::Error {
@@ -1199,25 +1327,25 @@ fn choose_remote(remotes: &[String], branch: &str) -> Result<String> {
 enum CreationKind {
     Local,
     Remote(String),
-    New { head: String },
+    New { base: git::NewBranchBase },
 }
 
 fn create_worktree(
     repository: &Repository,
+    config: &EffectiveConfig,
     branch: &str,
     kind: &CreationKind,
     intent: Intent,
 ) -> Result<()> {
-    let config = EffectiveConfig::load(repository)?;
     let destination = config.require_root()?.join(branch);
     let destination = git::canonical_or_normalized(&destination)
         .context("failed to resolve worktree destination")?;
     validate_destination(repository, branch, &destination)?;
 
-    if let CreationKind::New { head } = kind {
+    if let CreationKind::New { base } = kind {
         match intent {
-            Intent::Switch => confirm_new_branch(repository, branch, head, &destination)?,
-            Intent::Create => announce_new_branch(repository, branch, head, &destination)?,
+            Intent::Switch => confirm_new_branch(repository, branch, base, &destination)?,
+            Intent::Create => announce_new_branch(repository, branch, base, &destination)?,
         }
     }
     approve_hooks(repository, HookPhase::PostCreate, &config.post_create)?;
@@ -1229,11 +1357,19 @@ fn create_worktree(
     let pending = (!config.post_create.is_empty())
         .then(|| setup::prepare(&repository.common_dir, branch, &destination))
         .transpose()?;
-    let creation = ui::run_timed(
+    // With setup pending, creation is a mid-rail step the hook output follows;
+    // otherwise it is the last thing the rail says, so it closes the sequence.
+    let completion = if pending.is_some() {
+        ui::Completion::Step
+    } else {
+        ui::Completion::Outro
+    };
+    let creation = ui::run_timed_completing(
         true,
         "Creating worktree...",
         "Created worktree",
         "Failed to create worktree",
+        completion,
         |_| match kind {
             CreationKind::Local => {
                 git::add_existing_worktree(&repository.current().path, &destination, branch)
@@ -1241,9 +1377,12 @@ fn create_worktree(
             CreationKind::Remote(remote) => {
                 git::add_tracking_worktree(&repository.current().path, &destination, branch, remote)
             }
-            CreationKind::New { head } => {
-                git::add_new_worktree(&repository.current().path, &destination, branch, head)
-            }
+            CreationKind::New { base } => git::add_new_worktree(
+                &repository.current().path,
+                &destination,
+                branch,
+                &base.commit,
+            ),
         },
     );
     if let Err(error) = creation {
@@ -1262,7 +1401,7 @@ fn create_worktree(
     pending.commit(&repository.common_dir, &worktree_identity)?;
     finish_setup(
         repository,
-        &config,
+        config,
         &worktree_identity,
         Some(branch),
         &destination,
@@ -1299,13 +1438,13 @@ fn validate_destination(repository: &Repository, branch: &str, destination: &Pat
 fn confirm_new_branch(
     repository: &Repository,
     branch: &str,
-    head: &str,
+    base: &git::NewBranchBase,
     destination: &Path,
 ) -> Result<()> {
     ui::ensure_interactive("new branch creation requires confirmation")?;
     ui::info(format!(
         "Create branch {branch:?} from {} at {}?",
-        new_branch_source(repository, head),
+        new_branch_source(repository, base),
         destination.display()
     ))?;
     warn_dirty_source(repository)?;
@@ -1328,22 +1467,27 @@ fn confirm_new_branch(
 fn announce_new_branch(
     repository: &Repository,
     branch: &str,
-    head: &str,
+    base: &git::NewBranchBase,
     destination: &Path,
 ) -> Result<()> {
     ui::info(format!(
         "Creating branch {branch:?} from {} at {}.",
-        new_branch_source(repository, head),
+        new_branch_source(repository, base),
         destination.display()
     ))?;
     warn_dirty_source(repository)
 }
 
-fn new_branch_source(repository: &Repository, head: &str) -> String {
+/// Names the start point in the one sentence shape both entry points share.
+fn new_branch_source(repository: &Repository, base: &git::NewBranchBase) -> String {
+    let commit = &base.commit;
+    if let Some(base_ref) = &base.base_ref {
+        return format!("branch {:?} at {commit}", base_ref.reference());
+    }
     match &repository.current().kind {
-        WorktreeKind::Branch(source) => format!("branch {source:?} at {head}"),
-        WorktreeKind::Detached => format!("detached commit {head}"),
-        _ => format!("commit {head}"),
+        WorktreeKind::Branch(source) => format!("branch {source:?} at {commit}"),
+        WorktreeKind::Detached => format!("detached commit {commit}"),
+        _ => format!("commit {commit}"),
     }
 }
 
@@ -1426,6 +1570,7 @@ fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&s
         }
         2 => {
             setup::clear(&repository.common_dir, &worktree_identity, branch)?;
+            ui::finish("Marked setup complete")?;
             write_destination(&destination)
         }
         _ => unreachable!(),
@@ -1442,6 +1587,9 @@ fn finish_setup(
     match setup::run_steps(HookPhase::PostCreate, &config.post_create, destination)? {
         HookOutcome::Success => {
             setup::clear(&repository.common_dir, worktree_identity, branch)?;
+            // Creation was a mid-rail step so hook output could follow it; this
+            // is the sequence's single closing beat.
+            ui::finish("Post-create setup complete")?;
             write_destination(destination)
         }
         HookOutcome::Failed(status) => {

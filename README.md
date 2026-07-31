@@ -62,7 +62,11 @@ Branch resolution is local and has no implicit fetch:
 4. ask which remote to use when several match;
 5. confirm creation of a genuinely new branch.
 
-New branches start from the invoking worktree's committed `HEAD`, including when it is detached. Staged, unstaged, and untracked changes stay in the source worktree and produce a warning; they are not copied. Git validates names before prompting or mutation. Bare repositories may switch among existing linked worktrees, but cannot create new ones.
+New branches start where `worktrees.base` says. Under the default `head` that is the invoking worktree's committed `HEAD`, including when it is detached. Under `fresh` it is the remote-tracking ref of the configured `worktrees.target-branch`, or of the branch named by the remote's `origin/HEAD` when no target branch is set; the confirmation, the `create` announcement, and both dry runs name that base and its commit. Nothing is fetched implicitly: `fresh` reads the tracking ref exactly as it stands, and a base that resolves to nothing or was never fetched is a hard error naming the fix.
+
+`worktrees switch --fetch` and `worktrees create --fetch` refresh exactly the resolved base ref before branching. The flag is an error when the effective base is `head`, or when the branch resolves to an existing worktree, local branch, or remote branch, so a misplaced flag never silently does nothing.
+
+Staged, unstaged, and untracked changes stay in the source worktree and produce a warning; they are not copied. Git validates names before prompting or mutation. Bare repositories may switch among existing linked worktrees, but cannot create new ones.
 
 `worktrees create` runs the same resolution and setup, but skips step 5's confirmation:
 
@@ -88,15 +92,19 @@ Create `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml` manually:
 worktrees:
   root: ../worktrees
   default-sort: last-commit-at
+  base: head
 ```
 
-The global file controls placement and the personal default sort; it cannot define hooks. `default-sort` accepts `git`, `branch`, `last-commit-at`, or `path`, and defaults to `git` when omitted. Absolute roots are used directly. Relative roots are anchored at Git's primary worktree, not the current nested directory or linked worktree.
+The global file controls placement, the personal default sort, and the personal default new-branch base; it cannot define hooks. `default-sort` accepts `git`, `branch`, `last-commit-at`, or `path`, and defaults to `git` when omitted. `base` accepts `head` or `fresh` and defaults to `head`; it is the one `worktrees` key legal in all three layers, resolving local over shared over global. Absolute roots are used directly. Relative roots are anchored at Git's primary worktree, not the current nested directory or linked worktree.
 
 ### Shared project setup
 
-A committed `.worktrees.yaml` in the invoking worktree may define setup, but cannot control placement or the personal `default-sort` preference:
+A committed `.worktrees.yaml` in the invoking worktree may define setup, the merge target branch, and the team's new-branch base, but cannot control placement or the personal `default-sort` preference:
 
 ```yaml
+worktrees:
+  target-branch: main
+  base: fresh
 hooks:
   post-create:
     - name: Install dependencies
@@ -108,12 +116,13 @@ Each step runs sequentially from the new worktree root through `/bin/sh -c`. Ste
 
 ### Personal per-clone overlay
 
-A `.worktrees.local.yaml` in the primary worktree can override placement and append personal hooks:
+A `.worktrees.local.yaml` in the primary worktree can override placement and the new-branch base, and append personal hooks:
 
 ```yaml
 worktrees:
   root: /Volumes/fast/worktrees
   default-sort: path
+  base: fresh
 hooks:
   post-create:
     - name: Personal editor setup

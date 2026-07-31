@@ -50,8 +50,10 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 **Config layering** (`EffectiveConfig::load`) is deliberately asymmetric:
 
 - global `$XDG_CONFIG_HOME/worktrees/config.yaml` controls placement and the personal default sort, never hooks;
-- `.worktrees.yaml` read from the **invoking** worktree controls shared hooks and the target branch, never placement or personal sort, so setup follows the branch you create from;
-- `.worktrees.local.yaml` read from the **primary** worktree controls personal placement, hooks, and default sort, and must be Git-ignored or loading is a hard error.
+- `.worktrees.yaml` read from the **invoking** worktree controls shared hooks, the target branch, and the new-branch base, never placement or personal sort, so setup follows the branch you create from;
+- `.worktrees.local.yaml` read from the **primary** worktree controls personal placement, hooks, default sort, and the new-branch base, and must be Git-ignored or loading is a hard error.
+
+`worktrees.base` is the one key legal in all three layers, resolving local over shared over global and defaulting to `head`. `head` starts a genuinely new branch at the invoking worktree's `HEAD`; `fresh` starts it at the remote-tracking ref of the configured `target-branch`, or of the branch named by the remote's `origin/HEAD`. `fresh` reads local refs only — an unresolvable or never-fetched base is a hard error naming the fix, and `--fetch` on `switch`/`create` is the only way to refresh it, fetching exactly that one ref.
 
 Shared hooks run before local hooks; the local root and default sort override their global values. Human list and picker rendering use the effective sort, while structured JSON always retains Git discovery order. All structs use `deny_unknown_fields`, so config mistakes fail loudly with file context.
 
@@ -61,7 +63,9 @@ Shared hooks run before local hooks; the local root and default sort override th
 
 **Port hashing is pinned for compatibility.** `smart::port_for_branch` uses `SipHasher13` explicitly rather than `DefaultHasher` so a future std change cannot move ports away from Worktrunk v0.66.0. Golden values are asserted in `smart.rs` tests — treat them as a compatibility contract.
 
-**Branch resolution order** in `resolve_and_switch`: existing registered worktree → existing local branch → single already-fetched remote match → prompt among multiple remotes → confirm a genuinely new branch from the invoking `HEAD`. The tool never adopts, repairs, prunes, moves, or deletes an existing destination or a broken worktree record.
+**Branch resolution order** in `resolve_and_switch`: existing registered worktree → existing local branch → single already-fetched remote match → prompt among multiple remotes → confirm a genuinely new branch from the base `worktrees.base` selects. `smart::classify` owns that order and runs no prompt, so a dry run shares it without resolving a remote choice; only the new-branch arm's start point is configurable. The tool never adopts, repairs, prunes, moves, or deletes an existing destination or a broken worktree record.
+
+**One planner owns the new-branch start point.** `git::plan_new_branch_base` is the single place any interface resolves it, so human `switch`/`create`, their dry runs, and both JSON variants cannot drift. Dry runs call it with fetching disabled and report the refresh as an unattempted effect instead.
 
 **`switch` and `create` share one resolver, parameterized by `Intent`** — in `smart.rs` for humans and `machine.rs` for JSON. `Intent::Create` skips only the genuinely-new-branch confirmation and refuses an already-registered branch; remote selection and post-create hook trust still prompt, and `create` is the sole JSON entry point allowed to create a branch unattended (`switch` still answers `switch.approval_required`). Anything `create` changes in the shared path changes `switch` too, so keep the intent checks narrow.
 

@@ -907,7 +907,9 @@ pub fn render_clap_json(args: &[OsString], error: &clap::Error) {
     let leaf = words
         .iter()
         .find_map(|word| match *word {
-            "list" | "switch" | "get" | "remove" | "merge" | "install" => Some((*word).to_owned()),
+            "list" | "switch" | "create" | "get" | "remove" | "merge" | "install" => {
+                Some((*word).to_owned())
+            }
             _ => None,
         })
         .or_else(|| {
@@ -923,7 +925,7 @@ pub fn render_clap_json(args: &[OsString], error: &clap::Error) {
         } else if let Some(command) = leaf.as_deref() {
             crate::machine::help(command)
         } else {
-            json!({"outcome":"help","commands":(["list","switch","get","remove","merge","commit","trust.status","trust.reset","trust.commit_status","trust.commit_reset","trust.commit_approve","install"].into_iter().map(|name|json!({"name":name,"json_support":"full"})).collect::<Vec<_>>()),"response_schema_version":1,"supported_request_schema_versions":[1],"global_options":["--output human|json","--input-output json"]})
+            json!({"outcome":"help","commands":(["list","switch","create","get","remove","merge","commit","trust.status","trust.reset","trust.commit_status","trust.commit_reset","trust.commit_approve","install"].into_iter().map(|name|json!({"name":name,"json_support":"full"})).collect::<Vec<_>>()),"response_schema_version":1,"supported_request_schema_versions":[1],"global_options":["--output human|json","--input-output json"]})
         }
     } else if version {
         json!({"outcome":"version","version":env!("CARGO_PKG_VERSION")})

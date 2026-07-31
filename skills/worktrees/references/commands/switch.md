@@ -51,6 +51,12 @@ Usage: worktrees switch [OPTIONS] [BRANCH]
 |---|---|---|
 | `[BRANCH]` | no | Branch to switch to; omit for the interactive picker |
 
+| Flag | Purpose |
+|---|---|
+| `-b`, `--branches` | Open the picker in branch view |
+| `--fetch` | Refresh the resolved base ref before creating a genuinely new branch |
+| `--dry-run` | Validate and preview without mutation |
+
 The binary writes **only** the successful destination path to stdout, with a
 trailing newline. Prompts, warnings, and hook output go to stderr — this is
 load-bearing: the installed zsh function captures stdout and `cd`s to it.
@@ -93,8 +99,24 @@ Branch resolution order (no implicit fetch):
 4. multiple matching remotes → prompt which to use
 5. genuinely new branch → confirm creation
 
-New branches start from the invoking worktree's committed `HEAD` (including
-detached HEAD). Staged/unstaged/untracked changes stay in the source
+New branches start where `worktrees.base` says (see `../config.md`). Under
+the default `head` that is the invoking worktree's committed `HEAD`
+(including detached HEAD); under `fresh` it is the remote-tracking ref of
+the configured `target-branch`, or of the branch named by the remote's
+`origin/HEAD` when no target branch is set. The confirmation, the `create`
+announcement, and both dry runs name the resolved base and its commit, for
+example `from branch "origin/main" at <commit>`.
+
+Nothing is ever fetched implicitly. `--fetch` refreshes exactly the resolved
+base ref (`git fetch origin +refs/heads/<branch>:refs/remotes/origin/<branch>`)
+before branching; without it, `fresh` uses the local tracking ref as it
+stands. `--fetch` is an error when the effective base is `head`, or when the
+branch resolves to an existing worktree, local branch, or remote branch, so
+a misplaced flag never silently does nothing. A `fresh` base that resolves
+to nothing, or to a ref never fetched into this clone, is a hard error
+naming the fix.
+
+Staged/unstaged/untracked changes stay in the source
 worktree and only produce a warning — they are never copied. Created
 worktrees use the full branch name below the configured root
 (`feature/login` → `<root>/feature/login`). Existing destinations and broken
@@ -119,6 +141,11 @@ Usage: worktrees create [OPTIONS] <BRANCH>
 |---|---|---|
 | `<BRANCH>` | yes | Branch to create a worktree for; there is no picker |
 
+| Flag | Purpose |
+|---|---|
+| `--fetch` | Refresh the resolved base ref before creating a genuinely new branch |
+| `--dry-run` | Validate and preview without mutation |
+
 Same resolution, destination, stdout contract, and post-create hooks as
 `switch`, with two differences:
 
@@ -131,8 +158,14 @@ Same resolution, destination, stdout contract, and post-create hooks as
 Post-create hook approval is unchanged: untrusted hooks still require an
 interactive human, and `create` fails rather than running them unattended.
 
-`--dry-run` previews the destination without creating anything, and refuses
-an already-registered branch.
+`--dry-run` previews the destination and the resolved base without creating
+anything, refuses an already-registered branch, and reports a requested
+`--fetch` as something it would have done.
+
+With no post-create commands configured, the terminal rail closes with a
+single `Created worktree` outro that keeps its elapsed suffix. With hooks,
+that line stays a mid-rail step and `Post-create setup complete` closes the
+sequence instead. Only the destination path reaches stdout either way.
 
 Both JSON modes are supported; agents use versioned request mode. This is
 the one machine entry point permitted to create a genuinely new branch
@@ -180,8 +213,8 @@ echo "PORT=$(worktrees get port)" > .env.local
 
 ## Structured JSON contract
 
-Agents use `--input-output json`. `list` accepts `{"schema_version":1,"request_id":"…"}` with omitted `input`, or an empty `input` object. `get` requires `input.property`; JSON names are `branch`, `port`, `worktree_path`, `primary_worktree_path`, and `worktree_root`. `switch` accepts `input.branch`, `input.remote`, and `input.dry_run`. `create` accepts the same input, but `input.branch` is required (`create.branch_required`) and its error codes are namespaced `create.*`. Request mode rejects simultaneous command arguments or flags.
+Agents use `--input-output json`. `list` accepts `{"schema_version":1,"request_id":"…"}` with omitted `input`, or an empty `input` object. `get` requires `input.property`; JSON names are `branch`, `port`, `worktree_path`, `primary_worktree_path`, and `worktree_root`. `switch` accepts `input.branch`, `input.remote`, `input.fetch`, and `input.dry_run`. `create` accepts the same input, but `input.branch` is required (`create.branch_required`) and its error codes are namespaced `create.*`. Request mode rejects simultaneous command arguments or flags.
 
-Responses identify as `list`, `get`, `switch`, or `create`; paths are UTF-8/base64 tagged objects. Every structured `list` worktree and `switch.selection_required` choice includes nullable `last_commit_at`, an RFC 3339 HEAD committer timestamp with an explicit offset. These arrays retain Git discovery order under every personal default sort. A systemic metadata failure leaves timestamps null and adds one bounded diagnostic without ordinary stderr. Switch may return an existing destination, a creation plan, or typed selection/remote/approval errors with retry context. Create returns a `created` or `creation_plan` result carrying `kind`, `start_point`, and both `create_branch` and `create_worktree` effects for a genuinely new branch, or fails with `create.branch_registered` plus a `switch` next step. Dry runs perform no creation or hooks and report unattempted effects. Exact-leaf `--help --output json` returns runtime request/response schemas and complete error/action catalogs. JSON writes one document to stdout and no ordinary stderr.
+Responses identify as `list`, `get`, `switch`, or `create`; paths are UTF-8/base64 tagged objects. Every structured `list` worktree and `switch.selection_required` choice includes nullable `last_commit_at`, an RFC 3339 HEAD committer timestamp with an explicit offset. These arrays retain Git discovery order under every personal default sort. A systemic metadata failure leaves timestamps null and adds one bounded diagnostic without ordinary stderr. Switch may return an existing destination, a creation plan, or typed selection/remote/approval errors with retry context. Create returns a `created` or `creation_plan` result carrying `kind`, `start_point`, a `base_ref` when the effective base is `fresh`, and both `create_branch` and `create_worktree` effects for a genuinely new branch, or fails with `create.branch_registered` plus a `switch` next step. `input.fetch` adds a `fetch_base_ref` effect naming the single refreshed ref; it is rejected as `switch.fetch_not_applicable` / `create.fetch_not_applicable` in `head` mode or when the branch is not genuinely new, and an unresolvable or never-fetched base is `switch.base_unavailable` / `create.base_unavailable`. Dry runs perform no creation or hooks and report unattempted effects. Exact-leaf `--help --output json` returns runtime request/response schemas and complete error/action catalogs. JSON writes one document to stdout and no ordinary stderr.
 
 `worktrees list --branches --output json` emits a distinct payload: `result.branches` (not `result.worktrees`), each record carrying `branch`, `head`, nullable `last_commit_at`, nullable `path`, nullable `condition`, and `current`; `path`/`condition` are `null` for a branch with no worktree. `result.summary` reports `total`, `checked_out`, and `dirty`. Branch records are always in `for-each-ref` order — never the caller's personal default sort — regardless of `input-output` mode. `worktrees list --output json` without `--branches` is unchanged.
