@@ -1911,17 +1911,16 @@ fn worktrees_register_completion_does_not_register_when_binary_is_missing_from_p
     assert!(installed.status.success(), "{}", installed.stderr);
     let integration = xdg.path().join("worktrees/worktrees.zsh");
 
-    // Deliberately exclude the directory containing the built binary from
-    // PATH, simulating `.zshrc` sourcing the integration before the binary's
-    // install location (e.g. `~/.cargo/bin`) joins PATH.
-    let binary = assert_cmd::cargo::cargo_bin("worktrees");
-    let bin_dir = binary.parent().unwrap();
-    let path = std::env::var("PATH")
-        .unwrap()
-        .split(':')
-        .filter(|entry| Path::new(entry) != bin_dir)
-        .collect::<Vec<_>>()
-        .join(":");
+    // Point PATH at an empty directory, simulating `.zshrc` sourcing the
+    // integration before the binary's install location joins PATH. Filtering
+    // the cargo build directory out of the real PATH is not enough: a
+    // developer who has run `just install` also has the binary in
+    // `~/.cargo/bin`, so the test would find it anyway and pass vacuously.
+    // zsh is resolved to an absolute path first, because the empty PATH hides
+    // the shell itself too.
+    let zsh = which_zsh();
+    let empty_path = tempfile::tempdir().unwrap();
+    let path = empty_path.path().to_str().unwrap().to_owned();
 
     let script = format!(
         "autoload -Uz compinit && compinit -u -d {dump}\n\
@@ -1930,7 +1929,7 @@ fn worktrees_register_completion_does_not_register_when_binary_is_missing_from_p
         dump = shell_quote(&xdg.path().join("zcompdump")),
         integration = shell_quote(&integration),
     );
-    let output = Command::new("zsh")
+    let output = Command::new(&zsh)
         .args(["-i", "-c", &script])
         .env("PATH", path)
         .env("HOME", home.path())
@@ -1945,6 +1944,17 @@ fn worktrees_register_completion_does_not_register_when_binary_is_missing_from_p
          {stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Resolves zsh to an absolute path so a test can override PATH without
+/// losing the shell binary itself.
+fn which_zsh() -> PathBuf {
+    let output = Command::new("sh")
+        .args(["-c", "command -v zsh"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "zsh is not on PATH");
+    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
 }
 
 #[test]
