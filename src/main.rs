@@ -153,10 +153,18 @@ enum PrCommand {
 
 fn main() {
     // Must precede every other statement: `complete` writes candidates to stdout
-    // and exits when `COMPLETE` is set, and clap documents that stdout must not
-    // be written to beforehand. Placing it here also keeps a completion request
-    // out of the `--output json` protocol path below.
-    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+    // and exits when the trigger variable is set, and clap documents that
+    // stdout must not be written to beforehand. Placing it here also keeps a
+    // completion request out of the `--output json` protocol path below.
+    //
+    // The variable is `_WORKTREES_COMPLETE` rather than clap_complete's default
+    // `COMPLETE`: that name is generic enough to be set in an environment for
+    // unrelated reasons, and the installed zsh dispatcher captures `switch`
+    // stdout and `cd`s to it, so an accidental completion script on stdout
+    // would silently break directory switching.
+    clap_complete::CompleteEnv::with_factory(Cli::command)
+        .var("_WORKTREES_COMPLETE")
+        .complete();
 
     let args: Vec<_> = env::args_os().collect();
     let json_requested = args
