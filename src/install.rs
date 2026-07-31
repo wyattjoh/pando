@@ -74,6 +74,35 @@ worktrees_dispatch() {
 
 worktrees() { worktrees_dispatch worktrees "$@"; }
 wt() { worktrees_dispatch wt "$@"; }
+
+# Dynamic completion for both names. The registration script is generated on
+# every shell start rather than cached: clap_complete gives no stability
+# guarantee between the script it emits and the completion protocol the binary
+# expects, so a cached script would silently break after a binary upgrade.
+# Generating it costs one process spawn, measured under 3ms.
+#
+# `wt` is a symlink to the same binary, so one registration serves both names.
+# The generated function is named `_clap_dynamic_completer_worktrees`; the
+# leading underscore is the completion system's own convention here, unlike the
+# dispatcher above, and a dropped snapshot copy only disables completion.
+worktrees_register_completion() {
+  (( $+functions[compdef] )) || return 1
+  eval "$(COMPLETE=zsh command worktrees 2>/dev/null)" || return 1
+  compdef _clap_dynamic_completer_worktrees wt
+  return 0
+}
+
+if [[ -o interactive ]]; then
+  if ! worktrees_register_completion; then
+    # `compinit` has not run yet, so retry once after startup finishes.
+    worktrees_deferred_completion() {
+      worktrees_register_completion
+      add-zsh-hook -d precmd worktrees_deferred_completion
+      unfunction worktrees_deferred_completion
+    }
+    autoload -Uz add-zsh-hook && add-zsh-hook precmd worktrees_deferred_completion
+  fi
+fi
 "#;
 
 /// Returns the deterministic installation plan used by JSON previews.
