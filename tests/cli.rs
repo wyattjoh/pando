@@ -1819,6 +1819,79 @@ fn install_preserves_zshrc_and_is_idempotent() {
 }
 
 #[test]
+fn installed_integration_registers_completion_for_both_names() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+
+    let installed = run_install(home.path(), xdg.path(), Some(zdot.path()), b"y\r");
+    assert!(installed.status.success(), "{}", installed.stderr);
+
+    let generated = fs::read_to_string(xdg.path().join("worktrees/worktrees.zsh")).unwrap();
+    assert!(generated.contains("COMPLETE=zsh command worktrees"));
+    assert!(generated.contains("compdef _clap_dynamic_completer_worktrees wt"));
+    assert!(
+        generated.contains("$+functions[compdef]"),
+        "registration must be guarded so it is skipped when compinit has not run"
+    );
+    assert!(
+        !generated.lines().any(|line| line.starts_with('_')),
+        "no integration function may use the zsh completion `_name` prefix, \
+         which function-table snapshots drop: {generated}"
+    );
+}
+
+#[test]
+fn installed_integration_registers_compdef_under_real_zsh() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        eprintln!("skipping: zsh is not installed");
+        return;
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+
+    // Generate the integration by running a real install, so the test asserts
+    // against the shipped bytes rather than a copy that could drift.
+    let installed = run_install(home.path(), xdg.path(), Some(zdot.path()), b"y\r");
+    assert!(installed.status.success(), "{}", installed.stderr);
+    let integration = xdg.path().join("worktrees/worktrees.zsh");
+
+    // Put the built binary on PATH so `command worktrees` resolves during the eval.
+    let binary = assert_cmd::cargo::cargo_bin("worktrees");
+    let bin_dir = binary.parent().unwrap();
+    let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
+
+    let script = format!(
+        "autoload -Uz compinit && compinit -u -d {dump}\n\
+         source {integration}\n\
+         print -r -- \"registered=${{_comps[worktrees]}} wt=${{_comps[wt]}}\"\n",
+        dump = shell_quote(&xdg.path().join("zcompdump")),
+        integration = shell_quote(&integration),
+    );
+    let output = Command::new("zsh")
+        .args(["-i", "-c", &script])
+        .env("PATH", path)
+        .env("HOME", home.path())
+        .env("ZDOTDIR", zdot.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("registered=_clap_dynamic_completer_worktrees"),
+        "worktrees was not registered: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("wt=_clap_dynamic_completer_worktrees"),
+        "wt was not registered: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn install_preserves_existing_global_config() {
     let home = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
