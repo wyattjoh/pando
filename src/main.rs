@@ -2,8 +2,9 @@ use std::env;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::engine::ArgValueCandidates;
 use worktrees::{
-    Row, commit,
+    Row, commit, completion,
     config::EffectiveConfig,
     git, install, machine, pr, render,
     smart::{self, GetProperty, TrustCommand},
@@ -41,6 +42,7 @@ enum Commands {
     /// Choose, create, or switch to a worktree and print its path.
     Switch {
         /// Branch to switch to; omit it to use the interactive picker.
+        #[arg(add = ArgValueCandidates::new(completion::switch_candidates))]
         branch: Option<String>,
         /// Open the interactive picker in branch view.
         #[arg(short = 'b', long)]
@@ -55,6 +57,7 @@ enum Commands {
     /// Create a worktree for a branch and print its path, without confirming a new branch.
     Create {
         /// Branch to create a worktree for.
+        #[arg(add = ArgValueCandidates::new(completion::create_candidates))]
         branch: Option<String>,
         /// Refresh the fresh base ref before creating a genuinely new branch.
         #[arg(long)]
@@ -75,6 +78,7 @@ enum Commands {
         /// Validate and preview without mutation.
         #[arg(long)]
         dry_run: bool,
+        #[arg(add = ArgValueCandidates::new(completion::remove_candidates))]
         branches: Vec<String>,
     },
     /// Integrate the current topic into the configured target branch.
