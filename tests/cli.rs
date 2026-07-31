@@ -1550,6 +1550,60 @@ fn merge_falls_back_to_main_without_target_configuration() {
 }
 
 #[test]
+fn merge_from_the_primary_worktree_switches_it_back_to_the_target() {
+    let repo = Repository::new();
+    git(&repo.main, ["switch", "-c", "inline-topic"]);
+    fs::write(repo.main.join("inline.txt"), "inline\n").unwrap();
+    git(&repo.main, ["add", "inline.txt"]);
+    git(&repo.main, ["commit", "-m", "inline change"]);
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["merge"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Nothing was removed, so the zsh wrapper gets no destination to `cd` to.
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "--abbrev-ref", "HEAD"]),
+        "main"
+    );
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s", "main"]),
+        "inline change"
+    );
+    // The answered design keeps the topic branch after an in-place merge.
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "inline-topic"]),
+        git_output(&repo.main, ["rev-parse", "main"])
+    );
+}
+
+#[test]
+fn merge_from_the_primary_worktree_refuses_on_the_target_branch() {
+    let repo = Repository::new();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["merge"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("already on"), "{stderr}");
+}
+
+#[test]
 fn merge_yolo_stages_commits_and_merges_all_changes() {
     let repo = Repository::new();
     fs::write(

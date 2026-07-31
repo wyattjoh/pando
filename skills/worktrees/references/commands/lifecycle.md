@@ -53,6 +53,17 @@ It supports human output only and conflicts with `--dry-run`. Phase-specific
 `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries (see
 `../config.md`).
 
+### In-place merges from the primary worktree
+
+`merge` also runs from the primary worktree when a topic branch is checked
+out there directly, with no linked worktree of its own. It rebases and
+fast-forwards exactly as usual, then switches the primary worktree to the
+target branch and **keeps** the topic branch. Nothing is removed, so
+`pre-remove` hooks do not run, `--no-remove` has no additional effect, and no
+destination is written to stdout. The plan/context reports `in_place: true`.
+Running it from the primary worktree while the target branch itself is checked
+out fails with `merge.nothing_to_merge`.
+
 Uses `worktrees.target-branch` when set in `.worktrees.yaml` or the global
 config. Otherwise, it falls back to the local branch pointed to by
 `origin/HEAD`, then local `main`, then local `master`. It errors only when no
@@ -95,4 +106,4 @@ invocations above are marked **(inferred)**.
 
 ## Structured JSON contract
 
-Agents use request mode. `remove` input contains `branches` and `dry_run`. Force is an argv-only authorization: pass `--force` explicitly after user approval. Never put `force` in the request document. `merge` input contains `no_rebase`, `no_remove`, and `dry_run`. Request mode rejects mixed command arguments and flags. Results distinguish dry runs, no-ops, removals, retained topics, and completed cleanup. Effects identify hook, Git, and target worktree actions; failures use stable codes with diagnostics and recovery context. Dry runs execute no hooks or mutations. Exact-leaf JSON help exposes runtime schemas and the error/action catalogs.
+Agents use request mode. `remove` input contains `branches` and `dry_run`. Force is an argv-only authorization: pass `--force` explicitly after user approval. Never put `force` in the request document. `merge` input contains `no_rebase`, `no_remove`, and `dry_run`. Request mode rejects mixed command arguments and flags. Results distinguish dry runs, no-ops, removals, retained topics, in-place merges (`plan: "in_place"`, context `in_place: true`), and completed cleanup. Effects identify hook, Git, and target worktree actions; failures use stable codes with diagnostics and recovery context. Dry runs execute no hooks or mutations. Exact-leaf JSON help exposes runtime schemas and the error/action catalogs.

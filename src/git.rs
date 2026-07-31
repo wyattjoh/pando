@@ -746,6 +746,31 @@ pub fn head_commit(cwd: &Path) -> Result<String> {
         .context("failed to resolve the invoking worktree's HEAD")
 }
 
+/// Resolves the commit a branch points at.
+///
+/// Unlike [`head_commit`] this never depends on what is checked out, so a
+/// lifecycle running inside the primary worktree can still read its target.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot resolve the branch.
+pub fn branch_commit(cwd: &Path, branch: &str) -> Result<String> {
+    git_stdout(
+        cwd,
+        ["rev-parse", "--verify", &format!("{branch}^{{commit}}")],
+    )
+    .with_context(|| format!("failed to resolve branch {branch:?}"))
+}
+
+/// Checks out an existing branch, returning Git's captured output.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot switch to the branch.
+pub fn switch_branch(cwd: &Path, branch: &str, inherit: bool) -> Result<String> {
+    run_lifecycle_git(cwd, &["switch", branch], "branch switch", inherit)
+}
+
 /// Runs a fast-forward-only merge, returning Git's captured output.
 ///
 /// # Errors
