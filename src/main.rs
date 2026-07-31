@@ -45,6 +45,9 @@ enum Commands {
         /// Open the interactive picker in branch view.
         #[arg(short = 'b', long)]
         branches: bool,
+        /// Refresh the fresh base ref before creating a genuinely new branch.
+        #[arg(long)]
+        fetch: bool,
         /// Validate and preview without mutation.
         #[arg(long)]
         dry_run: bool,
@@ -53,6 +56,9 @@ enum Commands {
     Create {
         /// Branch to create a worktree for.
         branch: Option<String>,
+        /// Refresh the fresh base ref before creating a genuinely new branch.
+        #[arg(long)]
+        fetch: bool,
         /// Validate and preview without mutation.
         #[arg(long)]
         dry_run: bool,
@@ -238,35 +244,38 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Switch {
             branch,
             branches: _,
+            fetch,
             dry_run,
-        } if json => machine::switch(request_mode, branch, dry_run),
+        } if json => machine::switch(request_mode, branch, fetch, dry_run),
         Commands::Switch {
             branch,
             branches,
+            fetch,
             dry_run: false,
-        } => {
-            smart::switch(branch, branches)?;
-            ui::finish_open_sequence(ui::success_style().apply_to("Worktree destination printed."))
-        }
+            // The creation rail closes itself with its own "Created worktree"
+            // outro, so no trailing summary follows the destination here.
+        } => smart::switch(branch, branches, fetch),
         Commands::Switch {
             branch,
             branches: _,
+            fetch,
             dry_run: true,
-        } => smart::switch_dry_run(branch),
-        Commands::Create { branch, dry_run } if json => {
-            machine::create(request_mode, branch, dry_run)
-        }
+        } => smart::switch_dry_run(branch, fetch),
         Commands::Create {
             branch,
+            fetch,
+            dry_run,
+        } if json => machine::create(request_mode, branch, fetch, dry_run),
+        Commands::Create {
+            branch,
+            fetch,
             dry_run: false,
-        } => {
-            smart::create(&branch.context("create requires a branch")?)?;
-            ui::finish_open_sequence(ui::success_style().apply_to("Worktree destination printed."))
-        }
+        } => smart::create(&branch.context("create requires a branch")?, fetch),
         Commands::Create {
             branch,
+            fetch,
             dry_run: true,
-        } => smart::create_dry_run(&branch.context("create requires a branch")?),
+        } => smart::create_dry_run(&branch.context("create requires a branch")?, fetch),
         Commands::Get { property } if json => machine::get(
             request_mode,
             property.map(|p| match p {

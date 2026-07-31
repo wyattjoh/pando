@@ -47,6 +47,20 @@ pub enum Condition {
     Inaccessible,
 }
 
+/// Where `switch` and `create` start a genuinely new branch.
+///
+/// Deserialized strictly, so an unknown configured value fails with the file
+/// that set it rather than silently falling back.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub enum BaseMode {
+    /// The invoking worktree's committed `HEAD`.
+    #[default]
+    Head,
+    /// The target branch's remote-tracking ref, without any implicit fetch.
+    Fresh,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SortMode {

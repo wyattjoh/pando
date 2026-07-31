@@ -1024,8 +1024,13 @@ fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
         output.stderr
     );
     assert!(
-        output.stderr.contains("Worktree destination printed."),
-        "the picker opens a sequence, so the outro must close it: {}",
+        !output.stderr.contains("Worktree destination printed."),
+        "the rail no longer restates that a path reached stdout: {}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("Esc/Ctrl-C"),
+        "the picker's own closing bar ends the sequence: {}",
         output.stderr
     );
     let discovery = worktrees::git::discover_with_metadata(&repo.main).unwrap();
@@ -4727,4 +4732,799 @@ fn json_merge_dry_run_reports_policy_and_never_mutates_refs_or_worktrees() {
         topic_before
     );
     assert!(repo.linked.exists());
+}
+
+/// Adds a local bare repository as `origin`, publishes `main`, and records
+/// `origin/HEAD`, so remote-tracking refs are observable without a network.
+fn add_local_origin(repo: &Repository) -> PathBuf {
+    let origin = repo.temp.path().join("origin.git");
+    let output = Command::new("git")
+        .args(["init", "--bare", "-b", "main"])
+        .arg(&origin)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    git(
+        &repo.main,
+        ["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&repo.main, ["push", "origin", "main"]);
+    git(&repo.main, ["remote", "set-head", "origin", "-a"]);
+    origin
+}
+
+/// Commits an unpublished change so `HEAD` and `origin/main` name different commits.
+fn advance_local_head(repo: &Repository) -> String {
+    fs::write(repo.main.join("local-only.txt"), "local\n").unwrap();
+    git(&repo.main, ["add", "local-only.txt"]);
+    git(&repo.main, ["commit", "-m", "local only"]);
+    git_output(&repo.main, ["rev-parse", "HEAD"])
+}
+
+/// Publishes a commit through a second clone, leaving this clone's tracking ref stale.
+fn advance_origin(repo: &Repository, origin: &Path) -> String {
+    let publisher = repo.temp.path().join("publisher");
+    let output = Command::new("git")
+        .arg("clone")
+        .arg(origin)
+        .arg(&publisher)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    git(&publisher, ["config", "user.email", "test@example.com"]);
+    git(&publisher, ["config", "user.name", "Test User"]);
+    fs::write(publisher.join("published.txt"), "published\n").unwrap();
+    git(&publisher, ["add", "published.txt"]);
+    git(&publisher, ["commit", "-m", "published"]);
+    git(&publisher, ["push", "origin", "main"]);
+    git_output(&publisher, ["rev-parse", "HEAD"])
+}
+
+/// Points global configuration at `root` and appends extra `worktrees:` keys.
+fn config_home_with(root: &Path, extra: &str) -> TempDir {
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n{extra}", root.display()),
+    )
+    .unwrap();
+    xdg
+}
+
+fn write_ignored_local_config(repo: &Repository, contents: &str) {
+    fs::write(repo.main.join(".gitignore"), "/.worktrees.local.yaml\n").unwrap();
+    fs::write(repo.main.join(".worktrees.local.yaml"), contents).unwrap();
+}
+
+/// Returns the rail's closing beat: the message after its final closing bar.
+///
+/// The spinner redraws itself with cursor-movement escapes rather than newlines,
+/// so the rail is read as one styled stream instead of physical lines.
+fn closing_beat(stderr: &str) -> String {
+    let stripped = console::strip_ansi_codes(stderr).into_owned();
+    let trimmed = stripped.trim_end();
+    let bar = trimmed
+        .rfind('\u{2514}')
+        .unwrap_or_else(|| panic!("the rail must close with a bar: {trimmed}"));
+    trimmed[bar..]
+        .trim_start_matches('\u{2514}')
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn create_closes_the_rail_with_the_created_worktree_outro() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["create", "topic/rail"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = run_pty_command(command, b"");
+    let destination = root.join("topic/rail");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", destination.canonicalize().unwrap().display())
+    );
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(
+        !stderr.contains("Worktree destination printed."),
+        "the rail must not restate the stdout plumbing: {stderr}"
+    );
+    let closing = closing_beat(&output.stderr);
+    assert!(
+        closing.starts_with("Created worktree ") && closing.ends_with('s'),
+        "the outro reports the outcome and keeps its elapsed suffix: {closing:?}"
+    );
+    assert_eq!(
+        stderr.matches("Created worktree").count(),
+        1,
+        "the timed run still owns exactly one terminal state: {stderr}"
+    );
+}
+
+#[test]
+fn switch_creation_closes_the_rail_like_create() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "topic/switched"]);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "topic/switched"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = run_pty_command(command, b"");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(
+        !stderr.contains("Worktree destination printed."),
+        "{stderr}"
+    );
+    let closing = closing_beat(&output.stderr);
+    assert!(
+        closing.starts_with("Created worktree "),
+        "switch ends its creation path exactly like create: {closing:?}"
+    );
+    assert_eq!(stderr.matches("Created worktree").count(), 1, "{stderr}");
+}
+
+#[test]
+fn create_with_post_create_commands_keeps_creation_as_a_step() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "hooks:\n  post-create:\n    - name: prepare\n      command: echo hook-marker\n",
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["create", "hooked"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = run_pty_command(command, b"y\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    let created = stderr.find("Created worktree").expect(&stderr);
+    let hook = stderr.rfind("hook-marker").expect(&stderr);
+    assert!(
+        created < hook,
+        "creation stays a mid-rail step before hook output: {stderr}"
+    );
+    assert_eq!(stderr.matches("Created worktree").count(), 1, "{stderr}");
+    assert_eq!(
+        closing_beat(&output.stderr),
+        "Post-create setup complete",
+        "the setup outro closes the sequence: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Worktree destination printed."),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn create_defaults_to_the_invoking_head() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    let head = advance_local_head(&repo);
+    let root = repo.temp.path().join("created");
+
+    for extra in ["", "  base: head\n"] {
+        let branch = format!("topic/head{}", extra.len());
+        let xdg = config_home_with(&root, extra);
+        let output = create_command(&repo, &xdg, &["create", &branch]);
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(git_output(&repo.main, ["rev-parse", &branch]), head);
+    }
+}
+
+#[test]
+fn create_fresh_uses_the_configured_target_branch_tracking_ref() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    let published = git_output(&repo.main, ["rev-parse", "origin/main"]);
+    let head = advance_local_head(&repo);
+    assert_ne!(published, head);
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "worktrees:\n  target-branch: main\n",
+    )
+    .unwrap();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let output = create_command(&repo, &xdg, &["create", "topic/fresh"]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "topic/fresh"]),
+        published
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(&format!("from branch \"origin/main\" at {published}")),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn create_fresh_falls_back_to_origin_head() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    let published = git_output(&repo.main, ["rev-parse", "origin/main"]);
+    advance_local_head(&repo);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let output = create_command(&repo, &xdg, &["create", "topic/inferred"]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "topic/inferred"]),
+        published
+    );
+}
+
+#[test]
+fn create_base_resolves_local_over_shared_over_global() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    let published = git_output(&repo.main, ["rev-parse", "origin/main"]);
+    let head = advance_local_head(&repo);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "worktrees:\n  base: head\n",
+    )
+    .unwrap();
+
+    let shared_wins = create_command(&repo, &xdg, &["create", "topic/shared"]);
+    assert!(
+        shared_wins.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shared_wins.stderr)
+    );
+    assert_eq!(git_output(&repo.main, ["rev-parse", "topic/shared"]), head);
+
+    write_ignored_local_config(&repo, "worktrees:\n  base: fresh\n");
+    let local_wins = create_command(&repo, &xdg, &["create", "topic/local"]);
+    assert!(
+        local_wins.status.success(),
+        "{}",
+        String::from_utf8_lossy(&local_wins.stderr)
+    );
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "topic/local"]),
+        published
+    );
+}
+
+#[test]
+fn create_rejects_an_unknown_base_value() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: stale\n");
+
+    let output = create_command(&repo, &xdg, &["create", "topic/invalid"]);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("worktrees/config.yaml"), "{stderr}");
+    assert!(stderr.contains("stale"), "{stderr}");
+}
+
+#[test]
+fn create_fresh_without_a_resolvable_base_fails_with_guidance() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let output = create_command(&repo, &xdg, &["create", "topic/unresolvable"]);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("worktrees.target-branch"), "{stderr}");
+    assert!(stderr.contains("git remote set-head origin -a"), "{stderr}");
+    assert!(git_output(&repo.main, ["branch", "--list", "topic/unresolvable"]).is_empty());
+}
+
+#[test]
+fn create_fresh_with_an_unfetched_tracking_ref_fails_with_guidance() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    fs::write(
+        repo.main.join(".worktrees.yaml"),
+        "worktrees:\n  target-branch: release\n",
+    )
+    .unwrap();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let output = create_command(&repo, &xdg, &["create", "topic/unfetched"]);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("origin/release"), "{stderr}");
+    assert!(stderr.contains("--fetch"), "{stderr}");
+}
+
+#[test]
+fn create_fresh_retains_the_dirty_source_warning() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+    fs::write(repo.main.join("dirty.txt"), "dirty\n").unwrap();
+
+    let output = create_command(&repo, &xdg, &["create", "topic/dirty"]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("remain in the source worktree")
+    );
+}
+
+#[test]
+fn switch_confirmation_names_the_fresh_base() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    let published = git_output(&repo.main, ["rev-parse", "origin/main"]);
+    advance_local_head(&repo);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["switch", "topic/confirmed"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = run_pty_command(command, b"y\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(
+        stderr.contains(&format!("from branch \"origin/main\" at {published}")),
+        "{stderr}"
+    );
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "topic/confirmed"]),
+        published
+    );
+}
+
+#[test]
+fn create_dry_run_reflects_the_configured_base() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    let published = git_output(&repo.main, ["rev-parse", "origin/main"]);
+    advance_local_head(&repo);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let output = create_command(&repo, &xdg, &["create", "topic/planned", "--dry-run"]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(&format!("from branch \"origin/main\" at {published}")),
+        "{stderr}"
+    );
+    assert!(git_output(&repo.main, ["branch", "--list", "topic/planned"]).is_empty());
+}
+
+#[test]
+fn fetch_refreshes_a_stale_base_ref_before_branching() {
+    let repo = Repository::new();
+    let origin = add_local_origin(&repo);
+    let stale = git_output(&repo.main, ["rev-parse", "origin/main"]);
+    let advanced = advance_origin(&repo, &origin);
+    assert_ne!(stale, advanced);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    // Without the flag, fresh mode uses the tracking ref exactly as it stands.
+    let offline = create_command(&repo, &xdg, &["create", "topic/offline"]);
+    assert!(
+        offline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&offline.stderr)
+    );
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "topic/offline"]),
+        stale
+    );
+
+    let fetched = create_command(&repo, &xdg, &["create", "topic/fetched", "--fetch"]);
+    assert!(
+        fetched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fetched.stderr)
+    );
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "topic/fetched"]),
+        advanced
+    );
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "origin/main"]),
+        advanced,
+        "only the resolved base ref is refreshed"
+    );
+}
+
+#[test]
+fn fetch_is_rejected_when_it_would_do_nothing() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    git(&repo.main, ["branch", "topic/local"]);
+    git(&repo.main, ["push", "origin", "main:published"]);
+    git(&repo.main, ["fetch", "origin"]);
+    let root = repo.temp.path().join("created");
+    let fresh = config_home_with(&root, "  base: fresh\n");
+    let head = config_home_with(&root, "  base: head\n");
+
+    let head_mode = create_command(&repo, &head, &["create", "topic/new", "--fetch"]);
+    assert!(!head_mode.status.success());
+    assert!(
+        String::from_utf8(head_mode.stderr)
+            .unwrap()
+            .contains("worktrees.base is 'head'")
+    );
+
+    for (branch, reason) in [
+        ("topic/local", "already exists locally"),
+        ("published", "already has a remote-tracking ref"),
+        ("feature", "already has a registered worktree"),
+    ] {
+        let output = create_command(&repo, &fresh, &["create", branch, "--fetch"]);
+        assert!(!output.status.success(), "{branch}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(reason), "{branch}: {stderr}");
+        assert!(output.stdout.is_empty(), "{branch}");
+    }
+}
+
+#[test]
+fn create_dry_run_reports_the_fetch_as_unattempted() {
+    let repo = Repository::new();
+    let origin = add_local_origin(&repo);
+    let stale = git_output(&repo.main, ["rev-parse", "origin/main"]);
+    advance_origin(&repo, &origin);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let output = create_command(
+        &repo,
+        &xdg,
+        &["create", "topic/planned", "--dry-run", "--fetch"],
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Would fetch origin/main"), "{stderr}");
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "origin/main"]),
+        stale,
+        "a dry run must not refresh the tracking ref"
+    );
+}
+
+#[test]
+fn json_create_bases_a_new_branch_on_the_fresh_tracking_ref() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    let published = git_output(&repo.main, ["rev-parse", "origin/main"]);
+    advance_local_head(&repo);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let output = create_command(&repo, &xdg, &["create", "topic/json", "--output", "json"]);
+
+    let value = assert_json_pure(&output);
+    assert!(output.status.success());
+    assert_eq!(value["result"]["outcome"], "created");
+    assert_eq!(value["result"]["kind"], "new");
+    assert_eq!(value["result"]["start_point"], published);
+    assert_eq!(value["result"]["base_ref"], "origin/main");
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "topic/json"]),
+        published
+    );
+}
+
+#[test]
+fn json_switch_dry_run_reports_the_fresh_base_and_an_unattempted_fetch() {
+    let repo = Repository::new();
+    let origin = add_local_origin(&repo);
+    let stale = git_output(&repo.main, ["rev-parse", "origin/main"]);
+    advance_origin(&repo, &origin);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let output = create_command(
+        &repo,
+        &xdg,
+        &[
+            "switch",
+            "topic/json",
+            "--dry-run",
+            "--fetch",
+            "--output",
+            "json",
+        ],
+    );
+
+    let value = assert_json_pure(&output);
+    assert!(output.status.success());
+    assert_eq!(value["result"]["outcome"], "creation_plan");
+    assert_eq!(value["result"]["approval_required"], true);
+    assert_eq!(value["result"]["start_point"], stale);
+    assert_eq!(value["result"]["base_ref"], "origin/main");
+    let fetch = value["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["action"] == "fetch_base_ref")
+        .expect("the plan names the fetch it would run");
+    assert_eq!(fetch["attempted"], false);
+    assert_eq!(fetch["completed"], false);
+    assert_eq!(fetch["details"]["ref"], "origin/main");
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "origin/main"]),
+        stale,
+        "a dry run must not refresh the tracking ref"
+    );
+}
+
+#[test]
+fn json_reports_an_inapplicable_fetch_as_a_typed_error() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: head\n");
+
+    let output = create_command(
+        &repo,
+        &xdg,
+        &["create", "topic/json", "--fetch", "--output", "json"],
+    );
+
+    let value = assert_json_pure(&output);
+    assert!(!output.status.success());
+    assert_eq!(value["error"]["code"], "create.fetch_not_applicable");
+    assert!(git_output(&repo.main, ["branch", "--list", "topic/json"]).is_empty());
+}
+
+#[test]
+fn json_request_mode_create_accepts_the_fetch_option() {
+    let repo = Repository::new();
+    let origin = add_local_origin(&repo);
+    let advanced = advance_origin(&repo, &origin);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    command
+        .args(["create", "--input-output", "json"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "request_id": "create-fetch-1",
+        "input": {"branch": "topic/requested", "fetch": true},
+    });
+    let mut stdin = child.stdin.take().unwrap();
+    serde_json::to_writer(&mut stdin, &request).unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+
+    let value = assert_json_pure(&output);
+    assert!(output.status.success());
+    assert_eq!(value["request_id"], "create-fetch-1");
+    assert_eq!(value["result"]["start_point"], advanced);
+    assert_eq!(value["result"]["base_ref"], "origin/main");
+    let fetch = value["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["action"] == "fetch_base_ref")
+        .expect("the response reports the fetch it ran");
+    assert_eq!(fetch["attempted"], true);
+    assert_eq!(fetch["completed"], true);
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "topic/requested"]),
+        advanced
+    );
+}
+
+#[test]
+fn json_reports_an_unresolvable_fresh_base_as_a_typed_error() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let output = create_command(&repo, &xdg, &["create", "topic/json", "--output", "json"]);
+
+    let value = assert_json_pure(&output);
+    assert!(!output.status.success());
+    assert_eq!(value["error"]["code"], "create.base_unavailable");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(message.contains("worktrees.target-branch"), "{message}");
+    assert!(
+        message.contains("git remote set-head origin -a"),
+        "{message}"
+    );
+    assert!(git_output(&repo.main, ["branch", "--list", "topic/json"]).is_empty());
+}
+
+#[test]
+fn dry_run_previews_a_multi_remote_branch_without_prompting() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+    for remote in ["alpha", "beta"] {
+        let bare = repo.temp.path().join(format!("{remote}.git"));
+        let output = Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(&bare)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        git(
+            &repo.main,
+            ["remote", "add", remote, bare.to_str().unwrap()],
+        );
+        git(&repo.main, ["push", remote, "main:shared"]);
+    }
+    git(&repo.main, ["fetch", "--all"]);
+
+    // No PTY: resolving the remote choice here would fail the interactivity
+    // preflight, and a preview has no reason to make that choice at all.
+    let output = create_command(&repo, &xdg, &["switch", "shared", "--dry-run"]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("Would create a worktree for shared")
+    );
+}
+
+#[test]
+fn switch_dry_run_names_the_fresh_base_on_the_human_rail() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    let published = git_output(&repo.main, ["rev-parse", "origin/main"]);
+    advance_local_head(&repo);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let output = create_command(&repo, &xdg, &["switch", "topic/preview", "--dry-run"]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(&format!("from branch \"origin/main\" at {published}")),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn json_rejects_a_fetch_for_a_branch_that_is_not_genuinely_new() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    git(&repo.main, ["branch", "topic/local"]);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    for (branch, reason) in [
+        ("topic/local", "already exists locally"),
+        ("feature", "already has a registered worktree"),
+    ] {
+        let output = create_command(
+            &repo,
+            &xdg,
+            &["create", branch, "--fetch", "--output", "json"],
+        );
+        let value = assert_json_pure(&output);
+        assert!(!output.status.success(), "{branch}");
+        assert_eq!(value["error"]["code"], "create.fetch_not_applicable");
+        assert!(
+            value["error"]["message"].as_str().unwrap().contains(reason),
+            "{branch}: {value}"
+        );
+    }
+}
+
+#[test]
+fn json_help_exposes_the_fetch_input_and_base_error_codes() {
+    let repo = Repository::new();
+
+    for command in ["switch", "create"] {
+        let output = json_command(&repo.main, &[command, "--help", "--output", "json"], None);
+        let value = assert_json_pure(&output);
+        let schema = serde_json::to_string(&value["result"]["request_schema"]).unwrap();
+        assert!(schema.contains("\"fetch\""), "{command}: {schema}");
+        assert!(schema.contains("\"branch\""), "{command}: {schema}");
+        assert!(schema.contains("\"dry_run\""), "{command}: {schema}");
+        let errors = serde_json::to_string(&value["result"]["error_codes"]).unwrap();
+        assert!(
+            errors.contains(&format!("{command}.fetch_not_applicable")),
+            "{command}: {errors}"
+        );
+        assert!(
+            errors.contains(&format!("{command}.base_unavailable")),
+            "{command}: {errors}"
+        );
+    }
 }

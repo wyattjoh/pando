@@ -4,11 +4,11 @@ All three files are strict YAML (`deny_unknown_fields` on every struct):
 malformed files, duplicate/unknown keys, wrong types, empty `command`
 strings, and empty `name` strings are all hard errors with file context.
 
-| Layer | Path | Can set placement (`worktrees.root`) | Can set `worktrees.default-sort` | Can set hooks | Can set `commit.generation.*` |
-|---|---|---|---|---|---|
-| Global | `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml` | yes | yes | **no** | yes |
-| Shared | `.worktrees.yaml` in the **invoking** worktree | **no** (only `target-branch`) | **no** | yes | yes (untrusted — needs `worktrees trust commit-approve`) |
-| Local | `.worktrees.local.yaml` in the **primary** worktree | yes | yes | yes | yes |
+| Layer | Path | Can set placement (`worktrees.root`) | Can set `worktrees.default-sort` | Can set `worktrees.base` | Can set hooks | Can set `commit.generation.*` |
+|---|---|---|---|---|---|---|
+| Global | `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml` | yes | yes | yes | **no** | yes |
+| Shared | `.worktrees.yaml` in the **invoking** worktree | **no** (only `target-branch` and `base`) | **no** | yes | yes | yes (untrusted — needs `worktrees trust commit-approve`) |
+| Local | `.worktrees.local.yaml` in the **primary** worktree | yes | yes | yes | yes | yes |
 
 `worktrees install` adds a commented scaffold to the global YAML file. It
 never enables a setting or edits existing user configuration. The scaffold is
@@ -90,6 +90,35 @@ creation. When it is omitted, operations fall back to the local branch pointed
 to by `origin/HEAD`, then local `main`, then local `master`. Set it in
 `.worktrees.yaml` or the global config when a different target is needed.
 
+May also set where new branches are cut from — the one placement-adjacent
+key legal in all three layers:
+
+```yaml
+worktrees:
+  base: fresh
+```
+
+## New-branch base
+
+`worktrees.base` accepts only `head` or `fresh`; anything else is a hard
+error naming the file. It resolves local, then shared, then global, and
+defaults to `head`.
+
+| Value | Where a genuinely new branch starts |
+|---|---|
+| `head` (default) | The invoking worktree's committed `HEAD` — today's behavior |
+| `fresh` | The remote-tracking ref of `target-branch`, or of the branch named by the remote's `origin/HEAD` when no target branch is set |
+
+`fresh` reads local refs only. If neither `target-branch` nor `origin/HEAD`
+names a branch, or the resolved `origin/<branch>` was never fetched into the
+clone, creation fails with guidance (`git fetch`,
+`git remote set-head origin -a`, or configure `target-branch`) rather than
+branching from the wrong point. `worktrees switch --fetch` and
+`worktrees create --fetch` refresh exactly that one base ref first; see
+`commands/switch.md`. The base only changes the start point of a genuinely
+new branch — resolution of existing worktrees, local branches, and remote
+matches is unchanged.
+
 ## 3. Personal per-clone overlay
 
 ```yaml
@@ -149,7 +178,9 @@ pr:
   (`.worktrees.local.yaml`) steps, concatenated per phase.
 - **Root**: local root overrides global root. There is no intermediate
   "shared root" — the shared file cannot set `worktrees.root` at all, only
-  `worktrees.target-branch`.
+  `worktrees.target-branch` and `worktrees.base`.
+- **Base**: local, then shared, then global — the only `worktrees` key that
+  layers through all three files.
 - **Default sort**: the ignored local value overrides the global value. The
   committed shared file cannot set this personal interface preference.
 - **Commit generation** (`command` and `template` resolve independently):

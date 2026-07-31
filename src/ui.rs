@@ -238,6 +238,18 @@ pub fn declined_noop(message: impl Into<String>, completion: impl Into<String>) 
     InteractionError::declined(message, Some(completion.into())).into()
 }
 
+/// How a timed operation renders its success state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Completion {
+    /// A mid-rail step, because more output follows in the same sequence.
+    Step,
+    /// The closing outro, because the success is the last thing the rail says.
+    ///
+    /// The message keeps the accent bar and plain text of an info line rather
+    /// than the bold success style, so the rail opens and closes in one voice.
+    Outro,
+}
+
 /// Runs a potentially slow operation with a timed human-mode progress indicator.
 ///
 /// The operation receives whether an animated spinner owns stderr. Callers that
@@ -253,6 +265,33 @@ pub fn run_timed<T>(
     starting: &str,
     completed: &str,
     failed: &str,
+    operation: impl FnOnce(bool) -> Result<T>,
+) -> Result<T> {
+    run_timed_completing(
+        enabled,
+        starting,
+        completed,
+        failed,
+        Completion::Step,
+        operation,
+    )
+}
+
+/// Runs a timed operation whose success may close the sequence instead of stepping it.
+///
+/// This still owns exactly one terminal state per run: callers must not render
+/// their own progress, step, or outro around it.
+///
+/// # Errors
+///
+/// Returns the operation error after closing the indicator, or a terminal write
+/// error when progress output cannot be rendered.
+pub fn run_timed_completing<T>(
+    enabled: bool,
+    starting: &str,
+    completed: &str,
+    failed: &str,
+    completion: Completion,
     operation: impl FnOnce(bool) -> Result<T>,
 ) -> Result<T> {
     if !enabled {
@@ -276,11 +315,23 @@ pub fn run_timed<T>(
     let elapsed = muted_style().apply_to(format!("{}s", started.elapsed().as_secs()));
     match result {
         Ok(value) => {
-            let message = format!("{} {elapsed}", heading_style().apply_to(completed));
-            if let Some(progress) = &progress {
-                progress.stop(message);
-            } else {
-                step(message)?;
+            match completion {
+                Completion::Step => {
+                    let message = format!("{} {elapsed}", heading_style().apply_to(completed));
+                    if let Some(progress) = &progress {
+                        progress.stop(message);
+                    } else {
+                        step(message)?;
+                    }
+                }
+                Completion::Outro => {
+                    // The outro is the terminal state, so retire the spinner
+                    // without letting it print a step of its own first.
+                    if let Some(progress) = &progress {
+                        progress.clear();
+                    }
+                    finish(format!("{completed} {elapsed}"))?;
+                }
             }
             Ok(value)
         }
