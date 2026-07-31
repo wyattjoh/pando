@@ -1,4 +1,5 @@
 pub mod commit;
+pub mod completion;
 pub mod config;
 pub mod git;
 mod hash;

@@ -5596,3 +5596,114 @@ fn complete(dir: &Path, words: &[&str]) -> Vec<String> {
         })
         .collect()
 }
+
+#[test]
+fn switch_completes_local_and_remote_branches() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "solo"]);
+    // A remote-tracking ref without a matching local branch. Created directly
+    // so the test needs no network and no second repository.
+    git(
+        &repo.main,
+        ["update-ref", "refs/remotes/origin/remote-only", "HEAD"],
+    );
+
+    let candidates = complete(&repo.main, &["worktrees", "switch", ""]);
+
+    assert!(candidates.iter().any(|value| value == "main"));
+    assert!(candidates.iter().any(|value| value == "feature"));
+    assert!(candidates.iter().any(|value| value == "solo"));
+    assert!(candidates.iter().any(|value| value == "origin/remote-only"));
+}
+
+#[test]
+fn switch_hides_remote_refs_that_shadow_a_local_branch() {
+    let repo = Repository::new();
+    git(
+        &repo.main,
+        ["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+
+    let candidates = complete(&repo.main, &["worktrees", "switch", ""]);
+
+    assert!(candidates.iter().any(|value| value == "main"));
+    assert!(
+        !candidates.iter().any(|value| value == "origin/main"),
+        "a remote ref shadowing a local branch is redundant: {candidates:?}"
+    );
+}
+
+#[test]
+fn create_excludes_branches_that_already_have_a_worktree() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "solo"]);
+
+    let candidates = complete(&repo.main, &["worktrees", "create", ""]);
+
+    assert!(candidates.iter().any(|value| value == "solo"));
+    assert!(
+        !candidates.iter().any(|value| value == "feature"),
+        "feature already has a worktree: {candidates:?}"
+    );
+    assert!(
+        !candidates.iter().any(|value| value == "main"),
+        "main is the primary worktree: {candidates:?}"
+    );
+}
+
+#[test]
+fn remove_offers_only_branches_with_a_topic_worktree() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "solo"]);
+
+    let candidates = complete(&repo.main, &["worktrees", "remove", ""]);
+
+    assert!(candidates.iter().any(|value| value == "feature"));
+    assert!(
+        !candidates.iter().any(|value| value == "solo"),
+        "solo has no worktree to remove: {candidates:?}"
+    );
+    assert!(
+        !candidates.iter().any(|value| value == "main"),
+        "the primary worktree is not removable: {candidates:?}"
+    );
+}
+
+#[test]
+fn branch_completion_filters_by_prefix() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "feat-a"]);
+    git(&repo.main, ["branch", "other"]);
+
+    let candidates = complete(&repo.main, &["worktrees", "switch", "feat"]);
+
+    assert!(candidates.iter().any(|value| value == "feat-a"));
+    assert!(!candidates.iter().any(|value| value == "other"));
+}
+
+#[test]
+fn branch_completion_outside_a_repository_is_silent() {
+    let outside = tempfile::tempdir().unwrap();
+
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let output = command
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .arg("--")
+        .args(["worktrees", "switch", ""])
+        .current_dir(outside.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(
+        output.stderr.is_empty(),
+        "a completion widget must never print diagnostics: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.lines().any(|line| line.contains("error")),
+        "no error text may reach the completion line: {stdout}"
+    );
+}
