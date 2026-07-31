@@ -255,6 +255,8 @@ JSON mode emits exactly one document on stdout and nothing on stderr. Errors are
 
 `worktrees merge [--no-rebase] [--no-remove] [--yolo]` integrates the current clean topic into the configured target checked out in the primary worktree using `git merge --ff-only`. When no target is configured, it falls back to the already-fetched `origin/HEAD` branch, then local `main`, then local `master`, without fetching. A diverged topic rebases by default. `--yolo` first runs the equivalent of `worktrees commit --stage-all`, using the configured commit-message generator, and then merges if the commit succeeds. It is available only with human output and cannot be combined with `--dry-run`. Phase-specific `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries; the journal pins recovery state through conflicts and cleanup retries.
 
+`merge` also works from the primary worktree when a topic branch is checked out there directly rather than in a linked worktree. It rebases and fast-forwards as usual, then switches the primary worktree to the target branch and keeps the topic branch. There is nothing to remove, so `pre-remove` hooks do not run and no destination is written to stdout. Running it from the primary worktree while the target branch is already checked out fails.
+
 ## Context queries
 
 Every successful `get` command writes exactly one value and a newline:

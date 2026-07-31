@@ -34,6 +34,9 @@ pub struct MergeContext {
     pub target_commit: String,
     pub topic_worktree: BytePath,
     pub primary_worktree: BytePath,
+    /// The topic branch is checked out in the primary worktree itself, so the
+    /// merge switches that worktree to the target instead of removing anything.
+    pub in_place: bool,
     pub cleanup_pending: bool,
     pub journaled: bool,
     pub rebase_active: bool,
@@ -66,6 +69,7 @@ pub enum PreflightFailureKind {
     LifecycleActive,
     JournalInvalid,
     UnknownTarget,
+    NothingToMerge,
     PolicyConflict,
     Dirty,
     NotFastForwardable,
@@ -119,12 +123,7 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool) -> PreflightResult<MergePlan
         .primary
         .as_ref()
         .context("cannot merge from a bare repository")?;
-    if repository.current().path == *primary {
-        return Err(preflight(
-            PreflightFailureKind::PrimaryForbidden,
-            "merge must run from a topic worktree, not the primary worktree",
-        ));
-    }
+    let in_place = repository.current().path == *primary;
     let identity = git::worktree_identity(&repository.current().path)?;
     let journal = read_journal(&repository.common_dir, &identity)?;
     let rebase_active = git::rebase_in_progress(&repository.current().path)?;
@@ -169,14 +168,24 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool) -> PreflightResult<MergePlan
         |s| Ok(s.target_branch.clone()),
     )?;
     git::validate_branch(primary, &target)?;
-    if primary_branch(&repository)? != target {
+    let checked_out = primary_branch(&repository)?;
+    if in_place {
+        if journal.is_none() && checked_out == target {
+            return Err(preflight(
+                PreflightFailureKind::NothingToMerge,
+                format!(
+                    "the primary worktree is already on {target:?}; check out a topic branch before merging"
+                ),
+            ));
+        }
+    } else if checked_out != target {
         return Err(anyhow::anyhow!(
             "configured target branch {target:?} must be checked out in the primary worktree"
         )
         .into());
     }
     let source_commit = git::head_commit(&repository.current().path)?;
-    let target_commit = git::head_commit(primary)?;
+    let target_commit = git::branch_commit(primary, &target)?;
     let cleanup_pending = journal.as_ref().is_some_and(|s| s.cleanup_pending);
     let needs_rebase = !cleanup_pending
         && !rebase_active
@@ -198,10 +207,15 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool) -> PreflightResult<MergePlan
     };
     let pre_merge_hooks_trusted = config.pre_merge.is_empty()
         || trust::is_trusted(&repository, HookPhase::PreMerge, &config.pre_merge)?;
-    let remove_config =
-        EffectiveConfig::load_for_worktree(&repository, &repository.current().path)?;
-    let pre_remove_hooks_trusted = remove_config.pre_remove.is_empty()
-        || trust::is_trusted(&repository, HookPhase::PreRemove, &remove_config.pre_remove)?;
+    // An in-place merge removes nothing, so its pre-remove hooks never run.
+    let pre_remove_hooks_trusted = if in_place {
+        true
+    } else {
+        let remove_config =
+            EffectiveConfig::load_for_worktree(&repository, &repository.current().path)?;
+        remove_config.pre_remove.is_empty()
+            || trust::is_trusted(&repository, HookPhase::PreRemove, &remove_config.pre_remove)?
+    };
     let context = MergeContext {
         source_branch: source,
         target_branch: target,
@@ -214,6 +228,7 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool) -> PreflightResult<MergePlan
         target_commit,
         topic_worktree: BytePath::path(&repository.current().path),
         primary_worktree: BytePath::path(primary),
+        in_place,
         cleanup_pending,
         journaled: journal.is_some(),
         rebase_active,
@@ -268,15 +283,7 @@ pub struct RemovalTarget {
 enum MergeWorktreeOutcome {
     Retained,
     Removed,
-}
-
-impl MergeWorktreeOutcome {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Retained => "retained",
-            Self::Removed => "removed",
-        }
-    }
+    SwitchedInPlace,
 }
 
 /// Removes selected topic worktrees and emits a destination only if the current
@@ -359,15 +366,19 @@ pub fn remove_dry_run(branches: &[String], force: bool) -> Result<()> {
 /// Returns an error when merge preflight fails or output cannot be rendered.
 pub fn merge_dry_run(no_rebase: bool, no_remove: bool) -> Result<()> {
     let plan = plan_merge(no_rebase, no_remove)?;
+    let follow_up = if plan.context.in_place {
+        format!(
+            " and switch the primary worktree to {}",
+            plan.context.target_branch
+        )
+    } else if no_remove {
+        " and retain the topic worktree".to_owned()
+    } else {
+        " and remove the topic worktree".to_owned()
+    };
     ui::finish(format!(
-        "Would merge {} into {}{}; no changes made.",
-        plan.context.source_branch,
-        plan.context.target_branch,
-        if no_remove {
-            " and retain the topic worktree"
-        } else {
-            " and remove the topic worktree"
-        }
+        "Would merge {} into {}{follow_up}; no changes made.",
+        plan.context.source_branch, plan.context.target_branch,
     ))
 }
 
@@ -384,9 +395,7 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
         .primary
         .as_ref()
         .context("cannot merge from a bare repository")?;
-    if repository.current().path == *primary {
-        bail!("merge must run from a topic worktree, not the primary worktree");
-    }
+    let in_place = repository.current().path == *primary;
     let identity = git::worktree_identity(&repository.current().path)?;
     let mut journal = read_journal(&repository.common_dir, &identity)?;
     let rebase_active = git::rebase_in_progress(&repository.current().path)?;
@@ -420,10 +429,16 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
             .context("failed to resolve merge target")?,
     };
     git::validate_branch(primary, &target)?;
-    let primary_branch = primary_branch(&repository)?;
-    if primary_branch != target {
+    let checked_out = primary_branch(&repository)?;
+    if in_place {
+        if journal.is_none() && checked_out == target {
+            bail!(
+                "the primary worktree is already on {target:?}; check out a topic branch before merging"
+            );
+        }
+    } else if checked_out != target {
         bail!(
-            "configured target branch {target:?} must be checked out in the primary worktree (currently {primary_branch:?})"
+            "configured target branch {target:?} must be checked out in the primary worktree (currently {checked_out:?})"
         );
     }
     if let Some(state) = journal.as_ref().filter(|state| state.cleanup_pending) {
@@ -470,7 +485,7 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
         )?)?;
     }
     let refreshed = git::head_commit(&repository.current().path)?;
-    let target_commit = git::head_commit(primary)?;
+    let target_commit = git::branch_commit(primary, &target)?;
     let mut state = journal.context("lifecycle journal was not recorded before integration")?;
     if state.validated_source.as_deref() != Some(&refreshed)
         || state.validated_target.as_deref() != Some(&target_commit)
@@ -497,6 +512,17 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
     if !git::is_ancestor(&repository.current().path, &target, &refreshed)? {
         bail!("the target advanced during validation; rerun merge to revalidate the new candidate");
     }
+    // In place, the target is not checked out anywhere yet; claim it in the
+    // primary worktree so the fast-forward has somewhere to land.
+    if in_place && primary_branch(&repository)? != target {
+        report(&ui::run_timed(
+            true,
+            &format!("Switching to {target}..."),
+            &format!("Switched to {target}"),
+            &format!("Failed to switch to {target}"),
+            |animated| git::switch_branch(primary, &target, !animated),
+        )?)?;
+    }
     report(&ui::run_timed(
         true,
         &format!("Merging into {target}..."),
@@ -504,6 +530,10 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
         &format!("Failed to merge into {target}"),
         |animated| git::merge_ff_only(primary, &source, !animated),
     )?)?;
+    if in_place {
+        remove_journal(&repository.common_dir, &state.topic_identity)?;
+        return ui::finish(merge_summary(&state, MergeWorktreeOutcome::SwitchedInPlace));
+    }
     if state.no_remove {
         remove_journal(&repository.common_dir, &state.topic_identity)?;
         return ui::finish(merge_summary(&state, MergeWorktreeOutcome::Retained));
@@ -545,13 +575,21 @@ fn cleanup_merge(repository: &Repository, state: &MergeJournal) -> Result<()> {
 }
 
 fn merge_summary(state: &MergeJournal, worktree_outcome: MergeWorktreeOutcome) -> String {
+    let epilogue = match worktree_outcome {
+        MergeWorktreeOutcome::Retained => "; worktree retained.".to_owned(),
+        MergeWorktreeOutcome::Removed => "; worktree removed.".to_owned(),
+        MergeWorktreeOutcome::SwitchedInPlace => format!(
+            "; primary worktree now on {}, branch retained.",
+            state.target_branch
+        ),
+    };
     format!(
         "{} {} {} {}{}",
         ui::success_style().apply_to("Merged"),
         ui::worktree_data_style().apply_to(&state.source_branch),
         ui::success_style().apply_to("into"),
         ui::worktree_data_style().apply_to(&state.target_branch),
-        ui::success_style().apply_to(format!("; worktree {}.", worktree_outcome.label())),
+        ui::success_style().apply_to(epilogue),
     )
 }
 

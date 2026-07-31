@@ -1284,14 +1284,14 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
                 crate::lifecycle::PreflightFailureKind::NotFastForwardable => {
                     "merge.not_fast_forwardable"
                 }
-                crate::lifecycle::PreflightFailureKind::PrimaryForbidden => {
-                    "merge.primary_forbidden"
-                }
+                crate::lifecycle::PreflightFailureKind::NothingToMerge => "merge.nothing_to_merge",
                 _ => "merge.blocked",
             };
             return emit_err("merge", id, code, message);
         }
     };
+    // An in-place merge owns no topic worktree, so removal and the `cd` destination never apply.
+    let removes = !input.no_remove && !plan.context.in_place;
     let context = serde_json::to_value(&plan.context)?;
     let mut effects = vec![
         Effect {
@@ -1325,22 +1325,20 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
             attempted: false,
             completed: false,
             details: Some(
-                json!({"applicable":!input.no_remove,"trusted":plan.context.pre_remove_hooks_trusted}),
+                json!({"applicable":removes,"trusted":plan.context.pre_remove_hooks_trusted}),
             ),
         },
         Effect {
             action: "remove_worktree".into(),
             attempted: false,
             completed: false,
-            details: Some(json!({"applicable":!input.no_remove})),
+            details: Some(json!({"applicable":removes})),
         },
         Effect {
             action: "destination".into(),
             attempted: false,
             completed: false,
-            details: Some(
-                json!({"applicable":!input.no_remove,"path":plan.context.primary_worktree}),
-            ),
+            details: Some(json!({"applicable":removes,"path":plan.context.primary_worktree})),
         },
     ];
     let approval_blocked = if plan.context.cleanup_pending {
@@ -1352,7 +1350,7 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
         let mut response = protocol::success(
             "merge",
             id,
-            json!({"outcome":"dry_run","plan":if input.no_remove{"retained_topic"}else{"cleanup"},"policy":plan.context.policy,"ready":!approval_blocked,"approval_required":approval_blocked}),
+            json!({"outcome":"dry_run","plan":if plan.context.in_place{"in_place"}else if input.no_remove{"retained_topic"}else{"cleanup"},"policy":plan.context.policy,"ready":!approval_blocked,"approval_required":approval_blocked}),
             context,
             effects,
         );
@@ -1402,19 +1400,18 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
     effects[2].completed = after_cleanup || succeeded;
     effects[3].attempted = !plan.context.cleanup_pending && !after_rebase;
     effects[3].completed = after_cleanup || succeeded;
-    let cleanup_attempted =
-        !input.no_remove && (plan.context.cleanup_pending || after_cleanup || succeeded);
+    let cleanup_attempted = removes && (plan.context.cleanup_pending || after_cleanup || succeeded);
     effects[4].attempted = cleanup_attempted;
-    effects[4].completed = !input.no_remove && succeeded;
+    effects[4].completed = removes && succeeded;
     effects[5].attempted = cleanup_attempted;
-    effects[5].completed = !input.no_remove && succeeded;
-    effects[6].attempted = !input.no_remove && succeeded;
-    effects[6].completed = !input.no_remove && succeeded;
+    effects[5].completed = removes && succeeded;
+    effects[6].attempted = removes && succeeded;
+    effects[6].completed = removes && succeeded;
     let mut response = if succeeded {
         protocol::success(
             "merge",
             id,
-            json!({"outcome":if input.no_remove{"retained"}else{"removed"},"destination":if input.no_remove{None}else{Some(&plan.context.primary_worktree)}}),
+            json!({"outcome":if removes{"removed"}else{"retained"},"destination":if removes{Some(&plan.context.primary_worktree)}else{None}}),
             json!({"initial":plan.context,"phase":"complete"}),
             effects,
         )
