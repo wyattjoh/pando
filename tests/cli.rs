@@ -5528,3 +5528,71 @@ fn json_help_exposes_the_fetch_input_and_base_error_codes() {
         );
     }
 }
+
+#[test]
+fn complete_env_emits_a_zsh_registration_script() {
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let output = command.env("COMPLETE", "zsh").output().unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("#compdef worktrees"));
+    assert!(stdout.contains("compdef _clap_dynamic_completer_worktrees worktrees"));
+}
+
+#[test]
+fn complete_env_completes_subcommands() {
+    let candidates = complete(&std::env::current_dir().unwrap(), &["worktrees", ""]);
+
+    assert!(candidates.iter().any(|value| value == "switch"));
+    assert!(candidates.iter().any(|value| value == "create"));
+    assert!(candidates.iter().any(|value| value == "remove"));
+}
+
+#[test]
+fn complete_env_completes_flags() {
+    let candidates = complete(&std::env::current_dir().unwrap(), &["worktrees", "--out"]);
+
+    assert!(candidates.iter().any(|value| value == "--output"));
+}
+
+#[test]
+fn complete_env_completes_get_properties() {
+    let candidates = complete(&std::env::current_dir().unwrap(), &["worktrees", "get", ""]);
+
+    assert!(candidates.iter().any(|value| value == "branch"));
+    assert!(candidates.iter().any(|value| value == "port"));
+    assert!(candidates.iter().any(|value| value == "worktree-path"));
+}
+
+/// Drives the `COMPLETE=zsh` protocol and returns candidate values with any
+/// `:help` suffix stripped. The final entry of `words` is the word being
+/// completed, matching how zsh passes `${words[@]}`.
+fn complete(dir: &Path, words: &[&str]) -> Vec<String> {
+    let index = words.len() - 1;
+    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let output = command
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", index.to_string())
+        .arg("--")
+        .args(words)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "completion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.split_once(':')
+                .map_or(line, |(value, _)| value)
+                .to_owned()
+        })
+        .collect()
+}

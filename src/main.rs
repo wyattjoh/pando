@@ -1,7 +1,7 @@
 use std::env;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use worktrees::{
     Row, commit,
     config::EffectiveConfig,
@@ -148,6 +148,12 @@ enum PrCommand {
 }
 
 fn main() {
+    // Must precede every other statement: `complete` writes candidates to stdout
+    // and exits when `COMPLETE` is set, and clap documents that stdout must not
+    // be written to beforehand. Placing it here also keeps a completion request
+    // out of the `--output json` protocol path below.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
     let args: Vec<_> = env::args_os().collect();
     let json_requested = args
         .windows(2)
