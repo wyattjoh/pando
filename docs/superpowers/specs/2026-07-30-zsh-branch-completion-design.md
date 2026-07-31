@@ -52,12 +52,18 @@ thin dispatcher. Each returns `Vec<CompletionCandidate>`.
 
 | Producer | Offers |
 |---|---|
-| `switch_candidates` | local branches, grouped `local branches`; plus refs under `refs/remotes` whose short name has no local branch, grouped `remote branches` |
+| `switch_candidates` | local branches; plus refs under `refs/remotes` whose short name has no local branch, each helped `remote branch` |
 | `create_candidates` | the same set, minus branches already registered as a worktree |
 | `remove_candidates` | only branches with a registered non-primary worktree; candidate help text is the worktree path |
 
-Grouping uses `CompletionCandidate::tag`, which zsh renders as a heading above
-each group.
+Remote candidates are distinguished by help text (`remote branch`), not by a
+group heading. `clap_complete`'s stock zsh script funnels every candidate through
+a single `_describe -V 'values'` call and ignores `CompletionCandidate::tag`, so
+per-group headings are not reachable without replacing that script. Help text is
+rendered beside each value, which achieves the distinction the grouping was for.
+
+Producers return the full candidate set and do not filter by the partial word.
+`clap_complete`'s engine applies prefix filtering itself.
 
 Every producer is best-effort. A git failure, a cwd outside a repository, or a
 malformed ref yields an empty `Vec` — never an `Err`, never output on stderr. A
@@ -80,23 +86,49 @@ registration come from the existing `discover_branches` and `repository`.
 
 ## Install wiring
 
-`INTEGRATION` in `src/install.rs` changes from a `&[u8]` const to a computed
-`Vec<u8>`: the existing const, followed by `clap_complete`'s generated zsh
-registration script, followed by `compdef _clap_dynamic_completer_worktrees wt`.
+`INTEGRATION` in `src/install.rs` stays a `&[u8]` const and gains a trailing
+block that evaluates the registration script at shell startup:
+
+```zsh
+if [[ -o interactive ]] && (( $+functions[compdef] )); then
+  eval "$(COMPLETE=zsh command worktrees 2>/dev/null)"
+  compdef _clap_dynamic_completer_worktrees wt
+fi
+```
+
+The registration script is **generated at startup, not cached**. `clap_complete`
+documents no stability guarantee between the script `write_registration` emits
+and the protocol `write_complete` expects, and explicitly warns that caching the
+script "may result in invalid or no completions". Caching it in `worktrees.zsh`
+would silently break completion whenever the binary is upgraded without re-running
+`wt install`. Generating it costs one process spawn per interactive shell,
+measured at under 3ms in a debug build.
+
+This also keeps `install.rs` unchanged in shape: `INTEGRATION` remains a const, so
+`install::run`, `install::preview`, `install::json_plan`, and `machine::install`
+keep their current signatures, and `Cli` stays in `main.rs`.
 
 `wt` is a symlink to the `worktrees` binary (see `justfile`), so one registration
-plus one extra `compdef` line covers both names.
+plus one extra `compdef` line covers both names. `CompleteEnv::completer` defaults
+to `args_os()[0]`, so invoking the eval as `command worktrees` bakes the bare name
+`worktrees` into the script rather than an absolute path, keeping it valid if the
+binary moves.
 
-The registration script is generated from `Cli::command()`, which lives in
-`main.rs` and is not visible to the library. Rather than move `Cli` into the
-library, the four install entry points — `install::run`, `install::preview`,
-`install::json_plan`, and `machine::install` — take the registration bytes as a
-parameter. This keeps the change local at the cost of one extra argument
-threaded through those call sites.
+The `compdef` guard matters: if the user's `.zshrc` runs `compinit` after the
+worktrees block, `compdef` does not yet exist. The block then skips registration
+rather than erroring, and a `precmd` one-shot retry re-attempts it once startup
+finishes.
 
 Everything else about installation is unchanged: one file, one atomic write, one
 `integration_changed` comparison, and the existing marker-block idempotency.
 Existing users pick up completion on their next `wt install`.
+
+The existing `install_preserves_zshrc_and_is_idempotent` test asserts no line in
+`worktrees.zsh` begins with `_`, because function-table snapshots drop `_name`
+functions. That assertion still holds: `_clap_dynamic_completer_worktrees` is only
+referenced mid-line in a `compdef` argument, and is defined at runtime by the
+eval'd script, where the underscore prefix is the completion system's own
+convention.
 
 ## Invariants preserved
 
