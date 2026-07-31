@@ -3,6 +3,14 @@
 Design for tab-completing branch arguments (and the rest of the CLI surface) in
 zsh for `worktrees` and its `wt` alias.
 
+> **Superseded in two places by the shipped implementation.** This document and
+> the matching plan both describe the environment variable as `COMPLETE`; the
+> final review found that name generic enough to hijack ordinary invocations, so
+> the code uses `_WORKTREES_COMPLETE`. They also describe remote candidates
+> inserting `origin/feature`; that string cannot be resolved by
+> `git::remote_matches`, so completion inserts the short name and names the
+> remote in help text instead. See commit 074bce5.
+
 ## Problem
 
 `wt switch <branch>`, `wt create <branch>`, and `wt remove <branches>...` take
