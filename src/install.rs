@@ -87,7 +87,16 @@ wt() { worktrees_dispatch wt "$@"; }
 # dispatcher above, and a dropped snapshot copy only disables completion.
 worktrees_register_completion() {
   (( $+functions[compdef] )) || return 1
-  eval "$(COMPLETE=zsh command worktrees 2>/dev/null)" || return 1
+  local script
+  # Captured into a variable rather than `eval "$(... )"` directly: if the
+  # binary is missing from PATH the command substitution yields an empty
+  # string, and `eval ""` exits 0. That would report registration as
+  # successful while leaving `_clap_dynamic_completer_worktrees` undefined,
+  # so `compdef` below would bind both names to a function that never
+  # existed and the precmd retry would never re-arm.
+  script="$(_WORKTREES_COMPLETE=zsh command worktrees 2>/dev/null)" || return 1
+  [[ -n "$script" ]] || return 1
+  eval "$script"
   compdef _clap_dynamic_completer_worktrees wt
   return 0
 }

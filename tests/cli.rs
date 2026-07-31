@@ -1828,7 +1828,7 @@ fn installed_integration_registers_completion_for_both_names() {
     assert!(installed.status.success(), "{}", installed.stderr);
 
     let generated = fs::read_to_string(xdg.path().join("worktrees/worktrees.zsh")).unwrap();
-    assert!(generated.contains("COMPLETE=zsh command worktrees"));
+    assert!(generated.contains("_WORKTREES_COMPLETE=zsh command worktrees"));
     assert!(generated.contains("compdef _clap_dynamic_completer_worktrees wt"));
     assert!(
         generated.contains("$+functions[compdef]"),
@@ -1887,6 +1887,62 @@ fn installed_integration_registers_compdef_under_real_zsh() {
     assert!(
         stdout.contains("wt=_clap_dynamic_completer_worktrees"),
         "wt was not registered: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `eval "$(... command worktrees ...)"` alone would `eval ""` when the binary
+/// is missing from PATH, which exits 0 and reports registration as successful
+/// while leaving `_clap_dynamic_completer_worktrees` undefined. Guards against
+/// that: with the binary excluded from PATH, neither `worktrees` nor `wt` may
+/// end up registered to a completion function that was never defined.
+#[test]
+fn worktrees_register_completion_does_not_register_when_binary_is_missing_from_path() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        eprintln!("skipping: zsh is not installed");
+        return;
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+
+    let installed = run_install(home.path(), xdg.path(), Some(zdot.path()), b"y\r");
+    assert!(installed.status.success(), "{}", installed.stderr);
+    let integration = xdg.path().join("worktrees/worktrees.zsh");
+
+    // Deliberately exclude the directory containing the built binary from
+    // PATH, simulating `.zshrc` sourcing the integration before the binary's
+    // install location (e.g. `~/.cargo/bin`) joins PATH.
+    let binary = assert_cmd::cargo::cargo_bin("worktrees");
+    let bin_dir = binary.parent().unwrap();
+    let path = std::env::var("PATH")
+        .unwrap()
+        .split(':')
+        .filter(|entry| Path::new(entry) != bin_dir)
+        .collect::<Vec<_>>()
+        .join(":");
+
+    let script = format!(
+        "autoload -Uz compinit && compinit -u -d {dump}\n\
+         source {integration}\n\
+         print -r -- \"registered=${{_comps[worktrees]}} wt=${{_comps[wt]}}\"\n",
+        dump = shell_quote(&xdg.path().join("zcompdump")),
+        integration = shell_quote(&integration),
+    );
+    let output = Command::new("zsh")
+        .args(["-i", "-c", &script])
+        .env("PATH", path)
+        .env("HOME", home.path())
+        .env("ZDOTDIR", zdot.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("_clap_dynamic_completer_worktrees"),
+        "neither name may be registered to a function that was never defined: \
+         {stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -5605,7 +5661,7 @@ fn json_help_exposes_the_fetch_input_and_base_error_codes() {
 #[test]
 fn complete_env_emits_a_zsh_registration_script() {
     let mut command = Command::cargo_bin("worktrees").unwrap();
-    let output = command.env("COMPLETE", "zsh").output().unwrap();
+    let output = command.env("_WORKTREES_COMPLETE", "zsh").output().unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -5638,14 +5694,45 @@ fn complete_env_completes_get_properties() {
     assert!(candidates.iter().any(|value| value == "worktree-path"));
 }
 
-/// Drives the `COMPLETE=zsh` protocol and returns candidate values with any
-/// `:help` suffix stripped. The final entry of `words` is the word being
-/// completed, matching how zsh passes `${words[@]}`.
+/// `COMPLETE` is generic enough to be set in a shell for unrelated reasons.
+/// `clap_complete`'s default trigger variable name is exactly that, so the
+/// binary is configured to listen on `_WORKTREES_COMPLETE` instead. A stray
+/// `COMPLETE` in the environment must leave `worktrees list` behaving
+/// normally rather than emitting a completion script on stdout, which the
+/// installed zsh dispatcher would otherwise `cd` into for `switch`.
+#[test]
+fn stray_complete_env_var_does_not_trigger_completion() {
+    let repo = Repository::new();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["list"])
+        .current_dir(&repo.main)
+        .env("COMPLETE", "bash")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("complete") && !stdout.contains("compdef"),
+        "a stray COMPLETE env var must not emit a completion script: {stdout}"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Worktrees"));
+}
+
+/// Drives the `_WORKTREES_COMPLETE=zsh` protocol and returns candidate values
+/// with any `:help` suffix stripped. The final entry of `words` is the word
+/// being completed, matching how zsh passes `${words[@]}`.
 fn complete(dir: &Path, words: &[&str]) -> Vec<String> {
     let index = words.len() - 1;
     let mut command = Command::cargo_bin("worktrees").unwrap();
     let output = command
-        .env("COMPLETE", "zsh")
+        .env("_WORKTREES_COMPLETE", "zsh")
         .env("_CLAP_COMPLETE_INDEX", index.to_string())
         .arg("--")
         .args(words)
@@ -5686,7 +5773,12 @@ fn switch_completes_local_and_remote_branches() {
     assert!(candidates.iter().any(|value| value == "main"));
     assert!(candidates.iter().any(|value| value == "feature"));
     assert!(candidates.iter().any(|value| value == "solo"));
-    assert!(candidates.iter().any(|value| value == "origin/remote-only"));
+    // The candidate value is the short branch name, not `origin/remote-only`:
+    // `smart::resolve_and_switch` probes `refs/remotes/origin/{branch}`, so a
+    // remote-qualified value would never match and would instead create a new
+    // local branch literally named `origin/remote-only`.
+    assert!(candidates.iter().any(|value| value == "remote-only"));
+    assert!(!candidates.iter().any(|value| value == "origin/remote-only"));
 }
 
 #[test]
@@ -5703,6 +5795,97 @@ fn switch_hides_remote_refs_that_shadow_a_local_branch() {
     assert!(
         !candidates.iter().any(|value| value == "origin/main"),
         "a remote ref shadowing a local branch is redundant: {candidates:?}"
+    );
+}
+
+#[test]
+fn switch_deduplicates_a_short_name_offered_by_multiple_remotes() {
+    let repo = Repository::new();
+    git(
+        &repo.main,
+        ["update-ref", "refs/remotes/origin/shared", "HEAD"],
+    );
+    git(
+        &repo.main,
+        ["update-ref", "refs/remotes/upstream/shared", "HEAD"],
+    );
+
+    let candidates = complete(&repo.main, &["worktrees", "switch", ""]);
+
+    assert_eq!(
+        candidates.iter().filter(|value| *value == "shared").count(),
+        1,
+        "a branch offered by two remotes must appear once: {candidates:?}"
+    );
+}
+
+/// Proves the completed value actually resolves, not just that it looks
+/// right: a repo whose only remote ref is `refs/remotes/origin/remote-only`
+/// must let `worktrees create remote-only` track that remote branch, rather
+/// than creating a literal `origin/remote-only` local branch with no upstream.
+#[test]
+fn create_resolves_the_completed_remote_branch_value_to_its_remote() {
+    let repo = Repository::new();
+    let remote = repo.temp.path().join("origin.git");
+    git(
+        repo.temp.path(),
+        ["init", "--bare", remote.to_str().unwrap()],
+    );
+    git(
+        &repo.main,
+        ["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&repo.main, ["branch", "remote-only"]);
+    git(&repo.main, ["push", "origin", "remote-only"]);
+    git(&repo.main, ["branch", "-D", "remote-only"]);
+
+    let candidates = complete(&repo.main, &["worktrees", "switch", ""]);
+    let value = candidates
+        .iter()
+        .find(|value| value.as_str() != "main" && value.as_str() != "feature")
+        .expect("the remote branch should be offered as a candidate");
+    assert_eq!(value, "remote-only");
+
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::write(
+        xdg.path().join("worktrees/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("worktrees")
+        .unwrap()
+        .args(["create", value])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let destination = root.join("remote-only");
+    assert!(destination.exists());
+    assert_eq!(
+        git_output(&destination, ["rev-parse", "--abbrev-ref", "HEAD"]),
+        "remote-only"
+    );
+    assert_eq!(
+        git_output(
+            &destination,
+            [
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}"
+            ]
+        ),
+        "origin/remote-only"
     );
 }
 
@@ -5760,7 +5943,7 @@ fn branch_completion_outside_a_repository_is_silent() {
 
     let mut command = Command::cargo_bin("worktrees").unwrap();
     let output = command
-        .env("COMPLETE", "zsh")
+        .env("_WORKTREES_COMPLETE", "zsh")
         .env("_CLAP_COMPLETE_INDEX", "2")
         .arg("--")
         .args(["worktrees", "switch", ""])

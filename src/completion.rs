@@ -6,7 +6,7 @@
 //! stderr.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env,
     path::{Path, PathBuf},
 };
@@ -109,20 +109,44 @@ fn registered_branches(cwd: &Path) -> HashSet<String> {
 /// Remote-tracking refs whose short name has no local branch of the same name.
 /// `origin/feature` alongside a local `feature` is noise: `switch` resolves the
 /// local branch first.
+///
+/// The candidate *value* is the short branch name (`feature`), not the
+/// remote-qualified ref (`origin/feature`). `smart::resolve_and_switch` finds a
+/// remote match by probing `refs/remotes/{remote}/{branch}` for the given
+/// branch name, so offering `origin/feature` as the value would make `switch`
+/// or `create` fail to find that ref and instead create a brand new local
+/// branch literally named `origin/feature`, untracked, from the invoking HEAD.
+/// The remote is surfaced in the help text instead; ambiguity across multiple
+/// remotes offering the same branch is already handled by the interactive
+/// `choose_remote` prompt in the resolver, so this only needs to dedupe.
 fn remote_candidates(cwd: &Path, local: &[String]) -> Vec<CompletionCandidate> {
     let local: HashSet<&str> = local.iter().map(String::as_str).collect();
     git::discover_remote_branches(cwd).map_or_else(
         |_| Vec::new(),
         |remotes| {
-            remotes
+            let mut remotes_by_short: HashMap<String, Vec<String>> = HashMap::new();
+            for remote in remotes {
+                let Some((remote_name, short)) = remote.split_once('/') else {
+                    continue;
+                };
+                if local.contains(short) {
+                    continue;
+                }
+                remotes_by_short
+                    .entry(short.to_string())
+                    .or_default()
+                    .push(remote_name.to_string());
+            }
+            let mut candidates: Vec<_> = remotes_by_short
                 .into_iter()
-                .filter(|remote| {
-                    remote
-                        .split_once('/')
-                        .is_some_and(|(_, short)| !local.contains(short))
+                .map(|(short, mut remote_names)| {
+                    remote_names.sort();
+                    let help = format!("remote branch ({})", remote_names.join(", "));
+                    CompletionCandidate::new(short).help(Some(help.into()))
                 })
-                .map(|remote| CompletionCandidate::new(remote).help(Some("remote branch".into())))
-                .collect()
+                .collect();
+            candidates.sort_by(|a, b| a.get_value().cmp(b.get_value()));
+            candidates
         },
     )
 }

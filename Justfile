@@ -8,5 +8,5 @@ test:
 
 # Install the binary from this checkout as `worktrees` and `wt`.
 install:
-    cargo install --path .
+    cargo install --locked --path .
     install_root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"; ln -sfn worktrees "$install_root/bin/wt"
