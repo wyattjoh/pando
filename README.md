@@ -26,6 +26,16 @@ Restart zsh or run:
 source ${ZDOTDIR:-$HOME}/.zshrc
 ```
 
+### Tab completion
+
+The zsh integration also registers tab completion for `worktrees` and `wt`.
+Branch arguments complete from the current repository: `switch` offers local and
+remote-tracking branches, `create` offers branches without a worktree, and
+`remove` offers only branches that have one.
+
+Completion arrives with the integration, so restart zsh or re-source your
+`.zshrc` after installing.
+
 ## Structured JSON
 
 Automation should use versioned request mode, keeping the command in argv and placing command-specific input on stdin:

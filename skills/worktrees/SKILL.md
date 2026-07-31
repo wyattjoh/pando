@@ -88,7 +88,7 @@ for leaf contracts and approval rules.
 | `merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Integrate the current topic into the configured target branch | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `commit [-m MSG] [--stage-all] [--dry-run]` | Commit the existing index, optionally staging every change first | [`references/commands/commit.md`](references/commands/commit.md) |
 | `trust [--dry-run] <subcommand>` | Inspect, approve, or revoke hook-phase or commit-generation trust. Subcommands: `status`, `reset`, `commit-status`, `commit-reset`, `commit-approve` | [`references/commands/trust.md`](references/commands/trust.md) |
-| `install [--dry-run]` | Install or preview the managed zsh integration and global config scaffold | [`references/commands/install.md`](references/commands/install.md) |
+| `install [--dry-run]` | Install or preview the managed zsh integration (including dynamic tab completion) and global config scaffold | [`references/commands/install.md`](references/commands/install.md) |
 | `pr create` | Create a draft or ready pull request from a published topic branch | [`references/commands/pr.md`](references/commands/pr.md) |
 
 ## Common workflows
