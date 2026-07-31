@@ -288,6 +288,29 @@ pub fn discover_branches(cwd: &Path) -> Result<Vec<BranchRecord>> {
     Ok(discover_branch_refs(cwd)?.0)
 }
 
+/// Lists remote-tracking branches as short names such as `origin/feature`.
+///
+/// Only `refs/remotes` is inspected; no fetch happens. Symbolic refs such as
+/// `origin/HEAD` are excluded because they point at a branch rather than being
+/// one. A ref whose short name is not valid UTF-8 is dropped.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot run or fails to list remote refs.
+pub fn discover_remote_branches(cwd: &Path) -> Result<Vec<String>> {
+    let output = run_git(
+        cwd,
+        [
+            "for-each-ref",
+            "--format=%(refname:short)%00%(symref)%00",
+            "refs/remotes",
+        ],
+    )
+    .context("failed to list remote branches")?;
+    ensure_success(&output, "git for-each-ref")?;
+    Ok(parse_remote_branch_refs(&output.stdout))
+}
+
 fn discover_branch_refs(cwd: &Path) -> Result<(Vec<BranchRecord>, Vec<String>)> {
     let output = run_git(
         cwd,
@@ -330,6 +353,32 @@ fn parse_branch_refs(bytes: &[u8]) -> (Vec<BranchRecord>, Vec<String>) {
         }
     }
     (records, excluded)
+}
+
+/// Parses NUL-delimited `<refname:short>\0<symref>\0` records.
+fn parse_remote_branch_refs(bytes: &[u8]) -> Vec<String> {
+    let mut records = Vec::new();
+    let mut fields = bytes.split(|byte| *byte == 0);
+    loop {
+        let Some(raw_name) = fields.next() else {
+            break;
+        };
+        let name_field = raw_name.strip_prefix(b"\n").unwrap_or(raw_name);
+        if name_field.is_empty() {
+            break;
+        }
+        let Some(raw_symref) = fields.next() else {
+            break;
+        };
+        let symref_field = raw_symref.strip_prefix(b"\n").unwrap_or(raw_symref);
+        if !symref_field.is_empty() {
+            continue;
+        }
+        if let Ok(name) = std::str::from_utf8(name_field) {
+            records.push(name.to_owned());
+        }
+    }
+    records
 }
 
 fn normalized_head(head: &str) -> Option<String> {
@@ -1529,6 +1578,7 @@ mod tests {
 
     use super::{
         parse_branch_refs, parse_commit_batch, parse_committer_timestamp, parse_porcelain,
+        parse_remote_branch_refs,
     };
     use crate::WorktreeKind;
 
@@ -1602,5 +1652,28 @@ mod tests {
 
         assert!(!parsed.contains_key(&missing));
         assert_eq!(parsed[&commit_id].to_rfc3339(), "2024-01-02T03:04:05+00:00");
+    }
+
+    #[test]
+    fn remote_branch_refs_are_parsed_and_symbolic_refs_excluded() {
+        // `<refname:short>\0<symref>\0` per record. `origin/HEAD` carries a symref
+        // target and must be excluded: it is a pointer, not a branch.
+        let bytes =
+            b"origin/main\x00\x00origin/HEAD\x00refs/remotes/origin/main\x00upstream/dev\x00\x00";
+
+        assert_eq!(
+            parse_remote_branch_refs(bytes),
+            vec!["origin/main".to_owned(), "upstream/dev".to_owned()]
+        );
+    }
+
+    #[test]
+    fn non_utf8_remote_branch_refs_are_dropped() {
+        let bytes = b"origin/good\x00\x00origin/ba\xffd\x00\x00";
+
+        assert_eq!(
+            parse_remote_branch_refs(bytes),
+            vec!["origin/good".to_owned()]
+        );
     }
 }
