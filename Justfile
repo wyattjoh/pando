@@ -6,7 +6,7 @@ build:
 test:
     cargo test --all-features
 
-# Install the binary from this checkout as `worktrees` and `wt`.
+# Install the binary from this checkout as `pando` and `pd`.
 install:
     cargo install --locked --path .
-    install_root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"; ln -sfn worktrees "$install_root/bin/wt"
+    install_root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"; ln -sfn pando "$install_root/bin/pd"

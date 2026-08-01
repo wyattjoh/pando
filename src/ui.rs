@@ -13,7 +13,7 @@ use console::{
     true_colors_enabled_stderr,
 };
 
-struct WorktreesTheme;
+struct PandoTheme;
 
 /// Whether this run has opened a terminal UI sequence that an outro must close.
 static SEQUENCE_OPEN: AtomicBool = AtomicBool::new(false);
@@ -80,7 +80,7 @@ impl Display for InteractionError {
 
 impl Error for InteractionError {}
 
-impl Theme for WorktreesTheme {
+impl Theme for PandoTheme {
     fn bar_color(&self, state: &ThemeState) -> Style {
         match state {
             ThemeState::Active | ThemeState::Submit => accent_style(),
@@ -126,11 +126,11 @@ impl Theme for WorktreesTheme {
 /// Installs the shared terminal theme used by all cliclack prompts.
 pub fn install_theme() {
     // `console::Style` targets stdout by default, while all human-facing UI in
-    // Worktrees is written to stderr. Mirror stderr's detected capabilities so
+    // Pando is written to stderr. Mirror stderr's detected capabilities so
     // piped machine output does not disable ordinary terminal presentation.
     set_colors_enabled(colors_enabled_stderr());
     set_true_colors_enabled(true_colors_enabled_stderr());
-    set_theme(WorktreesTheme);
+    set_theme(PandoTheme);
 }
 
 /// Returns the shared accent style for interactive UI elements.
@@ -435,11 +435,11 @@ pub fn cancel(message: impl Display) -> Result<()> {
 mod tests {
     use cliclack::{Theme, ThemeState};
 
-    use super::{WorktreesTheme, heading_style, interactive};
+    use super::{PandoTheme, heading_style, interactive};
 
     #[test]
     fn prompt_headers_use_the_shared_heading_style() {
-        let rendered = WorktreesTheme.format_header(&ThemeState::Active, "Branch name:");
+        let rendered = PandoTheme.format_header(&ThemeState::Active, "Branch name:");
 
         assert!(
             rendered.contains(

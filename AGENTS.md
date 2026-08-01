@@ -23,7 +23,7 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 
 ## Architecture
 
-`worktrees` is a CLI for inspecting, creating, and navigating the Git worktrees of the repository containing the current directory. **Git is the source of truth**: every repository fact comes from invoking the installed `git` executable (no libgit2, no cached registry, no implicit fetch).
+`pando` is a CLI for inspecting, creating, and navigating the Git worktrees of the repository containing the current directory. **Git is the source of truth**: every repository fact comes from invoking the installed `git` executable (no libgit2, no cached registry, no implicit fetch).
 
 `src/main.rs` is a thin clap dispatcher over `src/lib.rs`; all logic lives in the library so integration tests and future callers can reach it.
 
@@ -50,9 +50,9 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 
 **Config layering** (`EffectiveConfig::load`) is deliberately asymmetric:
 
-- global `$XDG_CONFIG_HOME/worktrees/config.yaml` controls placement and the personal default sort, never hooks;
-- `.worktrees.yaml` read from the **invoking** worktree controls shared hooks, the target branch, and the new-branch base, never placement or personal sort, so setup follows the branch you create from;
-- `.worktrees.local.yaml` read from the **primary** worktree controls personal placement, hooks, default sort, and the new-branch base, and must be Git-ignored or loading is a hard error.
+- global `$XDG_CONFIG_HOME/pando/config.yaml` controls placement and the personal default sort, never hooks;
+- `.pando.yaml` read from the **invoking** worktree controls shared hooks, the target branch, and the new-branch base, never placement or personal sort, so setup follows the branch you create from;
+- `.pando.local.yaml` read from the **primary** worktree controls personal placement, hooks, default sort, and the new-branch base, and must be Git-ignored or loading is a hard error.
 
 `worktrees.base` is the one key legal in all three layers, resolving local over shared over global and defaulting to `head`. `head` starts a genuinely new branch at the invoking worktree's `HEAD`; `fresh` starts it at the remote-tracking ref of the configured `target-branch`, or of the branch named by the remote's `origin/HEAD`. `fresh` reads local refs only — an unresolvable or never-fetched base is a hard error naming the fix, and `--fetch` on `switch`/`create` is the only way to refresh it, fetching exactly that one ref.
 
@@ -60,7 +60,7 @@ Shared hooks run before local hooks; the local root and default sort override th
 
 **Trust identity is command strings only.** `trust::command_hash` digests a domain-separated, length-prefixed concatenation of the ordered `command` fields — names, comments, and formatting are excluded on purpose, so reordering or editing a command revokes approval but renaming a step does not. Approval is keyed by the hex-encoded canonical primary-worktree path and there is no non-interactive bypass; `ensure_interactive` refuses rather than assuming yes.
 
-**The incomplete-setup journal is two-phase** because a worktree's stable identity doesn't exist until Git creates it. `setup::prepare` writes a *pending* record keyed by branch hash **before** the `git worktree add`; after creation, `PendingRecord::commit` renames it to a *marker* keyed by the hash of the new worktree's git dir. Both live under `<common-dir>/worktrees-state/`. `is_incomplete`/`clear` check both locations, which is why `branch` is threaded through as an `Option`. Creation failure calls `cancel()`. Writes go through `trust::write_atomic` (temp file + `sync_all` + `rename`).
+**The incomplete-setup journal is two-phase** because a worktree's stable identity doesn't exist until Git creates it. `setup::prepare` writes a *pending* record keyed by branch hash **before** the `git worktree add`; after creation, `PendingRecord::commit` renames it to a *marker* keyed by the hash of the new worktree's git dir. Both live under `<common-dir>/pando-state/`. `is_incomplete`/`clear` check both locations, which is why `branch` is threaded through as an `Option`. Creation failure calls `cancel()`. Writes go through `trust::write_atomic` (temp file + `sync_all` + `rename`).
 
 **Port hashing is pinned for compatibility.** `smart::port_for_branch` uses `SipHasher13` explicitly rather than `DefaultHasher` so a future std change cannot move ports away from Worktrunk v0.66.0. Golden values are asserted in `smart.rs` tests — treat them as a compatibility contract.
 
@@ -88,4 +88,4 @@ This repository uses a single-context domain-doc layout. See `docs/agents/domain
 
 ### CLI usage skill
 
-`skills/worktrees/` documents `worktrees`' own command surface, flags, config schema, and JSON contract for kickstarting usage (symlinked into `.claude/skills/worktrees` and `.agents/skills/worktrees`). Whenever a change touches the CLI's public surface, see `.claude/rules/cli-skill-sync.md` for which skill file to update alongside it.
+`skills/pando/` documents `pando`' own command surface, flags, config schema, and JSON contract for kickstarting usage (symlinked into `.claude/skills/pando` and `.agents/skills/pando`). Whenever a change touches the CLI's public surface, see `.claude/rules/cli-skill-sync.md` for which skill file to update alongside it.

@@ -1299,7 +1299,7 @@ fn plan_new_branch(
 
 fn already_registered(branch: &str, path: &Path) -> anyhow::Error {
     anyhow::anyhow!(
-        "branch {branch:?} is already registered at {}; enter it with 'worktrees switch {branch}'",
+        "branch {branch:?} is already registered at {}; enter it with 'pando switch {branch}'",
         path.display()
     )
 }
@@ -1411,7 +1411,7 @@ fn create_worktree(
 fn validate_destination(repository: &Repository, branch: &str, destination: &Path) -> Result<()> {
     if destination.exists() {
         bail!(
-            "destination {} for branch {branch:?} already exists; Worktrees will not adopt, move, or delete it",
+            "destination {} for branch {branch:?} already exists; Pando will not adopt, move, or delete it",
             destination.display()
         );
     }

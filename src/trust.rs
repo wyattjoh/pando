@@ -68,7 +68,7 @@ impl PhaseApprovals {
 #[must_use]
 pub fn command_hash(phase: HookPhase, steps: &[HookStep]) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"worktrees-hook-phase-v1\0");
+    digest.update(b"pando-hook-phase-v1\0");
     digest.update(phase.key().as_bytes());
     digest.update(b"\0");
     for step in steps {
@@ -81,7 +81,7 @@ pub fn command_hash(phase: HookPhase, steps: &[HookStep]) -> String {
 
 fn legacy_post_create_hash(steps: &[HookStep]) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"worktrees-post-create-v1\0");
+    digest.update(b"pando-post-create-v1\0");
     for step in steps {
         let bytes = step.command.as_bytes();
         digest.update((bytes.len() as u64).to_be_bytes());
@@ -141,7 +141,7 @@ pub fn approve(repository: &Repository, phase: HookPhase, steps: &[HookStep]) ->
 #[must_use]
 pub fn generation_hash(generation: &EffectiveGeneration) -> Option<String> {
     let mut digest = Sha256::new();
-    digest.update(b"worktrees-commit-generation-v1\0");
+    digest.update(b"pando-commit-generation-v1\0");
     let mut has_shared = false;
     for (name, value) in [
         (b"command".as_slice(), generation.command.as_ref()),
@@ -201,7 +201,7 @@ pub fn is_pr_generation_trusted(
     repository: &Repository,
     generation: &EffectiveGeneration,
 ) -> Result<bool> {
-    let Some(hash) = generation_hash_named(generation, b"worktrees-pr-generation-v1") else {
+    let Some(hash) = generation_hash_named(generation, b"pando-pr-generation-v1") else {
         return Ok(true);
     };
     Ok(read_trust()?
@@ -218,7 +218,7 @@ pub fn approve_pr_generation(
     repository: &Repository,
     generation: &EffectiveGeneration,
 ) -> Result<()> {
-    let Some(hash) = generation_hash_named(generation, b"worktrees-pr-generation-v1") else {
+    let Some(hash) = generation_hash_named(generation, b"pando-pr-generation-v1") else {
         return Ok(());
     };
     let mut trust = read_trust()?;
@@ -306,7 +306,7 @@ fn repository_key(repository: &Repository) -> Result<String> {
 }
 
 fn trust_path() -> Result<PathBuf> {
-    Ok(config::config_home()?.join("worktrees/trust.json"))
+    Ok(config::config_home()?.join("pando/trust.json"))
 }
 
 fn read_trust() -> Result<TrustFile> {
@@ -342,7 +342,7 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
         .context("trust path has no parent directory")?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     for attempt in 0..100_u8 {
-        let temporary = parent.join(format!(".worktrees.tmp.{}.{}", std::process::id(), attempt));
+        let temporary = parent.join(format!(".pando.tmp.{}.{}", std::process::id(), attempt));
         let mut file = match fs::OpenOptions::new()
             .write(true)
             .create_new(true)

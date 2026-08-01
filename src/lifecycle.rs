@@ -703,7 +703,7 @@ fn inspect_removal_state(repository: &Repository, target: &Worktree) -> Result<O
         .into());
     }
     if state.cleanup_pending || git::rebase_in_progress(&target.path)? {
-        return Err(preflight(PreflightFailureKind::LifecycleActive, format!("worktree {} has an active lifecycle operation; rerun worktrees merge to recover it before removal", target.path.display())).into());
+        return Err(preflight(PreflightFailureKind::LifecycleActive, format!("worktree {} has an active lifecycle operation; rerun pando merge to recover it before removal", target.path.display())).into());
     }
     Ok(Some(journal_path(&repository.common_dir, &identity)))
 }
@@ -763,7 +763,7 @@ fn journal_path(common_dir: &Path, identity: &Path) -> PathBuf {
     let mut digest = Sha256::new();
     digest.update(identity.as_os_str().as_bytes());
     common_dir
-        .join("worktrees-state/lifecycle")
+        .join("pando-state/lifecycle")
         .join(format!("{}.json", hash::encode_hex(&digest.finalize())))
 }
 fn read_journal(common_dir: &Path, identity: &Path) -> Result<Option<MergeJournal>> {

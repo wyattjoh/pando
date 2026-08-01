@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Tab-complete branch arguments for `worktrees switch|create|remove` in zsh, plus every subcommand, flag, and value enum, for both the `worktrees` and `wt` names.
+**Goal:** Tab-complete branch arguments for `pando switch|create|remove` in zsh, plus every subcommand, flag, and value enum, for both the `pando` and `pd` names.
 
-**Architecture:** `clap_complete`'s dynamic completion. zsh calls back into the binary on each Tab via a `COMPLETE=zsh` environment protocol. Branch candidates are produced in Rust from `git.rs`; the static surface derives from the clap `Command` and cannot drift from `main.rs`. The managed `worktrees.zsh` that `worktrees install` writes gains a block that evaluates the registration script at shell startup.
+**Architecture:** `clap_complete`'s dynamic completion. zsh calls back into the binary on each Tab via a `COMPLETE=zsh` environment protocol. Branch candidates are produced in Rust from `git.rs`; the static surface derives from the clap `Command` and cannot drift from `main.rs`. The managed `pando.zsh` that `pando install` writes gains a block that evaluates the registration script at shell startup.
 
 **Tech Stack:** Rust (edition 2024, MSRV 1.85), clap 4 derive, `clap_complete` 4.6 `unstable-dynamic`, zsh, `assert_cmd` + `tempfile` integration tests.
 
@@ -28,10 +28,10 @@ The completion protocol, verified against `clap_complete` 4.6.8:
 
 ```
 # Registration script to stdout, exit 0:
-COMPLETE=zsh worktrees
+COMPLETE=zsh pando
 
 # Candidates to stdout as `value:help` or `value`, newline separated, exit 0:
-_CLAP_COMPLETE_INDEX=<n> COMPLETE=zsh worktrees -- <word0> <word1> ... <wordN>
+_CLAP_COMPLETE_INDEX=<n> COMPLETE=zsh pando -- <word0> <word1> ... <wordN>
 ```
 
 `_CLAP_COMPLETE_INDEX` is the 0-based index of the word being completed. Prefix
@@ -48,7 +48,7 @@ filtering is applied by the engine, so producers return the full set.
 | `src/main.rs` (modify) | `CompleteEnv::complete()` as first statement of `main()`; `#[arg(add = ...)]` on three branch args |
 | `src/install.rs` (modify) | Append the compdef registration block to `INTEGRATION` |
 | `tests/cli.rs` (modify) | Completion integration tests |
-| `skills/worktrees/`, `README.md`, `CLAUDE.md` | Docs |
+| `skills/pando/`, `README.md`, `CLAUDE.md` | Docs |
 
 ---
 
@@ -64,7 +64,7 @@ Wires `CompleteEnv` into `main()` so the static surface (subcommands, flags,
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: the `COMPLETE=zsh` protocol on the `worktrees` binary. Later tasks
+- Produces: the `COMPLETE=zsh` protocol on the `pando` binary. Later tasks
   attach candidates to arguments; nothing else calls into this.
 
 - [ ] **Step 1: Write the failing tests**
@@ -74,18 +74,18 @@ Append to `tests/cli.rs`:
 ```rust
 #[test]
 fn complete_env_emits_a_zsh_registration_script() {
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     let output = command.env("COMPLETE", "zsh").output().unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("#compdef worktrees"));
-    assert!(stdout.contains("compdef _clap_dynamic_completer_worktrees worktrees"));
+    assert!(stdout.contains("#compdef pando"));
+    assert!(stdout.contains("compdef _clap_dynamic_completer_pando pando"));
 }
 
 #[test]
 fn complete_env_completes_subcommands() {
-    let candidates = complete(&std::env::current_dir().unwrap(), &["worktrees", ""]);
+    let candidates = complete(&std::env::current_dir().unwrap(), &["pando", ""]);
 
     assert!(candidates.iter().any(|value| value == "switch"));
     assert!(candidates.iter().any(|value| value == "create"));
@@ -94,14 +94,14 @@ fn complete_env_completes_subcommands() {
 
 #[test]
 fn complete_env_completes_flags() {
-    let candidates = complete(&std::env::current_dir().unwrap(), &["worktrees", "--out"]);
+    let candidates = complete(&std::env::current_dir().unwrap(), &["pando", "--out"]);
 
     assert!(candidates.iter().any(|value| value == "--output"));
 }
 
 #[test]
 fn complete_env_completes_get_properties() {
-    let candidates = complete(&std::env::current_dir().unwrap(), &["worktrees", "get", ""]);
+    let candidates = complete(&std::env::current_dir().unwrap(), &["pando", "get", ""]);
 
     assert!(candidates.iter().any(|value| value == "branch"));
     assert!(candidates.iter().any(|value| value == "port"));
@@ -113,7 +113,7 @@ fn complete_env_completes_get_properties() {
 /// completed, matching how zsh passes `${words[@]}`.
 fn complete(dir: &Path, words: &[&str]) -> Vec<String> {
     let index = words.len() - 1;
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     let output = command
         .env("COMPLETE", "zsh")
         .env("_CLAP_COMPLETE_INDEX", index.to_string())
@@ -380,7 +380,7 @@ fn switch_completes_local_and_remote_branches() {
         ["update-ref", "refs/remotes/origin/remote-only", "HEAD"],
     );
 
-    let candidates = complete(&repo.main, &["worktrees", "switch", ""]);
+    let candidates = complete(&repo.main, &["pando", "switch", ""]);
 
     assert!(candidates.iter().any(|value| value == "main"));
     assert!(candidates.iter().any(|value| value == "feature"));
@@ -393,7 +393,7 @@ fn switch_hides_remote_refs_that_shadow_a_local_branch() {
     let repo = Repository::new();
     git(&repo.main, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
 
-    let candidates = complete(&repo.main, &["worktrees", "switch", ""]);
+    let candidates = complete(&repo.main, &["pando", "switch", ""]);
 
     assert!(candidates.iter().any(|value| value == "main"));
     assert!(
@@ -407,7 +407,7 @@ fn create_excludes_branches_that_already_have_a_worktree() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "solo"]);
 
-    let candidates = complete(&repo.main, &["worktrees", "create", ""]);
+    let candidates = complete(&repo.main, &["pando", "create", ""]);
 
     assert!(candidates.iter().any(|value| value == "solo"));
     assert!(
@@ -425,7 +425,7 @@ fn remove_offers_only_branches_with_a_topic_worktree() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "solo"]);
 
-    let candidates = complete(&repo.main, &["worktrees", "remove", ""]);
+    let candidates = complete(&repo.main, &["pando", "remove", ""]);
 
     assert!(candidates.iter().any(|value| value == "feature"));
     assert!(
@@ -444,7 +444,7 @@ fn branch_completion_filters_by_prefix() {
     git(&repo.main, ["branch", "feat-a"]);
     git(&repo.main, ["branch", "other"]);
 
-    let candidates = complete(&repo.main, &["worktrees", "switch", "feat"]);
+    let candidates = complete(&repo.main, &["pando", "switch", "feat"]);
 
     assert!(candidates.iter().any(|value| value == "feat-a"));
     assert!(!candidates.iter().any(|value| value == "other"));
@@ -454,12 +454,12 @@ fn branch_completion_filters_by_prefix() {
 fn branch_completion_outside_a_repository_is_silent() {
     let outside = tempfile::tempdir().unwrap();
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     let output = command
         .env("COMPLETE", "zsh")
         .env("_CLAP_COMPLETE_INDEX", "2")
         .arg("--")
-        .args(["worktrees", "switch", ""])
+        .args(["pando", "switch", ""])
         .current_dir(outside.path())
         .output()
         .unwrap();
@@ -640,7 +640,7 @@ In `src/main.rs`, add the import:
 use clap_complete::engine::ArgValueCandidates;
 ```
 
-and add `completion` to the existing `worktrees::{...}` import list. Then annotate
+and add `completion` to the existing `pando::{...}` import list. Then annotate
 the three branch arguments in the `Commands` enum:
 
 ```rust
@@ -708,7 +708,7 @@ fn installed_integration_registers_completion_for_both_names() {
     let xdg = tempfile::tempdir().unwrap();
     let zdot = tempfile::tempdir().unwrap();
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     let output = run_in_pty(
         command
             .arg("install")
@@ -720,9 +720,9 @@ fn installed_integration_registers_completion_for_both_names() {
     assert!(output.status.success());
 
     let generated =
-        fs::read_to_string(xdg.path().join("worktrees/worktrees.zsh")).unwrap();
-    assert!(generated.contains("COMPLETE=zsh command worktrees"));
-    assert!(generated.contains("compdef _clap_dynamic_completer_worktrees wt"));
+        fs::read_to_string(xdg.path().join("pando/pando.zsh")).unwrap();
+    assert!(generated.contains("COMPLETE=zsh command pando"));
+    assert!(generated.contains("compdef _clap_dynamic_completer_pando pd"));
     assert!(
         generated.contains("$+functions[compdef]"),
         "registration must be guarded so it is skipped when compinit has not run"
@@ -743,13 +743,13 @@ Reuse that test's exact setup rather than inventing a new one.
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cargo test --test cli installed_integration_registers_completion`
-Expected: FAIL. `worktrees.zsh` has no completion block yet, so the
-`COMPLETE=zsh command worktrees` assertion fails.
+Expected: FAIL. `pando.zsh` has no completion block yet, so the
+`COMPLETE=zsh command pando` assertion fails.
 
 - [ ] **Step 3: Implement**
 
 In `src/install.rs`, extend the `INTEGRATION` const. Append this to the end of
-the existing raw byte string, after the `wt() { ... }` line and before the
+the existing raw byte string, after the `pd() { ... }` line and before the
 closing `"#`:
 
 ```zsh
@@ -760,26 +760,26 @@ closing `"#`:
 # expects, so a cached script would silently break after a binary upgrade.
 # Generating it costs one process spawn, measured under 3ms.
 #
-# `wt` is a symlink to the same binary, so one registration serves both names.
-# The generated function is named `_clap_dynamic_completer_worktrees`; the
+# `pd` is a symlink to the same binary, so one registration serves both names.
+# The generated function is named `_clap_dynamic_completer_pando`; the
 # leading underscore is the completion system's own convention here, unlike the
 # dispatcher above, and a dropped snapshot copy only disables completion.
-worktrees_register_completion() {
+pando_register_completion() {
   (( $+functions[compdef] )) || return 1
-  eval "$(COMPLETE=zsh command worktrees 2>/dev/null)" || return 1
-  compdef _clap_dynamic_completer_worktrees wt
+  eval "$(COMPLETE=zsh command pando 2>/dev/null)" || return 1
+  compdef _clap_dynamic_completer_pando pd
   return 0
 }
 
 if [[ -o interactive ]]; then
-  if ! worktrees_register_completion; then
+  if ! pando_register_completion; then
     # `compinit` has not run yet, so retry once after startup finishes.
-    worktrees_deferred_completion() {
-      worktrees_register_completion
-      add-zsh-hook -d precmd worktrees_deferred_completion
-      unfunction worktrees_deferred_completion
+    pando_deferred_completion() {
+      pando_register_completion
+      add-zsh-hook -d precmd pando_deferred_completion
+      unfunction pando_deferred_completion
     }
-    autoload -Uz add-zsh-hook && add-zsh-hook precmd worktrees_deferred_completion
+    autoload -Uz add-zsh-hook && add-zsh-hook precmd pando_deferred_completion
   fi
 fi
 ```
@@ -819,7 +819,7 @@ fn installed_integration_registers_compdef_under_real_zsh() {
 
     // Generate the integration by running a real install, so the test asserts
     // against the shipped bytes rather than a copy that could drift.
-    let mut install = Command::cargo_bin("worktrees").unwrap();
+    let mut install = Command::cargo_bin("pando").unwrap();
     let installed = run_in_pty(
         install
             .arg("install")
@@ -829,17 +829,17 @@ fn installed_integration_registers_compdef_under_real_zsh() {
         "y\n",
     );
     assert!(installed.status.success());
-    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let integration = xdg.path().join("pando/pando.zsh");
 
-    // Put the built binary on PATH so `command worktrees` resolves during the eval.
-    let binary = assert_cmd::cargo::cargo_bin("worktrees");
+    // Put the built binary on PATH so `command pando` resolves during the eval.
+    let binary = assert_cmd::cargo::cargo_bin("pando");
     let bin_dir = binary.parent().unwrap();
     let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
 
     let script = format!(
         "autoload -Uz compinit && compinit -u -d {dump}\n\
          source {integration}\n\
-         print -r -- \"registered=${{_comps[worktrees]}} wt=${{_comps[wt]}}\"\n",
+         print -r -- \"registered=${{_comps[pando]}} pd=${{_comps[pd]}}\"\n",
         dump = xdg.path().join("zcompdump").display(),
         integration = integration.display(),
     );
@@ -853,13 +853,13 @@ fn installed_integration_registers_compdef_under_real_zsh() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("registered=_clap_dynamic_completer_worktrees"),
-        "worktrees was not registered: {stdout}{}",
+        stdout.contains("registered=_clap_dynamic_completer_pando"),
+        "pando was not registered: {stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        stdout.contains("wt=_clap_dynamic_completer_worktrees"),
-        "wt was not registered: {stdout}{}",
+        stdout.contains("pd=_clap_dynamic_completer_pando"),
+        "pd was not registered: {stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -895,8 +895,8 @@ Required by `.claude/rules/cli-skill-sync.md`: the install surface changed, so t
 skill must be updated in the same change.
 
 **Files:**
-- Modify: `skills/worktrees/references/commands/install.md`
-- Modify: `skills/worktrees/SKILL.md`
+- Modify: `skills/pando/references/commands/install.md`
+- Modify: `skills/pando/SKILL.md`
 - Modify: `README.md`
 - Modify: `CLAUDE.md`
 
@@ -906,17 +906,17 @@ skill must be updated in the same change.
 
 - [ ] **Step 1: Update the install command reference**
 
-Append this section to `skills/worktrees/references/commands/install.md`, matching
+Append this section to `skills/pando/references/commands/install.md`, matching
 the heading level the file already uses for its other sections:
 
 ```markdown
 ## Tab completion
 
-Installation also registers zsh tab completion for both `worktrees` and `wt`.
+Installation also registers zsh tab completion for both `pando` and `pd`.
 
 Completion is dynamic: zsh calls the binary on each Tab, so suggestions always
 reflect the current repository. It covers subcommands, flags, and value enums
-(`--output`, `worktrees get <property>`), plus branch arguments, filtered per
+(`--output`, `pando get <property>`), plus branch arguments, filtered per
 command:
 
 | Command | Offers |
@@ -930,16 +930,16 @@ than reporting an error.
 
 Two limitations: `remove` re-offers branches already typed on the command line,
 and only zsh is supported. Existing installations pick up completion by
-re-running `worktrees install` and starting a new shell.
+re-running `pando install` and starting a new shell.
 ```
 
 - [ ] **Step 2: Update SKILL.md**
 
-In `skills/worktrees/SKILL.md`, find the `install` entry in the command table and
+In `skills/pando/SKILL.md`, find the `install` entry in the command table and
 extend its description so it reads:
 
 ```markdown
-| `install` | Install the managed zsh integration: the `wt`/`worktrees` shell functions that change directory, and dynamic tab completion for subcommands, flags, and branch arguments. |
+| `install` | Install the managed zsh integration: the `pd`/`pando` shell functions that change directory, and dynamic tab completion for subcommands, flags, and branch arguments. |
 ```
 
 Keep the surrounding table formatting as it is. If the existing description is
@@ -949,12 +949,12 @@ than replacing the row wholesale.
 - [ ] **Step 3: Update the README**
 
 In `README.md`, add this immediately after the section that documents
-`worktrees install`:
+`pando install`:
 
 ```markdown
 ### Tab completion
 
-The zsh integration also registers tab completion for `worktrees` and `wt`.
+The zsh integration also registers tab completion for `pando` and `pd`.
 Branch arguments complete from the current repository: `switch` offers local and
 remote-tracking branches, `create` offers branches without a worktree, and
 `remove` offers only branches that have one.
@@ -984,7 +984,7 @@ exclude branches already typed on the command line.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add skills/worktrees README.md CLAUDE.md
+git add skills/pando README.md CLAUDE.md
 git commit -m "docs: document zsh completion in the install surface"
 ```
 
@@ -996,7 +996,7 @@ git commit -m "docs: document zsh completion in the install surface"
   candidate API receives no prior-word context, so deduplicating would require
   hand-written zsh.
 - Only zsh is registered. `CompleteEnv` supports bash and fish, but
-  `worktrees install` manages zsh alone.
+  `pando install` manages zsh alone.
 - Completion depends on `compinit` having run. The `precmd` fallback in Task 4
   covers the common case where a user's `.zshrc` calls `compinit` after the
-  worktrees block.
+  pando block.

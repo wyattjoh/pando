@@ -1,4 +1,4 @@
-# Worktrees
+# Pando
 
 Worktrees manages navigation and lifecycle operations for the worktrees and branches of the repository containing the current directory.
 

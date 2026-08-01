@@ -1,7 +1,7 @@
 # `commit`
 
-**Never run `git commit` directly in a repo that uses `worktrees`.** The
-commit itself — staged-only or `--stage-all` — must go through `worktrees
+**Never run `git commit` directly in a repo that uses `pando`.** The
+commit itself — staged-only or `--stage-all` — must go through `pando
 commit`. If the caller didn't give you an exact commit message, don't
 compose one yourself: let the configured generator (or the CLI's built-in
 prompt, if none is configured) write it.
@@ -14,7 +14,7 @@ ready-to-run recovery invocations — you don't have to guess what to try
 next. All executable leaves use the shared structured protocol.
 
 ```
-Usage: worktrees commit [OPTIONS]
+Usage: pando commit [OPTIONS]
 ```
 
 | Flag | Purpose |
@@ -27,7 +27,7 @@ Usage: worktrees commit [OPTIONS]
 
 ## Behavior
 
-- **`"selection":"staged"`** (bare `worktrees commit` in human mode) commits
+- **`"selection":"staged"`** (bare `pando commit` in human mode) commits
   only the existing Git index. Stage deliberately first with
   `git add <paths>` or `git add --patch`.
 - **`"selection":"stage_all"`** (`--stage-all` in human mode) stages every
@@ -43,8 +43,8 @@ Usage: worktrees commit [OPTIONS]
   Git's normal hooks, signing, and failure behavior remain enabled. A
   generator failure after staging everything leaves the all-changes snapshot
   staged for inspection or retry.
-- Shared (`.worktrees.yaml`) generator fields (`command`/`template`) are
-  **untrusted** and must be approved via `worktrees trust commit-approve`
+- Shared (`.pando.yaml`) generator fields (`command`/`template`) are
+  **untrusted** and must be approved via `pando trust commit-approve`
   (interactive, default-negative) before they can win — **JSON requests
   cannot approve a generator**; that step must happen interactively first,
   or the JSON request fails with `trust.approval_required`. User global/local
@@ -70,19 +70,19 @@ Request envelope (`CommitRequestEnvelope` in `src/commit.rs`):
 ```sh
 # Staged only, generator writes the message
 printf '%s\n' '{"schema_version":1,"input":{"selection":"staged","message":{"source":"configured_generator"},"dry_run":false}}' \
-  | worktrees commit --input-output json
+  | pando commit --input-output json
 
 # Staged only, exact message you were given
 printf '%s\n' '{"schema_version":1,"input":{"selection":"staged","message":{"source":"provided","value":"feat: add commit support"},"dry_run":false}}' \
-  | worktrees commit --input-output json
+  | pando commit --input-output json
 
 # Stage everything, generator writes the message
 printf '%s\n' '{"schema_version":1,"input":{"selection":"stage_all","message":{"source":"configured_generator"},"dry_run":false}}' \
-  | worktrees commit --input-output json
+  | pando commit --input-output json
 
 # Dry run: validate and preview, no mutation
 printf '%s\n' '{"schema_version":1,"input":{"selection":"staged","message":{"source":"configured_generator"},"dry_run":true}}' \
-  | worktrees commit --input-output json
+  | pando commit --input-output json
 ```
 
 ### Response envelope
@@ -118,9 +118,9 @@ use the one the response gives you.
 | `repository.bare` | Current repository is bare | `commit` requires a worktree |
 | `commit.nothing_to_commit` | Working tree is fully clean (nothing staged, nothing dirty) — for either selection; also returned for `stage_all` whenever nothing is dirty | n/a |
 | `commit.nothing_staged` | `staged` requested, index is empty, but the worktree **is** dirty elsewhere | `next_steps` offers `git.stage_paths`, `git.stage_patch` (human approval required), or retrying with `"selection":"stage_all"` |
-| `trust.approval_required` | Shared generator config isn't approved yet | Run `worktrees trust commit-approve` interactively, then retry |
+| `trust.approval_required` | Shared generator config isn't approved yet | Run `pando trust commit-approve` interactively, then retry |
 | `commit.generator_unavailable` | No generator configured but none was `provided` either | Supply `{"source":"provided","value":"..."}` or configure a generator |
-| `commit.preflight_failed` | Generator/template config invalid | Fix `.worktrees.yaml`/config generator fields |
+| `commit.preflight_failed` | Generator/template config invalid | Fix `.pando.yaml`/config generator fields |
 | `commit.staging_failed` | `git add -A`-equivalent staging failed | Inspect `diagnostics` |
 | `commit.generator_failed` | Generator command exited nonzero or couldn't spawn | Inspect `diagnostics`, fix or bypass the generator |
 | `commit.generator_invalid_output` | Generator produced empty or non-UTF-8 output | Fix the generator, or supply `{"source":"provided",...}` |
@@ -136,22 +136,22 @@ use the one the response gives you.
 # Stage deliberately, commit with an explicit message
 git add README.md src/commit.rs
 git add --patch
-worktrees commit -m "feat: add commit support"
-worktrees commit --message "fix: preserve staged changes"
+pando commit -m "feat: add commit support"
+pando commit --message "fix: preserve staged changes"
 
 # Stage everything, with or without a generated message
-worktrees commit --stage-all -m "chore: commit every change"
-worktrees commit --stage-all
+pando commit --stage-all -m "chore: commit every change"
+pando commit --stage-all
 
 # Approve a shared generator before it can win
-worktrees trust commit-status
-worktrees trust commit-approve
+pando trust commit-status
+pando trust commit-approve
 ```
 
 ## Introspection
 
 ```sh
-worktrees commit --help --output json   # generated request/response JSON Schemas
+pando commit --help --output json   # generated request/response JSON Schemas
 ```
 
 The typed command outcome (`docs/adr/0002-render-typed-command-outcomes.md`)

@@ -40,7 +40,7 @@ pub fn marker_path(common_dir: &Path, worktree_identity: &Path) -> PathBuf {
     let mut digest = Sha256::new();
     digest.update(worktree_identity.as_os_str().as_encoded_bytes());
     common_dir
-        .join("worktrees-state/incomplete")
+        .join("pando-state/incomplete")
         .join(format!("{}.json", hash::encode_hex(&digest.finalize())))
 }
 
@@ -48,7 +48,7 @@ fn pending_path(common_dir: &Path, branch: &str) -> PathBuf {
     let mut digest = Sha256::new();
     digest.update(branch.as_bytes());
     common_dir
-        .join("worktrees-state/pending")
+        .join("pando-state/pending")
         .join(format!("{}.json", hash::encode_hex(&digest.finalize())))
 }
 

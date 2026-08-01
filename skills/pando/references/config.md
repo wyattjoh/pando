@@ -6,11 +6,11 @@ strings, and empty `name` strings are all hard errors with file context.
 
 | Layer | Path | Can set placement (`worktrees.root`) | Can set `worktrees.default-sort` | Can set `worktrees.base` | Can set hooks | Can set `commit.generation.*` |
 |---|---|---|---|---|---|---|
-| Global | `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml` | yes | yes | yes | **no** | yes |
-| Shared | `.worktrees.yaml` in the **invoking** worktree | **no** (only `target-branch` and `base`) | **no** | yes | yes | yes (untrusted — needs `worktrees trust commit-approve`) |
-| Local | `.worktrees.local.yaml` in the **primary** worktree | yes | yes | yes | yes | yes |
+| Global | `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml` | yes | yes | yes | **no** | yes |
+| Shared | `.pando.yaml` in the **invoking** worktree | **no** (only `target-branch` and `base`) | **no** | yes | yes | yes (untrusted — needs `pando trust commit-approve`) |
+| Local | `.pando.local.yaml` in the **primary** worktree | yes | yes | yes | yes | yes |
 
-`worktrees install` adds a commented scaffold to the global YAML file. It
+`pando install` adds a commented scaffold to the global YAML file. It
 never enables a setting or edits existing user configuration. The scaffold is
 idempotent and documents the required placement root, the optional target
 branch fallback, and the optional PR metadata generator.
@@ -18,7 +18,7 @@ branch fallback, and the optional PR metadata generator.
 ## 1. Global placement
 
 ```yaml
-# ${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml
+# ${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml
 worktrees:
   root: ../worktrees
   default-sort: last-commit-at
@@ -42,7 +42,7 @@ commit:
 
 For PR creation, `pr.generation.command` is required only when the title or
 description is omitted. Supplying both values explicitly bypasses this
-configuration. `worktrees install` includes this as commented guidance:
+configuration. `pando install` includes this as commented guidance:
 
 ```yaml
 # pr:
@@ -53,18 +53,18 @@ configuration. `worktrees install` includes this as commented guidance:
 ## 2. Shared project setup
 
 ```yaml
-# .worktrees.yaml (committed; read from the invoking worktree)
+# .pando.yaml (committed; read from the invoking worktree)
 hooks:
   post-create:
     - name: Install dependencies
       command: npm install
-    - command: echo "PORT=$(worktrees get port)" > .env.local
+    - command: echo "PORT=$(pando get port)" > .env.local
 ```
 
 Each hook step runs sequentially from the new worktree root through
 `/bin/sh -c`, inherits the ordinary environment/`PATH`, stops at the first
 failure, and streams stdout+stderr to the CLI's stderr. If a hook invokes
-`worktrees` itself, the binary must be on `PATH`.
+`pando` itself, the binary must be on `PATH`.
 
 Hook phase keys: `post-create`, `pre-merge`, `pre-remove`.
 
@@ -85,10 +85,10 @@ worktrees:
   target-branch: main
 ```
 
-`target-branch` overrides the default target for `worktrees merge` and PR
+`target-branch` overrides the default target for `pando merge` and PR
 creation. When it is omitted, operations fall back to the local branch pointed
 to by `origin/HEAD`, then local `main`, then local `master`. Set it in
-`.worktrees.yaml` or the global config when a different target is needed.
+`.pando.yaml` or the global config when a different target is needed.
 
 May also set where new branches are cut from — the one placement-adjacent
 key legal in all three layers:
@@ -113,8 +113,8 @@ defaults to `head`.
 names a branch, or the resolved `origin/<branch>` was never fetched into the
 clone, creation fails with guidance (`git fetch`,
 `git remote set-head origin -a`, or configure `target-branch`) rather than
-branching from the wrong point. `worktrees switch --fetch` and
-`worktrees create --fetch` refresh exactly that one base ref first; see
+branching from the wrong point. `pando switch --fetch` and
+`pando create --fetch` refresh exactly that one base ref first; see
 `commands/switch.md`. The base only changes the start point of a genuinely
 new branch — resolution of existing worktrees, local branches, and remote
 matches is unchanged.
@@ -122,7 +122,7 @@ matches is unchanged.
 ## 3. Personal per-clone overlay
 
 ```yaml
-# .worktrees.local.yaml (in the primary worktree)
+# .pando.local.yaml (in the primary worktree)
 worktrees:
   root: /Volumes/fast/worktrees
   default-sort: path
@@ -135,7 +135,7 @@ hooks:
 **Must be Git-ignored**, or `EffectiveConfig::load` hard-errors:
 
 ```gitignore
-/.worktrees.local.yaml
+/.pando.local.yaml
 ```
 
 May also contribute a generator command:
@@ -174,12 +174,12 @@ pr:
 
 ## Layering rules
 
-- **Hooks**: shared (`.worktrees.yaml`) steps run before local
-  (`.worktrees.local.yaml`) steps, concatenated per phase.
+- **Hooks**: shared (`.pando.yaml`) steps run before local
+  (`.pando.local.yaml`) steps, concatenated per phase.
 - **Root**: local root overrides global root. There is no intermediate
   "shared root" — the shared file cannot set `worktrees.root` at all, only
   `worktrees.target-branch` and `worktrees.base`.
-- **Base**: local, then shared, then global — the only `worktrees` key that
+- **Base**: local, then shared, then global — the only `pando` key that
   layers through all three files.
 - **Default sort**: the ignored local value overrides the global value. The
   committed shared file cannot set this personal interface preference.

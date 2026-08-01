@@ -1,7 +1,7 @@
 # `trust`
 
 ```
-Usage: worktrees trust [OPTIONS] <COMMAND>
+Usage: pando trust [OPTIONS] <COMMAND>
 ```
 
 Inspects or revokes approval for two independently trusted surfaces:
@@ -31,7 +31,7 @@ command revokes approval; renaming a step does not.
 
 Approval is scoped to the **canonical path of this repository clone** and
 stored atomically in
-`${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/trust.json`. It is never
+`${XDG_CONFIG_HOME:-$HOME/.config}/pando/trust.json`. It is never
 auto-shared across clones of the same repository.
 
 `reset`/`commit-reset` are idempotent and remove only the current clone's
@@ -45,12 +45,12 @@ hook-phase approval, and vice versa.
 ## Commands
 
 ```sh
-worktrees trust status            # configured/trusted state for every hook phase
-worktrees trust reset             # revoke all hook-phase trust for this clone
+pando trust status            # configured/trusted state for every hook phase
+pando trust reset             # revoke all hook-phase trust for this clone
 
-worktrees trust commit-status     # approval state of the effective commit generator
-worktrees trust commit-approve    # interactively approve a shared generator
-worktrees trust commit-reset      # revoke commit-generator trust for this clone
+pando trust commit-status     # approval state of the effective commit generator
+pando trust commit-approve    # interactively approve a shared generator
+pando trust commit-reset      # revoke commit-generator trust for this clone
 ```
 
 ## Structured JSON contract
