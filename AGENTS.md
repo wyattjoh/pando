@@ -6,12 +6,10 @@ Guidance for coding agents working in this repository. `CLAUDE.md` is a symlink 
 
 ```sh
 just build            # cargo build --all-features
+just lint             # cargo fmt --check, then Clippy with CI settings
 just test             # cargo test --all-features
 just install-hooks    # prek install
 just install          # cargo install --path .
-
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
 
 cargo test --test cli switch_creates          # one integration test (substring match)
 cargo test --lib                              # unit tests only (in-module #[cfg(test)])

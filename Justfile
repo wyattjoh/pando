@@ -2,6 +2,11 @@
 build:
     cargo build --all-features
 
+# Check formatting and run Clippy with the same settings as CI.
+lint:
+    cargo fmt --check
+    cargo clippy --all-targets --all-features -- -D warnings
+
 # Run the test suite.
 test:
     cargo test --all-features
