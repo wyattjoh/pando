@@ -14,6 +14,8 @@ use std::{
 use cliclack::confirm;
 use console::{Key, Term};
 
+mod provider;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
@@ -167,8 +169,7 @@ fn execute(
     let head = crate::git::current_branch(&repo)?.to_owned();
     let base_remote = crate::git::branch_upstream_remote(&repo.current().path, &base)?
         .context("target branch has no upstream; cannot resolve base repository")?;
-    let base_repo = github_repository(&crate::git::remote_url(&repo.current().path, &base_remote)?)
-        .context("configured target upstream is not a supported GitHub remote")?;
+    let base_url = crate::git::remote_url(&repo.current().path, &base_remote)?;
     let push_plan =
         match crate::git::plan_push(&repo.current().path, &head, requested_remote.as_deref()) {
             Ok(plan) => plan,
@@ -192,16 +193,16 @@ fn execute(
             }
             Err(error) => return fail(json_mode, "pr.remote_selection", &format!("{error:#}")),
         };
-    let head_repository = github_repository(&crate::git::remote_url(
-        &repo.current().path,
-        &push_plan.remote,
-    )?)
-    .context("selected head remote is not a supported GitHub remote")?;
-    let head_owner = head_repository
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .to_owned();
+    let head_url = crate::git::remote_url(&repo.current().path, &push_plan.remote)?;
+    let mut resolved_provider =
+        match provider::resolve(config.pr_provider, &base_url, &head_url, &head) {
+            Ok(provider) => provider,
+            Err(error) => return fail(json_mode, "provider.unsupported", &format!("{error:#}")),
+        };
+    let provider_name = resolved_provider.adapter.name();
+    let base_repo = resolved_provider.base_repository.clone();
+    let head_owner = resolved_provider.head_owner.clone();
+    let head_ref = resolved_provider.head_ref.clone();
     if head == base {
         return fail(
             json_mode,
@@ -217,50 +218,28 @@ fn execute(
             "non-interactive creation requires --force",
         );
     }
-    let gh = Command::new("gh")
-        .arg("--version")
-        .output()
-        .map_err(|_| anyhow::anyhow!("gh is not installed; install GitHub CLI"))?;
-    if !gh.status.success() {
-        return fail(
-            json_mode,
-            "provider.unauthenticated",
-            "gh is unavailable; install GitHub CLI and run gh auth login",
-        );
+    if let Err(error) = resolved_provider.adapter.ensure_ready(&repo.current().path) {
+        return fail(json_mode, "provider.unauthenticated", &format!("{error:#}"));
     }
-    if !Command::new("gh")
-        .args(["auth", "status"])
-        .output()?
-        .status
-        .success()
+    let pull_request_ref = provider::PullRequestRef {
+        base_repository: &base_repo,
+        base_branch: &base,
+        head_ref: &head_ref,
+    };
+    let existing = match resolved_provider
+        .adapter
+        .find_open(&repo.current().path, &pull_request_ref)
     {
-        return fail(
-            json_mode,
-            "provider.unauthenticated",
-            "GitHub CLI is not authenticated; run gh auth login",
-        );
-    }
-    let head_ref = github_head_ref(&base_repo, &head_repository, &head_owner, &head);
-    let existing = Command::new("gh")
-        .args([
-            "pr", "list", "--repo", &base_repo, "--head", &head_ref, "--base", &base, "--state",
-            "open", "--json", "url",
-        ])
-        .output()?;
-    if !existing.status.success() {
-        return fail(
-            json_mode,
-            "provider.preflight_failed",
-            "GitHub pull request preflight failed",
-        );
-    }
-    let urls: Vec<serde_json::Value> = serde_json::from_slice(&existing.stdout)
-        .context("GitHub pull request preflight returned malformed JSON")?;
-    if let Some(url) = urls
-        .first()
-        .and_then(|v| v.get("url"))
-        .and_then(|v| v.as_str())
-    {
+        Ok(existing) => existing,
+        Err(error) => {
+            return fail(
+                json_mode,
+                "provider.preflight_failed",
+                &format!("{error:#}"),
+            );
+        }
+    };
+    if let Some(url) = existing {
         return fail(
             json_mode,
             "pr.already_exists",
@@ -337,7 +316,7 @@ fn execute(
     if title.trim().is_empty() {
         bail!("PR title cannot be empty");
     }
-    if !force && !dry {
+    if !force && !dry && !json_mode {
         let (updated_title, updated_body) = review_metadata(
             title,
             body,
@@ -362,7 +341,7 @@ fn execute(
     if dry {
         return output(
             json_mode,
-            json!({"outcome":"dry_run","base_repository":base_repo,"base_branch":base,"head_repository":format!("{head_owner}"),"head_branch":head,"remote":push_plan.remote,"draft":status==Status::Draft,"push":push_effect}),
+            json!({"outcome":"dry_run","provider":provider_name,"base_repository":base_repo,"base_branch":base,"head_repository":head_owner,"head_branch":head,"remote":push_plan.remote,"draft":status==Status::Draft,"push":push_effect}),
             None,
             None,
         );
@@ -389,36 +368,31 @@ fn execute(
         }
         return fail(false, "git.push_failed", &format!("{error:#}"));
     }
-    let mut cmd = Command::new("gh");
-    cmd.args([
-        "pr", "create", "--repo", &base_repo, "--base", &base, "--head", &head_ref, "--title",
-        &title, "--body", &body,
-    ]);
-    if status == Status::Draft {
-        cmd.arg("--draft");
-    }
+    let create_request = provider::CreatePullRequest {
+        target: pull_request_ref,
+        base_remote: &base_remote,
+        title: &title,
+        body: &body,
+        status,
+    };
     let creation = crate::ui::run_timed(
         !json_mode,
         "Creating pull request...",
         "Created pull request",
         "Failed to create pull request",
         |_| {
-            let output = cmd.output().context("failed to invoke GitHub CLI")?;
-            if output.status.success() {
-                Ok(output)
-            } else {
-                bail!("{}", String::from_utf8_lossy(&output.stderr).trim())
-            }
+            resolved_provider
+                .adapter
+                .create(&repo.current().path, &create_request)
         },
     );
-    let out = match creation {
-        Ok(output) => output,
+    let url = match creation {
+        Ok(url) => url,
         Err(error) => return fail(json_mode, "provider.creation_failed", &format!("{error:#}")),
     };
-    let url = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     output(
         json_mode,
-        json!({"outcome":"created","url":url,"base_repository":base_repo,"base_branch":base,"head_repository":head_owner,"head_branch":head,"remote":push_plan.remote,"draft":status==Status::Draft}),
+        json!({"outcome":"created","url":url,"provider":provider_name,"base_repository":base_repo,"base_branch":base,"head_repository":head_owner,"head_branch":head,"remote":push_plan.remote,"draft":status==Status::Draft}),
         Some(url),
         Some(crate::protocol::Effect {
             action: "git.push".into(),
@@ -739,28 +713,6 @@ fn parse_metadata(value: &str) -> Result<(String, String)> {
     Ok((title.to_owned(), description))
 }
 
-fn github_head_ref(base_repo: &str, head_repo: &str, head_owner: &str, head: &str) -> String {
-    if base_repo == head_repo {
-        head.to_owned()
-    } else {
-        format!("{head_owner}:{head}")
-    }
-}
-
-fn github_repository(url: &str) -> Option<String> {
-    let value = url.trim_end_matches('/').trim_end_matches(".git");
-    let path = value
-        .strip_prefix("https://github.com/")
-        .or_else(|| value.strip_prefix("http://github.com/"))
-        .or_else(|| value.strip_prefix("git@github.com:"))
-        .or_else(|| value.strip_prefix("ssh://git@github.com/"))?;
-    let mut parts = path.split('/');
-    let owner = parts.next()?;
-    let repo = parts.next()?;
-    (parts.next().is_none() && !owner.is_empty() && !repo.is_empty())
-        .then(|| format!("{owner}/{repo}"))
-}
-
 fn output(
     j: bool,
     r: serde_json::Value,
@@ -838,35 +790,6 @@ mod tests {
             serde_json::from_str::<Request>(r#"{"title":"T","description":"B","force":true}"#)
                 .is_err()
         );
-    }
-
-    #[test]
-    fn github_head_ref_uses_branch_for_same_repository() {
-        assert_eq!(
-            github_head_ref("alice/project", "alice/project", "alice", "feature"),
-            "feature"
-        );
-    }
-
-    #[test]
-    fn github_head_ref_qualifies_fork_branch() {
-        assert_eq!(
-            github_head_ref("alice/project", "bob/project", "bob", "feature"),
-            "bob:feature"
-        );
-    }
-
-    #[test]
-    fn github_repository_accepts_supported_remote_forms() {
-        assert_eq!(
-            github_repository("git@github.com:alice/project.git"),
-            Some("alice/project".into())
-        );
-        assert_eq!(
-            github_repository("https://github.com/alice/project"),
-            Some("alice/project".into())
-        );
-        assert_eq!(github_repository("https://gitlab.com/alice/project"), None);
     }
 
     #[test]

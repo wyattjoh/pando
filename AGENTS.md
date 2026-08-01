@@ -33,6 +33,7 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 | `lib.rs` | `Worktree`/`WorktreeKind`/`Condition`/`SortMode` domain types, display/navigability rules, and stable worktree sorting |
 | `git.rs` | Every `git` subprocess call; parses `worktree list --porcelain -z`; batches HEAD committer metadata; `Repository` context |
 | `config.rs` | Strict three-layer YAML config parsing and effective value resolution |
+| `pr.rs`, `pr/provider.rs` | PR orchestration and metadata generation; pluggable `gh` and `tea` forge adapters |
 | `smart.rs` | Command implementations for `switch`/`create`/`get`/`trust`; all interactive prompts |
 | `trust.rs` | Post-create hook approval: command hashing, XDG `trust.json`, atomic writes |
 | `setup.rs` | Post-create hook execution and the incomplete-setup journal |
@@ -53,9 +54,11 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 - `.pando.yaml` read from the **invoking** worktree controls shared hooks, the target branch, and the new-branch base, never placement or personal sort, so setup follows the branch you create from;
 - `.pando.local.yaml` read from the **primary** worktree controls personal placement, hooks, default sort, and the new-branch base, and must be Git-ignored or loading is a hard error.
 
-`worktrees.base` is the one key legal in all three layers, resolving local over shared over global and defaulting to `head`. `head` starts a genuinely new branch at the invoking worktree's `HEAD`; `fresh` starts it at the remote-tracking ref of the configured `target-branch`, or of the branch named by the remote's `origin/HEAD`. `fresh` reads local refs only — an unresolvable or never-fetched base is a hard error naming the fix, and `--fetch` on `switch`/`create` is the only way to refresh it, fetching exactly that one ref.
+`worktrees.base` and `pr.provider` are legal in all three layers, resolving local over shared over global. `worktrees.base` defaults to `head`; `head` starts a genuinely new branch at the invoking worktree's `HEAD`, while `fresh` starts it at the remote-tracking ref of the configured `target-branch`, or of the branch named by the remote's `origin/HEAD`. `fresh` reads local refs only. An unresolvable or never-fetched base is a hard error naming the fix, and `--fetch` on `switch`/`create` is the only way to refresh it, fetching exactly that one ref. `pr.provider` defaults to `auto`, selecting `gh` for github.com and `tea` for other forge hosts with a matching configured tea login.
 
 Shared hooks run before local hooks; the local root and default sort override their global values. Human list and picker rendering use the effective sort, while structured JSON always retains Git discovery order. All structs use `deny_unknown_fields`, so config mistakes fail loudly with file context.
+
+**PR forge behavior lives behind one seam.** `pr.rs` owns provider-neutral repository checks, metadata, publication, and rendering. `pr/provider.rs` owns remote parsing and every `gh` or `tea` subprocess. Auto-detection uses `gh` only for github.com; every other host must match a configured tea login. Both adapters use the same base/head repository model and open-PR/create interface. Tea drafts use the conventional `WIP:` title prefix for compatibility across Tea versions. Tea creation output is not stable across versions: v0.15 wraps the URL in an OSC-8 hyperlink when stdout is captured. The adapter extracts URLs from plain or control-wrapped output and falls back to a post-create base/head lookup when none is present.
 
 **Trust identity is command strings only.** `trust::command_hash` digests a domain-separated, length-prefixed concatenation of the ordered `command` fields — names, comments, and formatting are excluded on purpose, so reordering or editing a command revokes approval but renaming a step does not. Approval is keyed by the hex-encoded canonical primary-worktree path and there is no non-interactive bypass; `ensure_interactive` refuses rather than assuming yes.
 

@@ -229,14 +229,21 @@ step; use the one the response gives you. Full error-code table in
 Source: `src/commit.rs` (`recovery_steps`, `emit_failure_with_context`); design
 rationale in `docs/adr/0002-render-typed-command-outcomes.md`
 
-### Create a pull request from a fork
+### Create a pull request on GitHub, Gitea, or Forgejo
 
 Use `pando pr create --remote <name>` (or `input.remote` in JSON) when the
 head branch belongs on a personal fork. Remote precedence is explicit remote,
 then the branch upstream, then `origin`, then a sole configured remote. The
-the resolved target branch must have an upstream GitHub remote, which is used as
-the base repository. Fork heads are sent to GitHub as `owner:branch`; preflight
-and dry-run resolve both repositories before any push.
+resolved target branch must have an upstream forge remote, which supplies the
+base repository. Fork heads use `owner:branch`; preflight and dry-run resolve
+both repositories before any push.
+
+`pr.provider` defaults to `auto`: github.com uses `gh`, while another host uses
+`tea` when `tea login list --output json` has a matching Gitea or Forgejo login.
+The setting is legal in global, shared, and local configuration, with local
+winning over shared, then global. Set it to `github` or `tea` to require one
+adapter. Pando represents Tea draft status by adding the default `WIP:` title
+prefix for compatibility across Tea versions.
 
 ### Inspect the JSON request/response schema and Schema version
 ```sh

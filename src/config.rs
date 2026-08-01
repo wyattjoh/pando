@@ -128,9 +128,20 @@ struct CommitConfig {
 #[serde(deny_unknown_fields)]
 struct PrConfig {
     #[serde(default)]
+    provider: Option<PrProvider>,
+    #[serde(default)]
     generation: Option<GenerationConfig>,
     #[serde(default, rename = "pull-request-template")]
     pull_request_template: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrProvider {
+    #[default]
+    Auto,
+    Github,
+    Tea,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -197,6 +208,7 @@ pub struct EffectiveConfig {
     pub pre_merge: Vec<HookStep>,
     pub pre_remove: Vec<HookStep>,
     pub generation: EffectiveGeneration,
+    pub pr_provider: PrProvider,
     pub pr_generation: EffectiveGeneration,
     pub pull_request_template: Option<GenerationValue>,
 }
@@ -249,6 +261,7 @@ impl EffectiveConfig {
             .commit
             .as_ref()
             .and_then(|commit| commit.generation.clone());
+        let shared_pr_provider = shared.pr.as_ref().and_then(|pr| pr.provider);
         let shared_pr_generation = shared.pr.as_ref().and_then(|pr| pr.generation.clone());
         let shared_pr_template = shared
             .pr
@@ -281,6 +294,7 @@ impl EffectiveConfig {
             .commit
             .as_ref()
             .and_then(|commit| commit.generation.clone());
+        let global_pr_provider = global.pr.as_ref().and_then(|pr| pr.provider);
         let global_pr_generation = global.pr.as_ref().and_then(|pr| pr.generation.clone());
         let global_pr_template = global
             .pr
@@ -291,6 +305,7 @@ impl EffectiveConfig {
             .commit
             .as_ref()
             .and_then(|commit| commit.generation.clone());
+        let local_pr_provider = local.pr.as_ref().and_then(|pr| pr.provider);
         let local_pr_generation = local.pr.as_ref().and_then(|pr| pr.generation.clone());
         let local_pr_template = local
             .pr
@@ -368,6 +383,11 @@ impl EffectiveConfig {
             pre_merge: combine(&shared_hooks, &local_hooks, HookPhase::PreMerge),
             pre_remove: combine(&shared_hooks, &local_hooks, HookPhase::PreRemove),
             generation,
+            pr_provider: resolve_pr_provider(
+                local_pr_provider,
+                shared_pr_provider,
+                global_pr_provider,
+            ),
             pr_generation: EffectiveGeneration {
                 command: resolve_generation_value(
                     local_pr_generation.as_ref().and_then(|v| v.command.clone()),
@@ -485,6 +505,14 @@ fn validate_pull_request_template(value: Option<&str>, source_hint: &Path) -> Re
     Ok(())
 }
 
+fn resolve_pr_provider(
+    local: Option<PrProvider>,
+    shared: Option<PrProvider>,
+    global: Option<PrProvider>,
+) -> PrProvider {
+    local.or(shared).or(global).unwrap_or_default()
+}
+
 fn resolve_generation_value(
     local: Option<String>,
     shared: Option<String>,
@@ -579,4 +607,48 @@ pub fn config_home() -> Result<PathBuf> {
         .filter(|value| !value.is_empty())
         .context("HOME is not set; cannot locate Pando configuration")?;
     Ok(PathBuf::from(home).join(".config"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pr_provider_defaults_to_auto() {
+        let config: PrConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(config.provider.unwrap_or_default(), PrProvider::Auto);
+    }
+
+    #[test]
+    fn pr_provider_accepts_supported_values() {
+        for (value, expected) in [
+            ("auto", PrProvider::Auto),
+            ("github", PrProvider::Github),
+            ("tea", PrProvider::Tea),
+        ] {
+            let config: PrConfig = serde_yaml::from_str(&format!("provider: {value}\n")).unwrap();
+            assert_eq!(config.provider, Some(expected));
+        }
+        assert!(serde_yaml::from_str::<PrConfig>("provider: gitlab\n").is_err());
+    }
+
+    #[test]
+    fn pr_provider_resolves_local_then_shared_then_global() {
+        assert_eq!(
+            resolve_pr_provider(
+                Some(PrProvider::Github),
+                Some(PrProvider::Tea),
+                Some(PrProvider::Auto),
+            ),
+            PrProvider::Github
+        );
+        assert_eq!(
+            resolve_pr_provider(None, Some(PrProvider::Tea), Some(PrProvider::Github)),
+            PrProvider::Tea
+        );
+        assert_eq!(
+            resolve_pr_provider(None, None, Some(PrProvider::Github)),
+            PrProvider::Github
+        );
+    }
 }

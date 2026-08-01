@@ -30,6 +30,8 @@ const CONFIG_SCAFFOLD: &[u8] = br"# >>> pando configuration scaffold >>>
 # Optional PR metadata generator. Required only when title or description is
 # omitted from `pando pr create`:
 # pr:
+#   # auto uses gh for github.com and tea for a matching Gitea/Forgejo login.
+#   provider: auto
 #   generation:
 #     command: pi --no-session --no-tools
 # <<< pando configuration scaffold <<<

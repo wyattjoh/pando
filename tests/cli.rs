@@ -1672,6 +1672,141 @@ fn pr_missing_metadata_generator_fails_before_dirty_worktree_handling() {
     );
 }
 
+fn configure_test_forge_remote(repo: &Repository) -> PathBuf {
+    git(
+        &repo.main,
+        [
+            "remote",
+            "add",
+            "origin",
+            "ssh://git@forge.example/alice/project.git",
+        ],
+    );
+    let main_head = git_output(&repo.main, ["rev-parse", "main"]);
+    git(
+        &repo.main,
+        ["update-ref", "refs/remotes/origin/main", &main_head],
+    );
+    git(
+        &repo.main,
+        ["branch", "--set-upstream-to=origin/main", "main"],
+    );
+    let bare = repo.temp.path().join("forge.git");
+    fs::create_dir(&bare).unwrap();
+    git(&bare, ["init", "--bare"]);
+    git(
+        &repo.main,
+        ["config", "remote.origin.pushurl", bare.to_str().unwrap()],
+    );
+    bare
+}
+
+fn fake_tea_without_created_url(repo: &Repository) -> (PathBuf, PathBuf, PathBuf) {
+    let fake_bin = repo.temp.path().join("tea-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let capture = repo.temp.path().join("tea-args");
+    let created = repo.temp.path().join("tea-created");
+    let tea = fake_bin.join("tea");
+    fs::write(
+        &tea,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$TEA_CAPTURE"
+case "$1" in
+  --version) printf 'Version: 0.15.0\n' ;;
+  login) printf '[{"name":"forge","url":"https://forge.example","ssh_host":"forge.example","user":"alice","default":"true"}]\n' ;;
+  pulls)
+    case "$2" in
+      list)
+        if test -f "$TEA_CREATED"; then
+          printf '[{"url":"https://forge.example/alice/project/pulls/42","base":"main","head":"feature"}]\n'
+        else
+          printf '[]\n'
+        fi
+        ;;
+      create)
+        touch "$TEA_CREATED"
+        printf '# #42 Add tea provider (open)\n'
+        ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&tea, fs::Permissions::from_mode(0o755)).unwrap();
+    (fake_bin, capture, created)
+}
+
+#[test]
+fn pr_recovers_created_url_when_tea_does_not_print_it() {
+    let repo = Repository::new();
+    let bare = configure_test_forge_remote(&repo);
+    let (fake_bin, capture, created) = fake_tea_without_created_url(&repo);
+    let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
+    let xdg = tempfile::tempdir().unwrap();
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args([
+            "--output",
+            "json",
+            "pr",
+            "create",
+            "--title",
+            "Add tea provider",
+            "--description",
+            "Support Gitea and Forgejo.",
+        ])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("PATH", path)
+        .env("TEA_CAPTURE", &capture)
+        .env("TEA_CREATED", &created)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response = assert_json_pure(&output);
+    assert_eq!(response["status"], "success");
+    assert_eq!(response["result"]["outcome"], "created");
+    assert_eq!(
+        response["result"]["url"],
+        "https://forge.example/alice/project/pulls/42"
+    );
+    assert_eq!(response["result"]["provider"], "tea");
+    assert_eq!(response["result"]["draft"], true);
+    assert_eq!(response["effects"][0]["completed"], true);
+    assert_eq!(
+        git_output(&bare, ["rev-parse", "refs/heads/feature"]),
+        git_output(&repo.linked, ["rev-parse", "HEAD"])
+    );
+
+    let invocations = fs::read_to_string(capture).unwrap();
+    assert!(invocations.contains("--version"), "{invocations}");
+    assert!(
+        invocations.contains("login list --output json"),
+        "{invocations}"
+    );
+    let list_command = "pulls list --login forge --repo alice/project --state open --fields url,base,head --output json --page 1 --limit 100";
+    assert_eq!(
+        invocations.matches(list_command).count(),
+        2,
+        "tea should be queried before creation and again to recover the missing URL: {invocations}"
+    );
+    assert!(
+        invocations.contains(
+            "pulls create --login forge --remote origin --base main --head feature --title WIP: Add tea provider --description Support Gitea and Forgejo."
+        ),
+        "{invocations}"
+    );
+}
+
 #[test]
 fn install_decline_makes_no_filesystem_changes() {
     let home = tempfile::tempdir().unwrap();
@@ -1772,6 +1907,7 @@ fn install_preserves_zshrc_and_is_idempotent() {
     let generated_config = fs::read_to_string(&config).unwrap();
     assert!(generated_config.contains("#   root: ../worktrees"));
     assert!(generated_config.contains("#   target-branch: main"));
+    assert!(generated_config.contains("#   provider: auto"));
     assert!(generated_config.contains("#     command: pi --no-session --no-tools"));
     let integration = xdg.path().join("pando/pando.zsh");
     let generated = fs::read_to_string(&integration).unwrap();

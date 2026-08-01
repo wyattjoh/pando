@@ -4,11 +4,11 @@ All three files are strict YAML (`deny_unknown_fields` on every struct):
 malformed files, duplicate/unknown keys, wrong types, empty `command`
 strings, and empty `name` strings are all hard errors with file context.
 
-| Layer | Path | Can set placement (`worktrees.root`) | Can set `worktrees.default-sort` | Can set `worktrees.base` | Can set hooks | Can set `commit.generation.*` |
-|---|---|---|---|---|---|---|
-| Global | `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml` | yes | yes | yes | **no** | yes |
-| Shared | `.pando.yaml` in the **invoking** worktree | **no** (only `target-branch` and `base`) | **no** | yes | yes | yes (untrusted — needs `pando trust commit-approve`) |
-| Local | `.pando.local.yaml` in the **primary** worktree | yes | yes | yes | yes | yes |
+| Layer | Path | Can set placement (`worktrees.root`) | Can set `worktrees.default-sort` | Can set `worktrees.base` | Can set hooks | Can set `commit.generation.*` | Can set `pr.*` |
+|---|---|---|---|---|---|---|---|
+| Global | `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml` | yes | yes | yes | **no** | yes | yes |
+| Shared | `.pando.yaml` in the **invoking** worktree | **no** (only `target-branch` and `base`) | **no** | yes | yes | yes (untrusted, needs `pando trust commit-approve`) | yes |
+| Local | `.pando.local.yaml` in the **primary** worktree | yes | yes | yes | yes | yes | yes |
 
 `pando install` adds a commented scaffold to the global YAML file. It
 never enables a setting or edits existing user configuration. The scaffold is
@@ -46,6 +46,8 @@ configuration. `pando install` includes this as commented guidance:
 
 ```yaml
 # pr:
+#   # auto, github, or tea
+#   provider: auto
 #   generation:
 #     command: pi --no-session --no-tools
 ```
@@ -154,6 +156,17 @@ creation:
 /.worktrees/
 ```
 
+## Pull-request provider
+
+`pr.provider` accepts `auto` (the default), `github`, or `tea` in every layer. It resolves local, then shared, then global. `auto` selects `gh` for a github.com base remote. Other hosts select `tea` only when `tea login list --output json` contains a login whose HTTP or SSH host matches the remote.
+
+```yaml
+pr:
+  provider: auto
+```
+
+Use an explicit value to enforce the expected forge and fail when the remote host does not match. The `github` adapter requires `gh auth login`. The `tea` adapter requires a configured `tea login` for the Gitea or Forgejo instance.
+
 ## Pull-request templates
 
 `pr.pull-request-template` is a body-template value, separate from the
@@ -184,7 +197,8 @@ pr:
 - **Default sort**: the ignored local value overrides the global value. The
   committed shared file cannot set this personal interface preference.
 - **Commit generation** (`command` and `template` resolve independently):
-  local, then shared, then global — first layer that sets the value wins.
+  local, then shared, then global; the first layer that sets the value wins.
+- **PR provider**: local, then shared, then global, defaulting to `auto`.
 
 ## Commit-generation MiniJinja template
 
