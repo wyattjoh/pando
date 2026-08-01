@@ -1,43 +1,43 @@
 ---
-name: worktrees
-description: 'Kickstart usage of the `worktrees` CLI — inspecting, creating, and navigating Git worktrees. Triggers on "worktrees", "worktrees switch", "worktrees create", "worktrees commit", "worktrees get", "worktrees trust", "worktrees merge", "worktrees install", ".worktrees.yaml", ".worktrees.local.yaml", "worktrees config.yaml".'
+name: pando
+description: 'Kickstart usage of the `pando` CLI — inspecting, creating, and navigating Git worktrees. Triggers on "pando", "worktrees", "pando switch", "pando create", "pando commit", "pando get", "pando trust", "pando merge", "pando install", ".pando.yaml", ".pando.local.yaml", "pando config.yaml".'
 allowed-tools: Bash, Read
 effort: medium
 ---
 
-# worktrees
+# pando
 
-`worktrees` is a Rust CLI for inspecting, creating, and navigating the Git
+`pando` is a Rust CLI for inspecting, creating, and navigating the Git
 worktrees of the repository containing the current directory. Git is the
 source of truth — every fact comes from invoking the installed `git`
 executable; there is no libgit2, no cached registry, and no implicit fetch.
 
 ## Use the CLI, not raw git — this is the point of the skill
 
-In a repository that uses `worktrees`, four operations are wrapped by a
-`worktrees` subcommand instead of being done with plain `git`. Use the
+In a repository that uses `pando`, four operations are wrapped by a
+`pando` subcommand instead of being done with plain `git`. Use the
 subcommand, never the raw git equivalent, even though the raw command would
 often "work":
 
 | Don't | Do | Why the wrapper matters |
 |---|---|---|
-| `git worktree add ...` / `git checkout -b ...` | `worktrees switch [--dry-run] [branch]`, or `worktrees create [--dry-run] <branch>` to skip the new-branch confirmation | Applies the branch-resolution order, the configured root, and post-create hooks/trust |
-| `git commit -m "<message you wrote>"` | `worktrees commit --input-output json` (omit a message in the request to let the **configured generator** write it) | If the user didn't give you a message, do not invent one yourself — let the generator write it. Only supply a literal message when the user gave you that exact text |
-| `git worktree remove ...` | `worktrees remove [--force] [--dry-run] [branch...]` | Keeps the local branch ref; runs `pre-remove` hooks |
-| `git merge ...` / `git rebase ...` onto the target | `worktrees merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Resolves the configured target branch, or origin/HEAD, main, then master without fetching, runs `pre-merge` hooks, and is crash-recoverable |
+| `git worktree add ...` / `git checkout -b ...` | `pando switch [--dry-run] [branch]`, or `pando create [--dry-run] <branch>` to skip the new-branch confirmation | Applies the branch-resolution order, the configured root, and post-create hooks/trust |
+| `git commit -m "<message you wrote>"` | `pando commit --input-output json` (omit a message in the request to let the **configured generator** write it) | If the user didn't give you a message, do not invent one yourself — let the generator write it. Only supply a literal message when the user gave you that exact text |
+| `git worktree remove ...` | `pando remove [--force] [--dry-run] [branch...]` | Keeps the local branch ref; runs `pre-remove` hooks |
+| `git merge ...` / `git rebase ...` onto the target | `pando merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Resolves the configured target branch, or origin/HEAD, main, then master without fetching, runs `pre-merge` hooks, and is crash-recoverable |
 
 `git add`/`git add --patch` are still the right tool for **staging** — only
-the four operations above must go through `worktrees`, not `git`.
+the four operations above must go through `pando`, not `git`.
 
 ## Local setup
 
-- Binaries: `worktrees` and its `wt` symlink on `PATH` when installed with `just install` (pinned during generation: **v0.1.0**).
-- The installed zsh integration wraps both `worktrees` and `wt` so
+- Binaries: `pando` and its `pd` symlink on `PATH` when installed with `just install` (pinned during generation: **v0.1.0**).
+- The installed zsh integration wraps both `pando` and `pd` so
   `switch`/`create`/`remove`/`merge` can `cd` to the destination the selected binary
-  prints. `command worktrees ...` and `command wt ...` bypass the wrappers.
+  prints. `command pando ...` and `command pd ...` bypass the wrappers.
 - Config files the CLI reads (see `references/config.md`):
-  `${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml`,
-  `.worktrees.yaml`, `.worktrees.local.yaml`.
+  `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml`,
+  `.pando.yaml`, `.pando.local.yaml`.
 
 ## Global flags
 
@@ -50,8 +50,8 @@ the four operations above must go through `worktrees`, not `git`.
 
 | Env var | Purpose |
 |---|---|
-| `XDG_CONFIG_HOME` | Base for `worktrees/config.yaml`, `trust.json`, generated zsh integration. Falls back to `$HOME/.config` |
-| `ZDOTDIR` | Where `worktrees install` writes/edits `.zshrc`. Falls back to `$HOME` |
+| `XDG_CONFIG_HOME` | Base for `pando/config.yaml`, `trust.json`, generated zsh integration. Falls back to `$HOME/.config` |
+| `ZDOTDIR` | Where `pando install` writes/edits `.zshrc`. Falls back to `$HOME` |
 
 **Agents must use `--input-output json` for every normal operation.** Put the
 leaf command (and trust subcommand) in argv and the complete command input in
@@ -65,7 +65,7 @@ mixed command flags. Dry-run mutating requests use `input.dry_run:true`.
 Force is argv-only authorization for removal. Pass `--force` only with explicit user approval; never put `force` in a remove request document. JSON cannot grant hook or generator trust or authorize installer
 writes. Structured worktree records expose nullable RFC 3339
 `last_commit_at` values and always retain Git discovery order, regardless of
-the human `worktrees.default-sort` preference. `worktrees list --branches
+the human `worktrees.default-sort` preference. `pando list --branches
 --output json` emits a distinct `result.branches` payload (branch, head,
 nullable `last_commit_at`/`path`/`condition`, `current`) in `for-each-ref`
 order, also independent of the personal default sort; `path`/`condition`
@@ -74,7 +74,7 @@ for leaf contracts and approval rules.
 
 ## Anatomy
 
-`worktrees [--output human|json] <command> [command flags]`
+`pando [--output human|json] <command> [command flags]`
 
 ## Commands
 
@@ -96,33 +96,33 @@ for leaf contracts and approval rules.
 ### Install and enable the zsh integration
 ```sh
 just install
-worktrees install
+pando install
 source ${ZDOTDIR:-$HOME}/.zshrc
 ```
-`just install` installs `worktrees` with Cargo and creates `wt` as a relative symlink beside it. `worktrees install` also adds an idempotent commented scaffold to the global config without enabling or overwriting user settings.
+`just install` installs `pando` with Cargo and creates `pd` as a relative symlink beside it. `pando install` also adds an idempotent commented scaffold to the global config without enabling or overwriting user settings.
 Source: README.md ("Install")
 
 ### Configure a root before creating any worktrees
 No root is ever created automatically — this is required before the first `switch` that creates a worktree.
 ```yaml
-# ${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml
+# ${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml
 worktrees:
   root: ../worktrees
   default-sort: last-commit-at # git, branch, last-commit-at, or path
   base: head                   # head (default) or fresh
 ```
-The ignored `.worktrees.local.yaml` overlay may override all three values;
-committed `.worktrees.yaml` cannot set the personal `default-sort` preference,
+The ignored `.pando.local.yaml` overlay may override all three values;
+committed `.pando.yaml` cannot set the personal `default-sort` preference,
 though it may set `base` and `target-branch`.
 Source: README.md ("Global placement")
 
 ### Switch to / create a branch worktree
 ```zsh
-worktrees switch feature/login   # exact branch
-worktrees switch                 # interactive picker
-worktrees switch --branches      # interactive picker, starting in branch view
-worktrees create feature/login   # create without confirming; fails if it exists
-worktrees create --fetch topic   # refresh the fresh base ref first (base: fresh only)
+pando switch feature/login   # exact branch
+pando switch                 # interactive picker
+pando switch --branches      # interactive picker, starting in branch view
+pando create feature/login   # create without confirming; fails if it exists
+pando create --fetch topic   # refresh the fresh base ref first (base: fresh only)
 ```
 New branches start at the invoking worktree's `HEAD` unless `worktrees.base`
 is `fresh`, which cuts them from the target branch's remote-tracking ref
@@ -134,7 +134,7 @@ path A-Z without persisting the change or losing the filter/selection. Ctrl-B
 toggles between worktree view and branch view (local branches, including
 ones with no worktree yet) for the current invocation only — selecting an
 unattached branch creates a worktree for it through the same resolver
-`worktrees switch <branch>` uses.
+`pando switch <branch>` uses.
 Source: README.md ("Switching and creating")
 
 ### Stage deliberately, then commit as an agent — `--input-output json`
@@ -144,13 +144,13 @@ git add --patch                   # selected hunks
 
 # no message given: let the configured generator write it
 printf '%s\n' '{"schema_version":1,"input":{"selection":"staged","message":{"source":"configured_generator"},"dry_run":false}}' \
-  | worktrees commit --input-output json
+  | pando commit --input-output json
 
 # user gave you this exact message
 printf '%s\n' '{"schema_version":1,"input":{"selection":"staged","message":{"source":"provided","value":"feat: add commit support"},"dry_run":false}}' \
-  | worktrees commit --input-output json
+  | pando commit --input-output json
 ```
-Bare `worktrees commit` (`"selection":"staged"`) only commits what is
+Bare `pando commit` (`"selection":"staged"`) only commits what is
 already staged in the index — it never stages for you. If the user asked
 you to "commit" without giving an exact message, **do not compose one
 yourself** — send `{"source":"configured_generator"}` so the configured
@@ -164,18 +164,18 @@ Source: README.md ("Committing"); request schema confirmed against
 ```sh
 # generator writes the message
 printf '%s\n' '{"schema_version":1,"input":{"selection":"stage_all","message":{"source":"configured_generator"},"dry_run":false}}' \
-  | worktrees commit --input-output json
+  | pando commit --input-output json
 
 # user gave you this exact message
 printf '%s\n' '{"schema_version":1,"input":{"selection":"stage_all","message":{"source":"provided","value":"chore: commit every change"},"dry_run":false}}' \
-  | worktrees commit --input-output json
+  | pando commit --input-output json
 ```
 Source: README.md; `Selection::StageAll` in `src/commit.rs`
 
 ### Preview a commit before running it (dry run)
 ```sh
 printf '%s\n' '{"schema_version":1,"input":{"selection":"staged","message":{"source":"configured_generator"},"dry_run":true}}' \
-  | worktrees commit --input-output json
+  | pando commit --input-output json
 ```
 On success, `result` is `{"outcome":"dry_run","ready":true,"selection":"staged"}` —
 nothing is staged, generated, or committed.
@@ -183,34 +183,34 @@ Source: `src/commit.rs` (`run_json`'s `invocation.dry_run` branch)
 
 ### Add a shared post-create hook
 ```yaml
-# .worktrees.yaml (committed, read from the invoking worktree)
+# .pando.yaml (committed, read from the invoking worktree)
 hooks:
   post-create:
     - name: Install dependencies
       command: npm install
-    - command: echo "PORT=$(worktrees get port)" > .env.local
+    - command: echo "PORT=$(pando get port)" > .env.local
 ```
 New shared hook commands are untrusted until approved:
 ```sh
-worktrees trust status
-worktrees trust reset
+pando trust status
+pando trust reset
 ```
 Source: README.md ("Shared project setup", "Trust")
 
 ### Query current-worktree properties (e.g. from a hook script)
 ```sh
-branch=$(worktrees get branch)
-path=$(worktrees get worktree-path)
-primary=$(worktrees get primary-worktree-path)
-root=$(worktrees get worktree-root)
-port=$(worktrees get port)
+branch=$(pando get branch)
+path=$(pando get worktree-path)
+primary=$(pando get primary-worktree-path)
+root=$(pando get worktree-root)
+port=$(pando get port)
 ```
 Source: README.md ("get")
 
 ### Handle a `commit` JSON error response
 ```sh
 printf '%s\n' '{"schema_version":1,"input":{"selection":"staged","message":{"source":"configured_generator"},"dry_run":false}}' \
-  | worktrees commit --input-output json
+  | pando commit --input-output json
 # {"status":"error","error":{"code":"commit.nothing_staged","message":"nothing is staged"},"next_steps":[...]}
 ```
 On `"status":"error"`, read `error.code` and, when present, `next_steps[]` —
@@ -224,7 +224,7 @@ rationale in `docs/adr/0002-render-typed-command-outcomes.md`
 
 ### Create a pull request from a fork
 
-Use `worktrees pr create --remote <name>` (or `input.remote` in JSON) when the
+Use `pando pr create --remote <name>` (or `input.remote` in JSON) when the
 head branch belongs on a personal fork. Remote precedence is explicit remote,
 then the branch upstream, then `origin`, then a sole configured remote. The
 the resolved target branch must have an upstream GitHub remote, which is used as
@@ -233,7 +233,7 @@ and dry-run resolve both repositories before any push.
 
 ### Inspect the JSON request/response schema and Schema version
 ```sh
-worktrees commit --help --output json   # generated request/response JSON Schemas
+pando commit --help --output json   # generated request/response JSON Schemas
 ```
 Source: README.md ("Structured (JSON) usage")
 

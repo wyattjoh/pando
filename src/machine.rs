@@ -241,7 +241,7 @@ fn resolve(
                     _ => None,
                 };
                 SwitchChoice {
-                    retry: json!({"argv":["worktrees","--input-output","json","switch"],"stdin":{"schema_version":1,"input":{"branch":branch.clone()}}, "working_directory":BytePath::path(&repo.current().path)}),
+                    retry: json!({"argv":["pando","--input-output","json","switch"],"stdin":{"schema_version":1,"input":{"branch":branch.clone()}}, "working_directory":BytePath::path(&repo.current().path)}),
                     branch,
                     destination: BytePath::path(&worktree.path),
                     current: worktree.current,
@@ -320,7 +320,7 @@ fn resolve(
                 description: "Enter the registered worktree instead of creating one".into(),
                 mutation: "none".into(),
                 requires_human_approval: false,
-                invocation: json!({"argv":["worktrees","--input-output","json","switch"],"stdin":{"schema_version":1,"input":{"branch":branch}},"working_directory":BytePath::path(&repo.current().path)}),
+                invocation: json!({"argv":["pando","--input-output","json","switch"],"stdin":{"schema_version":1,"input":{"branch":branch}},"working_directory":BytePath::path(&repo.current().path)}),
             });
             return emit(response, true);
         }
@@ -614,7 +614,7 @@ fn resolve(
                     push_diagnostic(&mut response, "hook", "stdout", &stdout);
                     push_diagnostic(&mut response, "hook", "stderr", &stderr);
                 }
-                response.next_steps.push(protocol::NextStep { action:format!("{command}.recover_setup"), description:"Inspect the worktree and retry or explicitly complete setup interactively".into(), mutation:"setup".into(), requires_human_approval:true, invocation:json!({"argv":["worktrees","switch",branch],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}) });
+                response.next_steps.push(protocol::NextStep { action:format!("{command}.recover_setup"), description:"Inspect the worktree and retry or explicitly complete setup interactively".into(), mutation:"setup".into(), requires_human_approval:true, invocation:json!({"argv":["pando","switch",branch],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}) });
                 return emit(response, true);
             }
             crate::setup::clear(&repo.common_dir, &identity, Some(&branch))?;
@@ -1058,7 +1058,7 @@ pub fn trust(command: &str, request_mode: bool, dry_run_flag: bool) -> Result<()
                 response.context = json!({"candidate":details});
                 response.next_steps.push(crate::protocol::NextStep {
                     action: "trust.approve_commit_generator".into(), description: "Review these settings and approve interactively".into(), mutation: "trust".into(), requires_human_approval: true,
-                    invocation: json!({"argv":["worktrees","trust","commit-approve"],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}),
+                    invocation: json!({"argv":["pando","trust","commit-approve"],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}),
                 });
                 return emit(response, true);
             }
@@ -1166,7 +1166,7 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
                 "pre-remove hooks require manual review and approval",
             );
             response.context = json!({"branch":target.worktree.branch_label(),"commands":target.config.pre_remove.iter().map(|s| &s.command).collect::<Vec<_>>()});
-            response.next_steps.push(crate::protocol::NextStep { action:"trust.approve_hooks".into(), description:"Review and approve pre-remove hooks interactively".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["worktrees","remove",target.worktree.branch_label()],"stdin":null,"working_directory":BytePath::path(&plan.current)}) });
+            response.next_steps.push(crate::protocol::NextStep { action:"trust.approve_hooks".into(), description:"Review and approve pre-remove hooks interactively".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["pando","remove",target.worktree.branch_label()],"stdin":null,"working_directory":BytePath::path(&plan.current)}) });
             return emit(response, true);
         }
     }
@@ -1305,7 +1305,7 @@ fn add_remove_retry(
     cwd: &std::path::Path,
 ) {
     let mut argv = vec![
-        "worktrees".to_string(),
+        "pando".to_string(),
         "remove".to_string(),
         "--input-output".to_string(),
         "json".to_string(),
@@ -1445,7 +1445,7 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
             effects,
         );
         if approval_blocked {
-            response.next_steps.push(protocol::NextStep { action:"trust.review".into(), description:"Review and explicitly trust the configured lifecycle hooks".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["worktrees","trust","show"],"working_directory":plan.context.topic_worktree}) });
+            response.next_steps.push(protocol::NextStep { action:"trust.review".into(), description:"Review and explicitly trust the configured lifecycle hooks".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["pando","trust","show"],"working_directory":plan.context.topic_worktree}) });
         }
         return emit(response, false);
     }
@@ -1458,7 +1458,7 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
         );
         response.context = context;
         response.effects = effects;
-        response.next_steps.push(protocol::NextStep { action:"trust.review".into(), description:"Review and explicitly trust the configured lifecycle hooks before retrying".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["worktrees","trust","show"],"working_directory":plan.context.topic_worktree}) });
+        response.next_steps.push(protocol::NextStep { action:"trust.review".into(), description:"Review and explicitly trust the configured lifecycle hooks before retrying".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["pando","trust","show"],"working_directory":plan.context.topic_worktree}) });
         return emit(response, true);
     }
     let mut command = std::process::Command::new(std::env::current_exe()?);
@@ -1527,7 +1527,7 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
     push_diagnostic(&mut response, "merge", "stdout", &output.stdout);
     push_diagnostic(&mut response, "merge", "stderr", &output.stderr);
     if !output.status.success() {
-        response.next_steps.push(protocol::NextStep { action:"merge.retry".into(), description:"Resolve the reported blocker and retry the journaled lifecycle with its pinned policy".into(), mutation:"repository".into(), requires_human_approval:false, invocation:json!({"argv":["worktrees","merge","--input-output","json"],"stdin":{"schema_version":1,"input":input},"working_directory":plan.context.topic_worktree}) });
+        response.next_steps.push(protocol::NextStep { action:"merge.retry".into(), description:"Resolve the reported blocker and retry the journaled lifecycle with its pinned policy".into(), mutation:"repository".into(), requires_human_approval:false, invocation:json!({"argv":["pando","merge","--input-output","json"],"stdin":{"schema_version":1,"input":input},"working_directory":plan.context.topic_worktree}) });
     }
     emit(response, !output.status.success())
 }
@@ -1597,7 +1597,7 @@ pub fn install(request_mode: bool, dry_flag: bool) -> Result<()> {
             description: "Review and approve installation interactively".into(),
             mutation: "filesystem".into(),
             requires_human_approval: true,
-            invocation: json!({"argv":["worktrees","install"],"stdin":null}),
+            invocation: json!({"argv":["pando","install"],"stdin":null}),
         });
         return emit(response, true);
     }

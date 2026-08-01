@@ -238,10 +238,10 @@ impl EffectiveConfig {
         worktree: &Path,
         resolve_placement: bool,
     ) -> Result<Self> {
-        let global_path = config_home()?.join("worktrees/config.yaml");
+        let global_path = config_home()?.join("pando/config.yaml");
         let global: GlobalConfig = read_yaml_optional(&global_path)?;
 
-        let shared_path = worktree.join(".worktrees.yaml");
+        let shared_path = worktree.join(".pando.yaml");
         let shared: SharedConfig = read_yaml_optional(&shared_path)?;
         let shared_hooks = shared.hooks.clone().unwrap_or_default();
         validate_hooks(&shared_hooks, &shared_path)?;
@@ -259,12 +259,12 @@ impl EffectiveConfig {
         let local_path = repository
             .primary
             .as_ref()
-            .map(|primary| primary.join(".worktrees.local.yaml"));
+            .map(|primary| primary.join(".pando.local.yaml"));
         let local = if let (Some(primary), Some(path)) = (&repository.primary, &local_path) {
             if path.exists() {
                 if !git::is_ignored(primary, path)? {
                     bail!(
-                        "{} must be Git-ignored before it can be loaded; add '/.worktrees.local.yaml' to {}",
+                        "{} must be Git-ignored before it can be loaded; add '/.pando.local.yaml' to {}",
                         path.display(),
                         primary.join(".gitignore").display()
                     );
@@ -414,7 +414,7 @@ impl EffectiveConfig {
     /// Returns an error when no root is configured.
     pub fn require_root(&self) -> Result<&Path> {
         self.root.as_deref().context(
-            "no worktree root is configured; create ${XDG_CONFIG_HOME:-$HOME/.config}/worktrees/config.yaml with:\nworktrees:\n  root: ../worktrees",
+            "no worktree root is configured; create ${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml with:\nworktrees:\n  root: ../worktrees",
         )
     }
 
@@ -424,7 +424,7 @@ impl EffectiveConfig {
     ///
     /// Returns an error when no target branch is configured.
     pub fn require_target_branch(&self) -> Result<&str> {
-        self.target_branch.as_deref().context("no target branch is configured; add worktrees.target-branch to .worktrees.yaml or global config")
+        self.target_branch.as_deref().context("no target branch is configured; add worktrees.target-branch to .pando.yaml or global config")
     }
 }
 
@@ -566,7 +566,7 @@ where
         .with_context(|| format!("failed to parse configuration file {}", path.display()))
 }
 
-/// Returns the XDG-aware Worktrees configuration directory.
+/// Returns the XDG-aware Pando configuration directory.
 ///
 /// # Errors
 ///
@@ -577,6 +577,6 @@ pub fn config_home() -> Result<PathBuf> {
     }
     let home = env::var_os("HOME")
         .filter(|value| !value.is_empty())
-        .context("HOME is not set; cannot locate Worktrees configuration")?;
+        .context("HOME is not set; cannot locate Pando configuration")?;
     Ok(PathBuf::from(home).join(".config"))
 }

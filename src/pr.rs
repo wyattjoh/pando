@@ -158,7 +158,7 @@ fn execute(
             return fail(
                 json_mode,
                 "trust.approval_required",
-                "shared PR generator approval is required; run worktrees trust pr-approve",
+                "shared PR generator approval is required; run pando trust pr-approve",
             );
         }
     }
@@ -383,7 +383,7 @@ fn execute(
                 error: Some(crate::protocol::ErrorBody { code: "git.push_failed".into(), message: format!("{error:#}") }),
                 context: json!({"base":base,"head":head}),
                 effects: vec![crate::protocol::Effect { action: "git.push".into(), attempted: true, completed: false, details: Some(push_effect) }],
-                diagnostics: vec![], next_steps: vec![crate::protocol::NextStep { action: "retry".into(), description: "Fix the remote or branch divergence, then retry PR creation. Do not force-push.".into(), mutation: "none".into(), requires_human_approval: true, invocation: json!({"command":"worktrees pr create"}) }],
+                diagnostics: vec![], next_steps: vec![crate::protocol::NextStep { action: "retry".into(), description: "Fix the remote or branch divergence, then retry PR creation. Do not force-push.".into(), mutation: "none".into(), requires_human_approval: true, invocation: json!({"command":"pando pr create"}) }],
             })?;
             return Ok(());
         }
@@ -601,12 +601,12 @@ fn review_metadata(
                 ));
             }
             Key::Char('\u{7}') => {
-                let path = env::temp_dir().join(format!("worktrees-pr-{}.md", std::process::id()));
+                let path = env::temp_dir().join(format!("pando-pr-{}.md", std::process::id()));
                 fs::write(&path, format!("# {title}\n\n{body}\n"))?;
                 let editor = resolve_editor()?;
                 let status = Command::new("/bin/sh")
                     .args(["-c", &format!(r#"{editor} "$1""#)])
-                    .arg("worktrees-pr-editor")
+                    .arg("pando-pr-editor")
                     .arg(&path)
                     .status()
                     .context("failed to launch configured editor")?;
@@ -805,7 +805,7 @@ fn fail_dirty(json_mode: bool) -> Result<()> {
                     "Commit the changes, or retry with --yolo to commit them automatically.".into(),
                 mutation: "none".into(),
                 requires_human_approval: true,
-                invocation: json!({"command": "worktrees pr create --yolo"}),
+                invocation: json!({"command": "pando pr create --yolo"}),
             }],
         })?;
         return Ok(());

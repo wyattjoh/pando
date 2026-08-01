@@ -1,11 +1,21 @@
 [package]
-name = "worktrees"
+# The bare `pando` crate name is squatted on crates.io, so the package is
+# `pando-cli` while the library and binary both keep the plain `pando` name.
+name = "pando-cli"
 version = "0.1.0"
 edition = "2024"
 description = "Inspect and switch between Git worktrees"
 license = "MIT"
-repository = "https://github.com/wyattjoh/worktrees"
+repository = "https://github.com/wyattjoh/pando"
 rust-version = "1.85"
+
+[lib]
+name = "pando"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pando"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"

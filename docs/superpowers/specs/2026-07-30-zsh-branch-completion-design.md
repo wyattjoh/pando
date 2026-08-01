@@ -1,19 +1,19 @@
 # Zsh branch completion
 
 Design for tab-completing branch arguments (and the rest of the CLI surface) in
-zsh for `worktrees` and its `wt` alias.
+zsh for `pando` and its `pd` alias.
 
 > **Superseded in two places by the shipped implementation.** This document and
 > the matching plan both describe the environment variable as `COMPLETE`; the
 > final review found that name generic enough to hijack ordinary invocations, so
-> the code uses `_WORKTREES_COMPLETE`. They also describe remote candidates
+> the code uses `_PANDO_COMPLETE`. They also describe remote candidates
 > inserting `origin/feature`; that string cannot be resolved by
 > `git::remote_matches`, so completion inserts the short name and names the
 > remote in help text instead. See commit 074bce5.
 
 ## Problem
 
-`wt switch <branch>`, `wt create <branch>`, and `wt remove <branches>...` take
+`pd switch <branch>`, `pd create <branch>`, and `pd remove <branches>...` take
 branch names that the user must type in full. Nothing completes them, nor the
 subcommands, flags, or value enums that clap already knows about.
 
@@ -24,7 +24,7 @@ binary on every Tab, so branch candidates come from Rust and the static surface
 (subcommands, flags, `--output` and `get` value enums) is derived from the clap
 `Command` and cannot drift from `src/main.rs`.
 
-The rejected alternative was a hand-written `_worktrees` zsh function embedded in
+The rejected alternative was a hand-written `_pando` zsh function embedded in
 the install blob. It needs no new dependency, but duplicates the entire flag
 surface in shell and drifts silently against `main.rs`.
 
@@ -99,41 +99,41 @@ block that evaluates the registration script at shell startup:
 
 ```zsh
 if [[ -o interactive ]] && (( $+functions[compdef] )); then
-  eval "$(COMPLETE=zsh command worktrees 2>/dev/null)"
-  compdef _clap_dynamic_completer_worktrees wt
+  eval "$(COMPLETE=zsh command pando 2>/dev/null)"
+  compdef _clap_dynamic_completer_pando pd
 fi
 ```
 
 The registration script is **generated at startup, not cached**. `clap_complete`
 documents no stability guarantee between the script `write_registration` emits
 and the protocol `write_complete` expects, and explicitly warns that caching the
-script "may result in invalid or no completions". Caching it in `worktrees.zsh`
+script "may result in invalid or no completions". Caching it in `pando.zsh`
 would silently break completion whenever the binary is upgraded without re-running
-`wt install`. Generating it costs one process spawn per interactive shell,
+`pd install`. Generating it costs one process spawn per interactive shell,
 measured at under 3ms in a debug build.
 
 This also keeps `install.rs` unchanged in shape: `INTEGRATION` remains a const, so
 `install::run`, `install::preview`, `install::json_plan`, and `machine::install`
 keep their current signatures, and `Cli` stays in `main.rs`.
 
-`wt` is a symlink to the `worktrees` binary (see `justfile`), so one registration
+`pd` is a symlink to the `pando` binary (see `justfile`), so one registration
 plus one extra `compdef` line covers both names. `CompleteEnv::completer` defaults
-to `args_os()[0]`, so invoking the eval as `command worktrees` bakes the bare name
-`worktrees` into the script rather than an absolute path, keeping it valid if the
+to `args_os()[0]`, so invoking the eval as `command pando` bakes the bare name
+`pando` into the script rather than an absolute path, keeping it valid if the
 binary moves.
 
 The `compdef` guard matters: if the user's `.zshrc` runs `compinit` after the
-worktrees block, `compdef` does not yet exist. The block then skips registration
+pando block, `compdef` does not yet exist. The block then skips registration
 rather than erroring, and a `precmd` one-shot retry re-attempts it once startup
 finishes.
 
 Everything else about installation is unchanged: one file, one atomic write, one
 `integration_changed` comparison, and the existing marker-block idempotency.
-Existing users pick up completion on their next `wt install`.
+Existing users pick up completion on their next `pd install`.
 
 The existing `install_preserves_zshrc_and_is_idempotent` test asserts no line in
-`worktrees.zsh` begins with `_`, because function-table snapshots drop `_name`
-functions. That assertion still holds: `_clap_dynamic_completer_worktrees` is only
+`pando.zsh` begins with `_`, because function-table snapshots drop `_name`
+functions. That assertion still holds: `_clap_dynamic_completer_pando` is only
 referenced mid-line in a `compdef` argument, and is defined at runtime by the
 eval'd script, where the underscore prefix is the completion system's own
 convention.
@@ -142,7 +142,7 @@ convention.
 
 **stdout purity.** Completion output reaches stdout only when `COMPLETE` is set.
 In that invocation the shell function's `$1` is `--`, not `switch`/`create`/
-`remove`/`merge`, so `worktrees_dispatch` takes its passthrough branch and never
+`remove`/`merge`, so `pando_dispatch` takes its passthrough branch and never
 attempts a `cd`.
 
 **Paths are bytes.** `discover_remote_branches` parses `for-each-ref` output as
@@ -162,14 +162,14 @@ by the `COMPLETE` environment variable.
 - Prefix filtering: `switch fea` offers only the `feat-*` branches.
 - A cwd outside any repository exits 0 with empty stdout and empty stderr.
 - The existing zsh integration test is extended: after `install`, the generated
-  `worktrees.zsh` sources cleanly under real zsh and `compdef` is registered for
-  both `worktrees` and `wt`.
+  `pando.zsh` sources cleanly under real zsh and `compdef` is registered for
+  both `pando` and `pd`.
 
 ## Documentation
 
 Per `.claude/rules/cli-skill-sync.md`, the install surface changes, so update
-`skills/worktrees/references/commands/install.md` and
-`skills/worktrees/SKILL.md`. Also update the README's install section and add
+`skills/pando/references/commands/install.md` and
+`skills/pando/SKILL.md`. Also update the README's install section and add
 `completion.rs` to the module map in `CLAUDE.md`.
 
 ## Out of scope
@@ -178,4 +178,4 @@ Per `.claude/rules/cli-skill-sync.md`, the install surface changes, so update
   prior-word context, so deduplicating against the current command line would
   require hand-writing zsh — the approach this design rejects.
 - **Only zsh is registered.** `CompleteEnv` supports bash and fish, but
-  `worktrees install` manages zsh alone today. Extending it is a separate change.
+  `pando install` manages zsh alone today. Extending it is a separate change.

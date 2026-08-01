@@ -1,13 +1,13 @@
 # `list`, `switch`, `create`, `get` — navigation
 
 **Never create or switch worktrees with raw `git worktree add` /
-`git checkout -b`.** Use `worktrees switch` or `worktrees create` so branch
+`git checkout -b`.** Use `pando switch` or `pando create` so branch
 resolution, the configured root, and post-create hooks/trust all apply.
 
-## `worktrees list`
+## `pando list`
 
 ```
-Usage: worktrees list [OPTIONS]
+Usage: pando list [OPTIONS]
 ```
 
 No positional args, no subcommands. Prints aligned `BRANCH`, `LAST COMMIT AT`,
@@ -21,10 +21,10 @@ active order in its heading or column header.
 Both JSON modes are supported; agents use versioned request mode.
 
 ```sh
-worktrees list
+pando list
 ```
 
-### `worktrees list -b` / `worktrees list --branches`
+### `pando list -b` / `pando list --branches`
 
 Lists local branches (`refs/heads`) instead of worktrees — including a
 branch that has never been checked out anywhere. Remote-tracking branches
@@ -34,17 +34,17 @@ checked out; the `PATH` cell is blank for a branch with no worktree. A
 checked-out branch keeps its current `*` and dirty markers; an unattached
 branch shows no condition marker, since there is no working tree to
 inspect. Detached and bare worktrees have no branch and so never appear in
-this view — it is not a superset of `worktrees list`. Sorting behaves as it
+this view — it is not a superset of `pando list`. Sorting behaves as it
 does for worktrees, with unattached branches ordering last under path sort.
 
 ```sh
-worktrees list --branches
+pando list --branches
 ```
 
-## `worktrees switch [BRANCH]`
+## `pando switch [BRANCH]`
 
 ```
-Usage: worktrees switch [OPTIONS] [BRANCH]
+Usage: pando switch [OPTIONS] [BRANCH]
 ```
 
 | Arg | Required | Purpose |
@@ -69,11 +69,11 @@ current invocation only. Re-sorting preserves the active filter and selected
 worktree identity; the create action stays pinned last. Escape cancels
 without changing directory.
 
-`worktrees switch -b` / `worktrees switch --branches` opens the picker in
-branch view instead of worktree view — the same columns as `worktrees list
+`pando switch -b` / `pando switch --branches` opens the picker in
+branch view instead of worktree view — the same columns as `pando list
 --branches`, with the heading and no-matches hint reading "branch" instead
-of "worktree". The flag only sets the picker's initial view: `worktrees
-switch -b <branch>` behaves exactly like `worktrees switch <branch>` since
+of "worktree". The flag only sets the picker's initial view: `pando
+switch -b <branch>` behaves exactly like `pando switch <branch>` since
 no picker opens. Inside the picker, Ctrl-B toggles between worktree view and
 branch view for the current invocation only — nothing is persisted, and
 there is no configuration key for the default view. Toggling never touches
@@ -82,12 +82,12 @@ whenever it exists in both views (a checked-out branch is the same choice
 either way); otherwise the selection falls back to the top of the list.
 Selecting an already-checked-out branch navigates to its worktree exactly as
 worktree view does. Selecting a branch with no worktree creates one for it
-through the same resolver `worktrees switch <branch>` uses, including the
+through the same resolver `pando switch <branch>` uses, including the
 post-create hook trust prompt — no new switching or creation path is
 introduced.
 
 ```zsh
-worktrees switch --branches
+pando switch --branches
 ```
 
 Branch resolution order (no implicit fetch):
@@ -127,14 +127,14 @@ existing linked worktrees but cannot create new ones.
 Both JSON modes are supported; agents use versioned request mode.
 
 ```zsh
-worktrees switch feature/login
-worktrees switch
+pando switch feature/login
+pando switch
 ```
 
-## `worktrees create <BRANCH>`
+## `pando create <BRANCH>`
 
 ```
-Usage: worktrees create [OPTIONS] <BRANCH>
+Usage: pando create [OPTIONS] <BRANCH>
 ```
 
 | Arg | Required | Purpose |
@@ -172,13 +172,13 @@ the one machine entry point permitted to create a genuinely new branch
 unattended — `switch` still answers `switch.approval_required`.
 
 ```zsh
-worktrees create feature/login
+pando create feature/login
 ```
 
-## `worktrees get <PROPERTY>`
+## `pando get <PROPERTY>`
 
 ```
-Usage: worktrees get [OPTIONS] <PROPERTY>
+Usage: pando get [OPTIONS] <PROPERTY>
 ```
 
 `<PROPERTY>` is required, one of:
@@ -198,17 +198,17 @@ fails when no root is configured. Works from nested directories.
 Both JSON modes are supported; agents use versioned request mode.
 
 ```sh
-branch=$(worktrees get branch)
-path=$(worktrees get worktree-path)
-primary=$(worktrees get primary-worktree-path)
-root=$(worktrees get worktree-root)
-port=$(worktrees get port)
+branch=$(pando get branch)
+path=$(pando get worktree-path)
+primary=$(pando get primary-worktree-path)
+root=$(pando get worktree-root)
+port=$(pando get port)
 ```
 
 A common use is inside a `post-create` hook (see `../config.md`):
 
 ```sh
-echo "PORT=$(worktrees get port)" > .env.local
+echo "PORT=$(pando get port)" > .env.local
 ```
 
 ## Structured JSON contract
@@ -217,4 +217,4 @@ Agents use `--input-output json`. `list` accepts `{"schema_version":1,"request_i
 
 Responses identify as `list`, `get`, `switch`, or `create`; paths are UTF-8/base64 tagged objects. Every structured `list` worktree and `switch.selection_required` choice includes nullable `last_commit_at`, an RFC 3339 HEAD committer timestamp with an explicit offset. These arrays retain Git discovery order under every personal default sort. A systemic metadata failure leaves timestamps null and adds one bounded diagnostic without ordinary stderr. Switch may return an existing destination, a creation plan, or typed selection/remote/approval errors with retry context. Create returns a `created` or `creation_plan` result carrying `kind`, `start_point`, a `base_ref` when the effective base is `fresh`, and both `create_branch` and `create_worktree` effects for a genuinely new branch, or fails with `create.branch_registered` plus a `switch` next step. `input.fetch` adds a `fetch_base_ref` effect naming the single refreshed ref; it is rejected as `switch.fetch_not_applicable` / `create.fetch_not_applicable` in `head` mode or when the branch is not genuinely new, and an unresolvable or never-fetched base is `switch.base_unavailable` / `create.base_unavailable`. Dry runs perform no creation or hooks and report unattempted effects. Exact-leaf `--help --output json` returns runtime request/response schemas and complete error/action catalogs. JSON writes one document to stdout and no ordinary stderr.
 
-`worktrees list --branches --output json` emits a distinct payload: `result.branches` (not `result.worktrees`), each record carrying `branch`, `head`, nullable `last_commit_at`, nullable `path`, nullable `condition`, and `current`; `path`/`condition` are `null` for a branch with no worktree. `result.summary` reports `total`, `checked_out`, and `dirty`. Branch records are always in `for-each-ref` order — never the caller's personal default sort — regardless of `input-output` mode. `worktrees list --output json` without `--branches` is unchanged.
+`pando list --branches --output json` emits a distinct payload: `result.branches` (not `result.worktrees`), each record carrying `branch`, `head`, nullable `last_commit_at`, nullable `path`, nullable `condition`, and `current`; `path`/`condition` are `null` for a branch with no worktree. `result.summary` reports `total`, `checked_out`, and `dirty`. Branch records are always in `for-each-ref` order — never the caller's personal default sort — regardless of `input-output` mode. `pando list --output json` without `--branches` is unchanged.

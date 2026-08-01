@@ -96,7 +96,7 @@ fn list_shows_current_repository_worktrees_from_nested_directory() {
     let nested = repo.main.join("nested");
     fs::create_dir(&nested).unwrap();
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     let output = command.arg("list").current_dir(&nested).output().unwrap();
 
     assert!(output.status.success());
@@ -123,7 +123,7 @@ fn list_branches_shows_attached_and_unattached_branches() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "untracked-branch"]);
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["list", "--branches"])
         .current_dir(&repo.main)
@@ -158,7 +158,7 @@ fn list_branches_json_reports_null_path_for_unattached_branch() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "untracked-branch"]);
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["list", "--branches", "--output", "json"])
         .current_dir(&repo.main)
@@ -214,14 +214,14 @@ fn list_branches_json_ignores_a_configured_default_sort() {
     );
 
     let xdg = tempfile::tempdir().unwrap();
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         "worktrees:\n  default-sort: last-commit-at\n",
     )
     .unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["list", "--branches", "--output", "json"])
         .current_dir(&repo.main)
@@ -257,7 +257,7 @@ fn list_uses_committer_timestamp_and_converts_it_to_local_time() {
         "2024-01-02T03:04:05-0500",
     );
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&repo.main)
@@ -301,7 +301,7 @@ fn list_honors_global_sort_and_ignored_local_override() {
     );
 
     let xdg = tempfile::tempdir().unwrap();
-    let config_dir = xdg.path().join("worktrees");
+    let config_dir = xdg.path().join("pando");
     fs::create_dir_all(&config_dir).unwrap();
     fs::write(
         config_dir.join("config.yaml"),
@@ -309,7 +309,7 @@ fn list_honors_global_sort_and_ignored_local_override() {
     )
     .unwrap();
 
-    let global = Command::cargo_bin("worktrees")
+    let global = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&repo.main)
@@ -330,17 +330,13 @@ fn list_honors_global_sort_and_ignored_local_override() {
         "{global_stderr}"
     );
 
+    fs::write(repo.main.join(".git/info/exclude"), "/.pando.local.yaml\n").unwrap();
     fs::write(
-        repo.main.join(".git/info/exclude"),
-        "/.worktrees.local.yaml\n",
-    )
-    .unwrap();
-    fs::write(
-        repo.main.join(".worktrees.local.yaml"),
+        repo.main.join(".pando.local.yaml"),
         "worktrees:\n  default-sort: last-commit-at\n",
     )
     .unwrap();
-    let local = Command::cargo_bin("worktrees")
+    let local = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&repo.linked)
@@ -366,12 +362,12 @@ fn list_honors_global_sort_and_ignored_local_override() {
 fn list_rejects_invalid_and_shared_default_sort_with_source_context() {
     let repo = Repository::new();
     let xdg = tempfile::tempdir().unwrap();
-    let config_dir = xdg.path().join("worktrees");
+    let config_dir = xdg.path().join("pando");
     let global_path = config_dir.join("config.yaml");
     fs::create_dir_all(&config_dir).unwrap();
     fs::write(&global_path, "worktrees:\n  default-sort: newest\n").unwrap();
 
-    let invalid = Command::cargo_bin("worktrees")
+    let invalid = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&repo.main)
@@ -388,9 +384,9 @@ fn list_rejects_invalid_and_shared_default_sort_with_source_context() {
     );
 
     fs::remove_file(global_path).unwrap();
-    let shared_path = repo.main.join(".worktrees.yaml");
+    let shared_path = repo.main.join(".pando.yaml");
     fs::write(&shared_path, "worktrees:\n  default-sort: path\n").unwrap();
-    let shared = Command::cargo_bin("worktrees")
+    let shared = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&repo.main)
@@ -412,7 +408,7 @@ fn list_abbreviates_home_directory_with_tilde() {
     let repo = Repository::new();
     let home = repo.temp.path().canonicalize().unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&repo.main)
@@ -432,7 +428,7 @@ fn list_abbreviates_home_directory_with_tilde() {
 fn list_uses_semantic_terminal_styles_without_writing_stdout() {
     let repo = Repository::new();
     fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .arg("list")
         .current_dir(&repo.main)
@@ -444,7 +440,7 @@ fn list_uses_semantic_terminal_styles_without_writing_stdout() {
     assert!(output.stdout.is_empty());
     assert!(
         output.stderr.contains(&forced_style(
-            worktrees::ui::heading_style(),
+            pando::ui::heading_style(),
             "Worktrees (Git order)"
         )),
         "{}",
@@ -452,7 +448,7 @@ fn list_uses_semantic_terminal_styles_without_writing_stdout() {
     );
     assert!(
         output.stderr.contains(&forced_style(
-            worktrees::ui::worktree_data_style().bold(),
+            pando::ui::worktree_data_style().bold(),
             "main"
         )),
         "{}",
@@ -461,20 +457,20 @@ fn list_uses_semantic_terminal_styles_without_writing_stdout() {
     assert!(
         output
             .stderr
-            .contains(&forced_style(worktrees::ui::warning_style(), "*")),
+            .contains(&forced_style(pando::ui::warning_style(), "*")),
         "{}",
         output.stderr
     );
     assert!(
         output.stderr.contains(&forced_style(
-            worktrees::ui::muted_style(),
+            pando::ui::muted_style(),
             "2 worktrees, 1 dirty"
         )),
         "{}",
         output.stderr
     );
 
-    let mut no_color = Command::cargo_bin("worktrees").unwrap();
+    let mut no_color = Command::cargo_bin("pando").unwrap();
     no_color
         .arg("list")
         .current_dir(&repo.main)
@@ -492,7 +488,7 @@ fn current_worktree_paths_with_trailing_spaces_are_marked_and_defaulted() {
     let repo = Repository::new();
     let trailing = repo.add_worktree("trailing-space ", "trailing-branch");
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&trailing)
@@ -521,7 +517,7 @@ fn list_labels_staged_unstaged_and_untracked_changes_dirty() {
     fs::write(repo.linked.join("README.md"), "unstaged\n").unwrap();
     fs::write(untracked.join("new.txt"), "untracked\n").unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&repo.main)
@@ -570,7 +566,7 @@ fn list_preserves_detached_locked_prunable_and_bare_records() {
         ["worktree", "add", bare_linked.to_str().unwrap(), "main"],
     );
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&repo.main)
@@ -583,7 +579,7 @@ fn list_preserves_detached_locked_prunable_and_bare_records() {
     assert!(stderr.contains("missing-branch"), "{stderr}");
     assert!(stderr.contains("1 locked, 1 prunable"), "{stderr}");
 
-    let bare_output = Command::cargo_bin("worktrees")
+    let bare_output = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&bare_linked)
@@ -612,7 +608,7 @@ fn inaccessible_worktrees_are_labeled_and_not_selectable_when_permissions_allow(
         return;
     }
 
-    let listed = Command::cargo_bin("worktrees")
+    let listed = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&repo.main)
@@ -643,7 +639,7 @@ fn list_reports_unknown_when_git_status_fails() {
     fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
     let real_git = find_executable("git");
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&repo.main)
@@ -672,7 +668,7 @@ fn metadata_failure_warns_once_for_human_list_and_is_structured_for_json() {
     fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
     let real_git = find_executable("git");
 
-    let human = Command::cargo_bin("worktrees")
+    let human = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&repo.main)
@@ -694,7 +690,7 @@ fn metadata_failure_warns_once_for_human_list_and_is_structured_for_json() {
     );
     assert!(stderr.contains("metadata command failed"), "{stderr}");
 
-    let json = Command::cargo_bin("worktrees")
+    let json = Command::cargo_bin("pando")
         .unwrap()
         .args(["list", "--output", "json"])
         .current_dir(&repo.main)
@@ -748,7 +744,7 @@ fn metadata_uses_one_batch_and_is_skipped_for_get() {
     let call_log = repo.temp.path().join("cat-file-calls");
     let input_log = repo.temp.path().join("cat-file-input");
 
-    let get = Command::cargo_bin("worktrees")
+    let get = Command::cargo_bin("pando")
         .unwrap()
         .args(["get", "branch"])
         .current_dir(&repo.main)
@@ -765,7 +761,7 @@ fn metadata_uses_one_batch_and_is_skipped_for_get() {
     );
     assert!(!call_log.exists());
 
-    let list = Command::cargo_bin("worktrees")
+    let list = Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(&repo.main)
@@ -789,7 +785,7 @@ fn metadata_uses_one_batch_and_is_skipped_for_get() {
 fn list_reports_an_actionable_error_outside_a_repository() {
     let temp = tempfile::tempdir().unwrap();
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .arg("list")
         .current_dir(temp.path())
@@ -805,7 +801,7 @@ fn list_reports_when_git_cannot_be_started() {
     let temp = tempfile::tempdir().unwrap();
     let empty_path = tempfile::tempdir().unwrap();
 
-    Command::cargo_bin("worktrees")
+    Command::cargo_bin("pando")
         .unwrap()
         .arg("list")
         .current_dir(temp.path())
@@ -837,7 +833,7 @@ fn switch_defaults_to_current_worktree_and_keeps_stdout_pure() {
 #[test]
 fn switch_ctrl_s_preserves_selection_and_stdout_purity() {
     let repo = Repository::new();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .arg("switch")
         .current_dir(&repo.main)
@@ -868,7 +864,7 @@ fn switch_branches_flag_opens_directly_in_branch_view() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "untracked-branch"]);
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "--branches"])
         .current_dir(&repo.main);
@@ -887,7 +883,7 @@ fn switch_branches_selecting_an_attached_branch_navigates_to_its_worktree() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "untracked-branch"]);
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "--branches"])
         .current_dir(&repo.main);
@@ -907,7 +903,7 @@ fn switch_ctrl_b_toggles_between_worktree_and_branch_view() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "untracked-branch"]);
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command.arg("switch").current_dir(&repo.main);
     // Toggle to branch view, then back to worktree view, then cancel.
     let output = run_pty_command(command, b"\x02\x02\x1b");
@@ -931,14 +927,14 @@ fn switch_branches_selecting_an_unattached_branch_creates_its_worktree() {
     git(&repo.main, ["branch", "untracked-branch"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "--branches"])
         .current_dir(&repo.main)
@@ -965,7 +961,7 @@ fn switch_branches_selecting_an_unattached_branch_creates_its_worktree() {
 #[test]
 fn switch_ctrl_s_before_raw_mode_is_not_treated_as_flow_control() {
     let repo = Repository::new();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .arg("switch")
         .current_dir(&repo.main)
@@ -980,7 +976,7 @@ fn switch_ctrl_s_before_raw_mode_is_not_treated_as_flow_control() {
 #[test]
 fn switch_picker_preflights_stdin_before_rendering() {
     let repo = Repository::new();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command.arg("switch").current_dir(&repo.main);
 
     let output = run_terminal_command(command);
@@ -1002,7 +998,7 @@ fn switch_picker_preflights_stdin_before_rendering() {
 #[test]
 fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
     let repo = Repository::new();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .arg("switch")
         .current_dir(&repo.main)
@@ -1017,7 +1013,7 @@ fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
     );
     assert!(
         output.stderr.contains(&forced_style(
-            worktrees::ui::heading_style(),
+            pando::ui::heading_style(),
             "Choose a worktree"
         )),
         "{}",
@@ -1033,7 +1029,7 @@ fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
         "the picker's own closing bar ends the sequence: {}",
         output.stderr
     );
-    let discovery = worktrees::git::discover_with_metadata(&repo.main).unwrap();
+    let discovery = pando::git::discover_with_metadata(&repo.main).unwrap();
     let choices: Vec<_> = discovery
         .worktrees
         .iter()
@@ -1041,36 +1037,34 @@ fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
         .collect();
     let rows: Vec<_> = choices
         .iter()
-        .map(|worktree| worktrees::Row::from_worktree(worktree))
+        .map(|worktree| pando::Row::from_worktree(worktree))
         .collect();
     let row_refs: Vec<_> = rows.iter().collect();
-    let labels = worktrees::render::menu_labels(&row_refs);
+    let labels = pando::render::menu_labels(&row_refs);
     let current = choices
         .iter()
         .position(|worktree| worktree.current)
         .unwrap();
     let selected_label = console::strip_ansi_codes(&labels[current]);
     assert!(
-        output.stderr.contains(&forced_style(
-            worktrees::ui::selected_style(),
-            selected_label
-        )),
+        output
+            .stderr
+            .contains(&forced_style(pando::ui::selected_style(), selected_label)),
         "{}",
         output.stderr
     );
     assert!(
         output.stderr.contains(&forced_style(
-            worktrees::ui::worktree_data_style().bold(),
+            pando::ui::worktree_data_style().bold(),
             "feature"
         )),
         "{}",
         output.stderr
     );
     assert!(
-        output.stderr.contains(&forced_style(
-            worktrees::ui::muted_style(),
-            "type to filter"
-        )),
+        output
+            .stderr
+            .contains(&forced_style(pando::ui::muted_style(), "type to filter")),
         "{}",
         output.stderr
     );
@@ -1078,7 +1072,7 @@ fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
         assert!(
             output
                 .stderr
-                .contains(&forced_style(worktrees::ui::shortcut_style(), shortcut)),
+                .contains(&forced_style(pando::ui::shortcut_style(), shortcut)),
             "missing semantic shortcut {shortcut:?}: {}",
             output.stderr
         );
@@ -1088,7 +1082,7 @@ fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
 #[test]
 fn switch_picker_honors_disabled_color_without_polluting_stdout() {
     let repo = Repository::new();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .arg("switch")
         .current_dir(&repo.main)
@@ -1118,7 +1112,7 @@ fn switch_pagination_hint_uses_muted_semantic_style() {
     for index in 0..8 {
         repo.add_worktree(&format!("page-{index}"), &format!("page-{index}"));
     }
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .arg("switch")
         .current_dir(&repo.main)
@@ -1139,7 +1133,7 @@ fn switch_pagination_hint_uses_muted_semantic_style() {
     assert!(
         output
             .stderr
-            .contains(&forced_style(worktrees::ui::muted_style(), &hint)),
+            .contains(&forced_style(pando::ui::muted_style(), &hint)),
         "{}",
         output.stderr
     );
@@ -1148,7 +1142,7 @@ fn switch_pagination_hint_uses_muted_semantic_style() {
 #[test]
 fn switch_picker_redraws_for_a_narrower_terminal() {
     let repo = Repository::new();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .arg("switch")
         .current_dir(&repo.main)
@@ -1345,7 +1339,7 @@ fn switch_rejects_a_repository_with_no_navigable_worktree() {
     let bare = temp.path().join("only-bare.git");
     git(temp.path(), ["init", "--bare", bare.to_str().unwrap()]);
 
-    Command::cargo_bin("worktrees")
+    Command::cargo_bin("pando")
         .unwrap()
         .arg("switch")
         .current_dir(&bare)
@@ -1358,7 +1352,7 @@ fn switch_rejects_a_repository_with_no_navigable_worktree() {
 #[test]
 fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
     let repo = Repository::new();
-    let mut remove = Command::cargo_bin("worktrees").unwrap();
+    let mut remove = Command::cargo_bin("pando").unwrap();
     remove
         .args(["remove", "feature"])
         .current_dir(&repo.main)
@@ -1370,7 +1364,7 @@ fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
     assert!(removed.stdout.is_empty());
     assert!(
         removed.stderr.contains(&forced_style(
-            worktrees::ui::success_style(),
+            pando::ui::success_style(),
             "Removed 1 worktree; branches retained."
         )),
         "{}",
@@ -1380,13 +1374,13 @@ fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
 
     let topic = repo.add_worktree("merge-topic", "merge-topic");
     fs::write(
-        topic.join(".worktrees.yaml"),
+        topic.join(".pando.yaml"),
         "worktrees:\n  target-branch: main\n",
     )
     .unwrap();
-    git(&topic, ["add", ".worktrees.yaml"]);
+    git(&topic, ["add", ".pando.yaml"]);
     git(&topic, ["commit", "-m", "configure merge target"]);
-    let mut merge = Command::cargo_bin("worktrees").unwrap();
+    let mut merge = Command::cargo_bin("pando").unwrap();
     merge
         .args(["merge", "--no-remove"])
         .current_dir(&topic)
@@ -1399,11 +1393,11 @@ fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
     assert!(
         merged.stderr.contains(&format!(
             "{} {} {} {}{}",
-            forced_style(worktrees::ui::success_style(), "Merged"),
-            forced_style(worktrees::ui::worktree_data_style(), "merge-topic"),
-            forced_style(worktrees::ui::success_style(), "into"),
-            forced_style(worktrees::ui::worktree_data_style(), "main"),
-            forced_style(worktrees::ui::success_style(), "; worktree retained.")
+            forced_style(pando::ui::success_style(), "Merged"),
+            forced_style(pando::ui::worktree_data_style(), "merge-topic"),
+            forced_style(pando::ui::success_style(), "into"),
+            forced_style(pando::ui::worktree_data_style(), "main"),
+            forced_style(pando::ui::success_style(), "; worktree retained.")
         )),
         "{}",
         merged.stderr
@@ -1424,7 +1418,7 @@ fn merge_renders_git_output_inside_the_terminal_ui_rail() {
     git(&repo.linked, ["add", "feature.txt"]);
     git(&repo.linked, ["commit", "-m", "feature change"]);
 
-    let mut merge = Command::cargo_bin("worktrees").unwrap();
+    let mut merge = Command::cargo_bin("pando").unwrap();
     merge
         .args(["merge", "--no-remove"])
         .current_dir(&repo.linked)
@@ -1442,7 +1436,7 @@ fn merge_renders_git_output_inside_the_terminal_ui_rail() {
         assert!(
             merged
                 .stderr
-                .contains(&forced_style(worktrees::ui::heading_style(), progress)),
+                .contains(&forced_style(pando::ui::heading_style(), progress)),
             "missing {progress:?} in {}",
             merged.stderr
         );
@@ -1458,7 +1452,7 @@ fn merge_renders_git_output_inside_the_terminal_ui_rail() {
     }
     assert!(
         merged.stderr.contains(&forced_style(
-            worktrees::ui::worktree_data_style(),
+            pando::ui::worktree_data_style(),
             "feature.txt"
         )),
         "{}",
@@ -1483,7 +1477,7 @@ fn merge_reports_a_rebase_conflict_and_resumes_without_an_editor() {
     git(&repo.linked, ["add", "README.md"]);
     git(&repo.linked, ["commit", "-m", "feature edits readme"]);
 
-    let mut conflicting = Command::cargo_bin("worktrees").unwrap();
+    let mut conflicting = Command::cargo_bin("pando").unwrap();
     conflicting
         .args(["merge", "--no-remove"])
         .current_dir(&repo.linked)
@@ -1505,7 +1499,7 @@ fn merge_reports_a_rebase_conflict_and_resumes_without_an_editor() {
     // A captured continuation has no terminal for an editor. `GIT_EDITOR=false`
     // stands in for an inherited interactive editor: the run must neutralize it
     // and reuse the recorded message rather than hand it a pipe.
-    let mut resuming = Command::cargo_bin("worktrees").unwrap();
+    let mut resuming = Command::cargo_bin("pando").unwrap();
     resuming
         .args(["merge", "--no-remove"])
         .current_dir(&repo.linked)
@@ -1516,7 +1510,7 @@ fn merge_reports_a_rebase_conflict_and_resumes_without_an_editor() {
     assert!(resumed.status.success(), "{}", resumed.stderr);
     assert!(
         resumed.stderr.contains(&forced_style(
-            worktrees::ui::heading_style(),
+            pando::ui::heading_style(),
             "Continued rebase"
         )),
         "{}",
@@ -1539,7 +1533,7 @@ fn merge_falls_back_to_main_without_target_configuration() {
     git(&repo.linked, ["add", "feature.txt"]);
     git(&repo.linked, ["commit", "-m", "feature change"]);
 
-    let mut merge = Command::cargo_bin("worktrees").unwrap();
+    let mut merge = Command::cargo_bin("pando").unwrap();
     merge
         .args(["merge", "--no-remove"])
         .current_dir(&repo.linked)
@@ -1562,7 +1556,7 @@ fn merge_from_the_primary_worktree_switches_it_back_to_the_target() {
     git(&repo.main, ["add", "inline.txt"]);
     git(&repo.main, ["commit", "-m", "inline change"]);
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["merge"])
         .current_dir(&repo.main)
@@ -1595,7 +1589,7 @@ fn merge_from_the_primary_worktree_switches_it_back_to_the_target() {
 fn merge_from_the_primary_worktree_refuses_on_the_target_branch() {
     let repo = Repository::new();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["merge"])
         .current_dir(&repo.main)
@@ -1612,22 +1606,22 @@ fn merge_from_the_primary_worktree_refuses_on_the_target_branch() {
 fn merge_yolo_stages_commits_and_merges_all_changes() {
     let repo = Repository::new();
     fs::write(
-        repo.linked.join(".worktrees.yaml"),
+        repo.linked.join(".pando.yaml"),
         "worktrees:\n  target-branch: main\n",
     )
     .unwrap();
-    git(&repo.linked, ["add", ".worktrees.yaml"]);
+    git(&repo.linked, ["add", ".pando.yaml"]);
     git(&repo.linked, ["commit", "-m", "configure merge target"]);
     fs::write(repo.linked.join("yolo.txt"), "ship it\n").unwrap();
     let xdg = tempfile::tempdir().unwrap();
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         "commit:\n  generation:\n    command: 'printf \"feat: yolo merge\\n\"'\n",
     )
     .unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["merge", "--yolo", "--no-remove"])
         .current_dir(&repo.linked)
@@ -1654,7 +1648,7 @@ fn pr_missing_metadata_generator_fails_before_dirty_worktree_handling() {
     let xdg = tempfile::tempdir().unwrap();
     fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["pr", "create"])
         .current_dir(&repo.linked)
@@ -1692,7 +1686,7 @@ fn install_decline_makes_no_filesystem_changes() {
     assert!(output.stderr.contains("declined"), "{}", output.stderr);
     assert!(
         output.stderr.contains(&forced_style(
-            worktrees::ui::warning_style(),
+            pando::ui::warning_style(),
             "Installation declined; no files were changed."
         )),
         "{}",
@@ -1700,7 +1694,7 @@ fn install_decline_makes_no_filesystem_changes() {
     );
 
     assert_eq!(fs::read(&zshrc).unwrap(), b"export KEEP=yes\n");
-    assert!(!xdg.path().join("worktrees/worktrees.zsh").exists());
+    assert!(!xdg.path().join("pando/pando.zsh").exists());
 }
 
 #[test]
@@ -1719,7 +1713,7 @@ fn install_escape_reports_cancellation_without_filesystem_changes() {
         output.stderr
     );
     assert!(!output.stderr.contains("error:"), "{}", output.stderr);
-    assert!(!xdg.path().join("worktrees/worktrees.zsh").exists());
+    assert!(!xdg.path().join("pando/pando.zsh").exists());
     assert!(!zdot.path().join(".zshrc").exists());
 }
 
@@ -1741,7 +1735,7 @@ fn install_rejects_a_noninteractive_confirmation_before_rendering_a_prompt() {
         !stderr.contains("Planned zsh integration changes"),
         "{stderr}"
     );
-    assert!(!xdg.path().join("worktrees/worktrees.zsh").exists());
+    assert!(!xdg.path().join("pando/pando.zsh").exists());
     assert!(!zdot.path().join(".zshrc").exists());
 }
 
@@ -1759,7 +1753,7 @@ fn install_preserves_zshrc_and_is_idempotent() {
     assert!(installed.stdout.is_empty());
     assert!(
         installed.stderr.contains(&forced_style(
-            worktrees::ui::success_style(),
+            pando::ui::success_style(),
             "Installed zsh integration."
         )),
         "{}",
@@ -1767,22 +1761,22 @@ fn install_preserves_zshrc_and_is_idempotent() {
     );
     assert!(
         installed.stderr.contains(&forced_style(
-            worktrees::ui::success_style(),
+            pando::ui::success_style(),
             "Zsh integration installed."
         )),
         "{}",
         installed.stderr
     );
 
-    let config = xdg.path().join("worktrees/config.yaml");
+    let config = xdg.path().join("pando/config.yaml");
     let generated_config = fs::read_to_string(&config).unwrap();
     assert!(generated_config.contains("#   root: ../worktrees"));
     assert!(generated_config.contains("#   target-branch: main"));
     assert!(generated_config.contains("#     command: pi --no-session --no-tools"));
-    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let integration = xdg.path().join("pando/pando.zsh");
     let generated = fs::read_to_string(&integration).unwrap();
-    assert!(generated.contains("worktrees() { worktrees_dispatch worktrees \"$@\"; }"));
-    assert!(generated.contains("wt() { worktrees_dispatch wt \"$@\"; }"));
+    assert!(generated.contains("pando() { pando_dispatch pando \"$@\"; }"));
+    assert!(generated.contains("pd() { pando_dispatch pd \"$@\"; }"));
     assert!(
         !generated.contains("\n_"),
         "no integration function may use the zsh completion `_name` prefix, which \
@@ -1798,7 +1792,7 @@ fn install_preserves_zshrc_and_is_idempotent() {
     let first_text = String::from_utf8(first_zshrc.clone()).unwrap();
     assert_eq!(
         first_text
-            .matches("# >>> worktrees shell integration >>>")
+            .matches("# >>> pando shell integration >>>")
             .count(),
         1
     );
@@ -1827,9 +1821,9 @@ fn installed_integration_registers_completion_for_both_names() {
     let installed = run_install(home.path(), xdg.path(), Some(zdot.path()), b"y\r");
     assert!(installed.status.success(), "{}", installed.stderr);
 
-    let generated = fs::read_to_string(xdg.path().join("worktrees/worktrees.zsh")).unwrap();
-    assert!(generated.contains("_WORKTREES_COMPLETE=zsh command worktrees"));
-    assert!(generated.contains("compdef _clap_dynamic_completer_worktrees wt"));
+    let generated = fs::read_to_string(xdg.path().join("pando/pando.zsh")).unwrap();
+    assert!(generated.contains("_PANDO_COMPLETE=zsh command pando"));
+    assert!(generated.contains("compdef _clap_dynamic_completer_pando pd"));
     assert!(
         generated.contains("$+functions[compdef]"),
         "registration must be guarded so it is skipped when compinit has not run"
@@ -1856,17 +1850,17 @@ fn installed_integration_registers_compdef_under_real_zsh() {
     // against the shipped bytes rather than a copy that could drift.
     let installed = run_install(home.path(), xdg.path(), Some(zdot.path()), b"y\r");
     assert!(installed.status.success(), "{}", installed.stderr);
-    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let integration = xdg.path().join("pando/pando.zsh");
 
-    // Put the built binary on PATH so `command worktrees` resolves during the eval.
-    let binary = assert_cmd::cargo::cargo_bin("worktrees");
+    // Put the built binary on PATH so `command pando` resolves during the eval.
+    let binary = assert_cmd::cargo::cargo_bin("pando");
     let bin_dir = binary.parent().unwrap();
     let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
 
     let script = format!(
         "autoload -Uz compinit && compinit -u -d {dump}\n\
          source {integration}\n\
-         print -r -- \"registered=${{_comps[worktrees]}} wt=${{_comps[wt]}}\"\n",
+         print -r -- \"registered=${{_comps[pando]}} pd=${{_comps[pd]}}\"\n",
         dump = shell_quote(&xdg.path().join("zcompdump")),
         integration = shell_quote(&integration),
     );
@@ -1880,24 +1874,24 @@ fn installed_integration_registers_compdef_under_real_zsh() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("registered=_clap_dynamic_completer_worktrees"),
-        "worktrees was not registered: {stdout}{}",
+        stdout.contains("registered=_clap_dynamic_completer_pando"),
+        "pando was not registered: {stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        stdout.contains("wt=_clap_dynamic_completer_worktrees"),
-        "wt was not registered: {stdout}{}",
+        stdout.contains("pd=_clap_dynamic_completer_pando"),
+        "pd was not registered: {stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
 
-/// `eval "$(... command worktrees ...)"` alone would `eval ""` when the binary
+/// `eval "$(... command pando ...)"` alone would `eval ""` when the binary
 /// is missing from PATH, which exits 0 and reports registration as successful
-/// while leaving `_clap_dynamic_completer_worktrees` undefined. Guards against
-/// that: with the binary excluded from PATH, neither `worktrees` nor `wt` may
+/// while leaving `_clap_dynamic_completer_pando` undefined. Guards against
+/// that: with the binary excluded from PATH, neither `pando` nor `pd` may
 /// end up registered to a completion function that was never defined.
 #[test]
-fn worktrees_register_completion_does_not_register_when_binary_is_missing_from_path() {
+fn pando_register_completion_does_not_register_when_binary_is_missing_from_path() {
     if Command::new("zsh").arg("--version").output().is_err() {
         eprintln!("skipping: zsh is not installed");
         return;
@@ -1909,7 +1903,7 @@ fn worktrees_register_completion_does_not_register_when_binary_is_missing_from_p
 
     let installed = run_install(home.path(), xdg.path(), Some(zdot.path()), b"y\r");
     assert!(installed.status.success(), "{}", installed.stderr);
-    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let integration = xdg.path().join("pando/pando.zsh");
 
     // Point PATH at an empty directory, simulating `.zshrc` sourcing the
     // integration before the binary's install location joins PATH. Filtering
@@ -1925,7 +1919,7 @@ fn worktrees_register_completion_does_not_register_when_binary_is_missing_from_p
     let script = format!(
         "autoload -Uz compinit && compinit -u -d {dump}\n\
          source {integration}\n\
-         print -r -- \"registered=${{_comps[worktrees]}} wt=${{_comps[wt]}}\"\n",
+         print -r -- \"registered=${{_comps[pando]}} pd=${{_comps[pd]}}\"\n",
         dump = shell_quote(&xdg.path().join("zcompdump")),
         integration = shell_quote(&integration),
     );
@@ -1939,7 +1933,7 @@ fn worktrees_register_completion_does_not_register_when_binary_is_missing_from_p
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stdout.contains("_clap_dynamic_completer_worktrees"),
+        !stdout.contains("_clap_dynamic_completer_pando"),
         "neither name may be registered to a function that was never defined: \
          {stdout}{}",
         String::from_utf8_lossy(&output.stderr)
@@ -1962,7 +1956,7 @@ fn install_preserves_existing_global_config() {
     let home = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
     let zdot = tempfile::tempdir().unwrap();
-    let config_dir = xdg.path().join("worktrees");
+    let config_dir = xdg.path().join("pando");
     fs::create_dir_all(&config_dir).unwrap();
     let config = config_dir.join("config.yaml");
     let original = b"worktrees:\n  root: /custom/worktrees\ncommit:\n  generation:\n    command: custom-generator\n";
@@ -1974,15 +1968,15 @@ fn install_preserves_existing_global_config() {
     assert!(content.starts_with(original));
     assert_eq!(
         content
-            .windows(b"# >>> worktrees configuration scaffold >>>".len())
-            .filter(|window| *window == b"# >>> worktrees configuration scaffold >>>")
+            .windows(b"# >>> pando configuration scaffold >>>".len())
+            .filter(|window| *window == b"# >>> pando configuration scaffold >>>")
             .count(),
         1
     );
     assert_eq!(
         content
-            .windows(b"# <<< worktrees configuration scaffold <<<".len())
-            .filter(|window| *window == b"# <<< worktrees configuration scaffold <<<")
+            .windows(b"# <<< pando configuration scaffold <<<".len())
+            .filter(|window| *window == b"# <<< pando configuration scaffold <<<")
             .count(),
         1
     );
@@ -2017,14 +2011,14 @@ fn install_preserves_a_symlinked_zshrc() {
     assert!(
         String::from_utf8(target_content)
             .unwrap()
-            .contains("# >>> worktrees shell integration >>>")
+            .contains("# >>> pando shell integration >>>")
     );
 }
 
 #[test]
 fn install_falls_back_to_home_configuration_paths() {
     let home = tempfile::tempdir().unwrap();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .arg("install")
         .env("HOME", home.path())
@@ -2033,11 +2027,7 @@ fn install_falls_back_to_home_configuration_paths() {
 
     let output = run_pty_command(command, b"y\r");
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(
-        home.path()
-            .join(".config/worktrees/worktrees.zsh")
-            .is_file()
-    );
+    assert!(home.path().join(".config/pando/pando.zsh").is_file());
     assert!(home.path().join(".zshrc").is_file());
 }
 
@@ -2052,17 +2042,17 @@ fn installed_zsh_wt_function_changes_the_invoking_shell_directory() {
     let xdg = tempfile::tempdir().unwrap();
     let installed = run_install(home.path(), xdg.path(), None, b"y\r");
     assert!(installed.status.success(), "{}", installed.stderr);
-    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let integration = xdg.path().join("pando/pando.zsh");
     let binary = PathBuf::from(
-        Command::cargo_bin("worktrees")
+        Command::cargo_bin("pando")
             .unwrap()
             .get_program()
             .to_owned(),
     );
     let bin = tempfile::tempdir().unwrap();
-    symlink(&binary, bin.path().join("wt")).unwrap();
+    symlink(&binary, bin.path().join("pd")).unwrap();
     let script = format!(
-        "source {}; wt switch || exit $?; builtin pwd -P",
+        "source {}; pd switch || exit $?; builtin pwd -P",
         shell_quote(&integration)
     );
     let path = format!(
@@ -2104,23 +2094,23 @@ fn installed_zsh_wt_function_enters_a_created_worktree() {
     let xdg = tempfile::tempdir().unwrap();
     let installed = run_install(home.path(), xdg.path(), None, b"y\r");
     assert!(installed.status.success(), "{}", installed.stderr);
-    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let integration = xdg.path().join("pando/pando.zsh");
     let root = repo.temp.path().join("created");
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     let binary = PathBuf::from(
-        Command::cargo_bin("worktrees")
+        Command::cargo_bin("pando")
             .unwrap()
             .get_program()
             .to_owned(),
     );
     let bin = tempfile::tempdir().unwrap();
-    symlink(&binary, bin.path().join("wt")).unwrap();
+    symlink(&binary, bin.path().join("pd")).unwrap();
     let script = format!(
-        "source {}; wt create zsh-topic || exit $?; builtin pwd -P",
+        "source {}; pd create zsh-topic || exit $?; builtin pwd -P",
         shell_quote(&integration)
     );
     let path = format!(
@@ -2165,15 +2155,15 @@ fn installed_zsh_function_passes_merge_help_through_without_changing_directory()
     let xdg = tempfile::tempdir().unwrap();
     let installed = run_install(home.path(), xdg.path(), None, b"y\r");
     assert!(installed.status.success(), "{}", installed.stderr);
-    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let integration = xdg.path().join("pando/pando.zsh");
     let binary = PathBuf::from(
-        Command::cargo_bin("worktrees")
+        Command::cargo_bin("pando")
             .unwrap()
             .get_program()
             .to_owned(),
     );
     let script = format!(
-        "source {}; before=$PWD; worktrees merge --help; rc=$?; [[ $PWD == $before ]] || exit 99; exit $rc",
+        "source {}; before=$PWD; pando merge --help; rc=$?; [[ $PWD == $before ]] || exit 99; exit $rc",
         shell_quote(&integration)
     );
     let path = format!(
@@ -2195,7 +2185,7 @@ fn installed_zsh_function_passes_merge_help_through_without_changing_directory()
     );
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.contains("Usage: worktrees merge [OPTIONS]"));
+    assert!(output.stdout.contains("Usage: pando merge [OPTIONS]"));
     assert!(
         !output.stderr.contains("file name too long"),
         "{}",
@@ -2214,15 +2204,15 @@ fn installed_zsh_function_preserves_directory_and_status_on_cancellation() {
     let xdg = tempfile::tempdir().unwrap();
     let installed = run_install(home.path(), xdg.path(), None, b"y\r");
     assert!(installed.status.success(), "{}", installed.stderr);
-    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let integration = xdg.path().join("pando/pando.zsh");
     let binary = PathBuf::from(
-        Command::cargo_bin("worktrees")
+        Command::cargo_bin("pando")
             .unwrap()
             .get_program()
             .to_owned(),
     );
     let script = format!(
-        "source {}; before=$PWD; worktrees switch; rc=$?; [[ $PWD == $before ]] || exit 99; builtin pwd -P; exit $rc",
+        "source {}; before=$PWD; pando switch; rc=$?; [[ $PWD == $before ]] || exit 99; builtin pwd -P; exit $rc",
         shell_quote(&integration)
     );
     let path = format!(
@@ -2263,9 +2253,9 @@ fn installed_zsh_function_delegates_other_commands_unchanged() {
     let xdg = tempfile::tempdir().unwrap();
     let installed = run_install(home.path(), xdg.path(), None, b"y\r");
     assert!(installed.status.success(), "{}", installed.stderr);
-    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let integration = xdg.path().join("pando/pando.zsh");
     let fake_bin = tempfile::tempdir().unwrap();
-    let fake = fake_bin.path().join("worktrees");
+    let fake = fake_bin.path().join("pando");
     fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!(
@@ -2277,10 +2267,7 @@ fn installed_zsh_function_delegates_other_commands_unchanged() {
         .args([
             "-f",
             "-c",
-            &format!(
-                "source {}; worktrees list --future",
-                shell_quote(&integration)
-            ),
+            &format!("source {}; pando list --future", shell_quote(&integration)),
         ])
         .env("PATH", path)
         .output()
@@ -2296,7 +2283,7 @@ fn installed_zsh_function_delegates_other_commands_unchanged() {
 fn switch_explicitly_enters_an_existing_worktree() {
     let repo = Repository::new();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["switch", "feature"])
         .current_dir(&repo.main)
@@ -2322,7 +2309,7 @@ fn switch_explicitly_enters_an_existing_worktree() {
 #[test]
 fn machine_readable_commands_keep_themed_feedback_off_stdout() {
     let repo = Repository::new();
-    let mut get = Command::cargo_bin("worktrees").unwrap();
+    let mut get = Command::cargo_bin("pando").unwrap();
     get.args(["get", "branch"])
         .current_dir(&repo.main)
         .env("CLICOLOR_FORCE", "1");
@@ -2338,7 +2325,7 @@ fn machine_readable_commands_keep_themed_feedback_off_stdout() {
     );
 
     let xdg = tempfile::tempdir().unwrap();
-    let mut trust = Command::cargo_bin("worktrees").unwrap();
+    let mut trust = Command::cargo_bin("pando").unwrap();
     trust
         .args(["trust", "status"])
         .current_dir(&repo.main)
@@ -2351,7 +2338,7 @@ fn machine_readable_commands_keep_themed_feedback_off_stdout() {
     assert!(inspected.stdout.is_empty());
     assert!(
         inspected.stderr.contains(&forced_style(
-            worktrees::ui::muted_style(),
+            pando::ui::muted_style(),
             "Hook trust status checked."
         )),
         "{}",
@@ -2377,7 +2364,7 @@ fn get_prints_exact_current_context_values_and_stable_ports() {
         ),
         ("port", "13054".to_owned()),
     ] {
-        let output = Command::cargo_bin("worktrees")
+        let output = Command::cargo_bin("pando")
             .unwrap()
             .args(["get", property])
             .current_dir(&nested)
@@ -2422,7 +2409,7 @@ fn path_queries_preserve_non_utf8_unix_path_bytes() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let queried = Command::cargo_bin("worktrees")
+    let queried = Command::cargo_bin("pando")
         .unwrap()
         .args(["get", "worktree-path"])
         .current_dir(&path)
@@ -2445,14 +2432,14 @@ fn switch_creates_an_existing_branch_at_the_configured_root() {
     git(&repo.main, ["branch", "topic/nested"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["switch", "topic/nested"])
         .current_dir(&repo.main)
@@ -2477,9 +2464,9 @@ fn switch_creates_an_existing_branch_at_the_configured_root() {
 /// Points global configuration at `root` and returns the configuration home to pass through.
 fn config_home_with_root(root: &Path) -> TempDir {
     let xdg = tempfile::tempdir().unwrap();
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
@@ -2487,7 +2474,7 @@ fn config_home_with_root(root: &Path) -> TempDir {
 }
 
 fn create_command(repo: &Repository, xdg: &TempDir, args: &[&str]) -> std::process::Output {
-    Command::cargo_bin("worktrees")
+    Command::cargo_bin("pando")
         .unwrap()
         .args(args)
         .current_dir(&repo.main)
@@ -2570,7 +2557,7 @@ fn create_refuses_a_branch_that_already_has_a_worktree() {
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("already registered"), "{stderr}");
-    assert!(stderr.contains("worktrees switch feature"), "{stderr}");
+    assert!(stderr.contains("pando switch feature"), "{stderr}");
 }
 
 #[test]
@@ -2627,12 +2614,12 @@ fn create_runs_post_create_hooks_like_switch() {
     let root = repo.temp.path().join("created");
     let xdg = config_home_with_root(&root);
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - name: prepare\n      command: printf hook-ran > hook.txt\n",
     )
     .unwrap();
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["create", "hooked"])
         .current_dir(&repo.main)
@@ -2659,7 +2646,7 @@ fn create_refuses_post_create_hooks_without_a_terminal() {
     let root = repo.temp.path().join("created");
     let xdg = config_home_with_root(&root);
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - name: prepare\n      command: true\n",
     )
     .unwrap();
@@ -2677,19 +2664,19 @@ fn failed_post_create_hook_preserves_destination_and_nonzero_status() {
     git(&repo.main, ["branch", "hooked"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - name: prepare\n      command: printf hook-output; exit 23\n",
     )
     .unwrap();
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "hooked"])
         .current_dir(&repo.main)
@@ -2719,7 +2706,7 @@ fn detached_branch_queries_fail_without_stdout() {
     git(&repo.linked, ["checkout", "--detach"]);
 
     for property in ["branch", "port"] {
-        let output = Command::cargo_bin("worktrees")
+        let output = Command::cargo_bin("pando")
             .unwrap()
             .args(["get", property])
             .current_dir(&repo.linked)
@@ -2737,20 +2724,20 @@ fn ignored_local_configuration_overrides_the_global_root() {
     let xdg = tempfile::tempdir().unwrap();
     let global_root = repo.temp.path().join("global");
     let local_root = repo.temp.path().join("local");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", global_root.display()),
     )
     .unwrap();
-    fs::write(repo.main.join(".gitignore"), "/.worktrees.local.yaml\n").unwrap();
+    fs::write(repo.main.join(".gitignore"), "/.pando.local.yaml\n").unwrap();
     fs::write(
-        repo.main.join(".worktrees.local.yaml"),
+        repo.main.join(".pando.local.yaml"),
         format!("worktrees:\n  root: {}\n", local_root.display()),
     )
     .unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["get", "worktree-root"])
         .current_dir(&repo.linked)
@@ -2783,12 +2770,12 @@ fn ignored_local_configuration_overrides_the_global_root() {
 fn nonignored_local_configuration_is_rejected() {
     let repo = Repository::new();
     fs::write(
-        repo.main.join(".worktrees.local.yaml"),
+        repo.main.join(".pando.local.yaml"),
         "worktrees:\n  root: local\n",
     )
     .unwrap();
 
-    Command::cargo_bin("worktrees")
+    Command::cargo_bin("pando")
         .unwrap()
         .args(["get", "worktree-root"])
         .current_dir(&repo.main)
@@ -2804,15 +2791,15 @@ fn nonignored_local_configuration_is_rejected() {
 fn tracked_local_configuration_is_rejected_even_with_an_ignore_rule() {
     let repo = Repository::new();
     fs::write(
-        repo.main.join(".worktrees.local.yaml"),
+        repo.main.join(".pando.local.yaml"),
         "worktrees:\n  root: local\n",
     )
     .unwrap();
-    git(&repo.main, ["add", ".worktrees.local.yaml"]);
+    git(&repo.main, ["add", ".pando.local.yaml"]);
     git(&repo.main, ["commit", "-m", "track unsafe local config"]);
-    fs::write(repo.main.join(".gitignore"), "/.worktrees.local.yaml\n").unwrap();
+    fs::write(repo.main.join(".gitignore"), "/.pando.local.yaml\n").unwrap();
 
-    Command::cargo_bin("worktrees")
+    Command::cargo_bin("pando")
         .unwrap()
         .args(["get", "worktree-root"])
         .current_dir(&repo.main)
@@ -2840,14 +2827,14 @@ fn switch_creates_a_tracking_worktree_from_fetched_remote_state() {
     git(&repo.main, ["branch", "-D", "collab"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["switch", "collab"])
         .current_dir(&repo.main)
@@ -2909,14 +2896,14 @@ fn ambiguous_remote_branches_fail_noninteractively_before_mutation() {
     git(&repo.main, ["branch", "-D", "ambiguous"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["switch", "ambiguous"])
         .current_dir(&repo.main)
@@ -2932,7 +2919,7 @@ fn ambiguous_remote_branches_fail_noninteractively_before_mutation() {
     assert!(stderr.contains("upstream/ambiguous"), "{stderr}");
     assert!(!root.join("ambiguous").exists());
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "ambiguous"])
         .current_dir(&repo.main)
@@ -2972,7 +2959,7 @@ fn remote_selection_caps_long_lists_to_a_scrollable_viewport() {
         git(&repo.main, ["update-ref", reference.as_str(), "HEAD"]);
     }
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command.args(["switch", "many"]).current_dir(&repo.main);
     let output = run_pty_command_with_rows(command, b"\x1b", 8);
 
@@ -3012,14 +2999,14 @@ fn remote_matching_requires_the_complete_branch_name() {
     git(&repo.main, ["branch", "-D", "team/foo"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["switch", "foo"])
         .current_dir(&repo.main)
@@ -3049,13 +3036,13 @@ fn new_branch_is_confirmed_and_created_from_invoking_head() {
     let source_head = git_output(&repo.linked, ["rev-parse", "HEAD"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "stacked/new"])
         .current_dir(&repo.linked)
@@ -3080,13 +3067,13 @@ fn new_branch_confirmation_escape_is_reported_as_cancellation() {
     let repo = Repository::new();
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "cancelled-branch"])
         .current_dir(&repo.main)
@@ -3113,25 +3100,25 @@ fn shared_and_local_hooks_run_in_order_and_unchanged_commands_reuse_trust() {
     git(&repo.main, ["branch", "hook-two"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - name: shared\n      command: printf shared >> setup-order\n",
     )
     .unwrap();
-    fs::write(repo.main.join(".gitignore"), "/.worktrees.local.yaml\n").unwrap();
+    fs::write(repo.main.join(".gitignore"), "/.pando.local.yaml\n").unwrap();
     fs::write(
-        repo.main.join(".worktrees.local.yaml"),
+        repo.main.join(".pando.local.yaml"),
         "hooks:\n  post-create:\n    - name: local\n      command: printf local >> setup-order\n",
     )
     .unwrap();
 
-    let mut first = Command::cargo_bin("worktrees").unwrap();
+    let mut first = Command::cargo_bin("pando").unwrap();
     first
         .args(["switch", "hook-one"])
         .current_dir(&repo.main)
@@ -3145,11 +3132,11 @@ fn shared_and_local_hooks_run_in_order_and_unchanged_commands_reuse_trust() {
     );
 
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - name: renamed only\n      command: printf shared >> setup-order\n",
     )
     .unwrap();
-    let reused = Command::cargo_bin("worktrees")
+    let reused = Command::cargo_bin("pando")
         .unwrap()
         .args(["switch", "hook-two"])
         .current_dir(&repo.main)
@@ -3174,18 +3161,18 @@ fn declining_hook_approval_is_a_warning_without_mutation() {
     git(&repo.main, ["branch", "declined-hook"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - command: touch should-not-exist\n",
     )
     .unwrap();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "declined-hook"])
         .current_dir(&repo.main)
@@ -3199,7 +3186,7 @@ fn declining_hook_approval_is_a_warning_without_mutation() {
     assert!(output.stdout.is_empty());
     assert!(
         output.stderr.contains(&forced_style(
-            worktrees::ui::warning_style(),
+            pando::ui::warning_style(),
             "post-create commands approval declined; no commands were run"
         )),
         "{}",
@@ -3215,18 +3202,18 @@ fn hook_approval_escape_reports_cancellation_without_mutation() {
     git(&repo.main, ["branch", "cancelled-hook"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - command: touch should-not-exist\n",
     )
     .unwrap();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "cancelled-hook"])
         .current_dir(&repo.main)
@@ -3254,20 +3241,20 @@ fn incomplete_setup_supports_enter_once_then_mark_complete() {
     git(&repo.main, ["branch", "recover"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - command: exit 9\n",
     )
     .unwrap();
 
     let run = |input: &[u8]| {
-        let mut command = Command::cargo_bin("worktrees").unwrap();
+        let mut command = Command::cargo_bin("pando").unwrap();
         command
             .args(["switch", "recover"])
             .current_dir(&repo.main)
@@ -3309,7 +3296,7 @@ fn incomplete_setup_supports_enter_once_then_mark_complete() {
     );
     let accepted = run(b"\x1b[B\x1b[B\r");
     assert!(accepted.status.success(), "{}", accepted.stderr);
-    let final_switch = Command::cargo_bin("worktrees")
+    let final_switch = Command::cargo_bin("pando")
         .unwrap()
         .args(["switch", "recover"])
         .current_dir(&repo.main)
@@ -3326,14 +3313,14 @@ fn picker_branch_action_uses_the_shared_resolver_and_branch_entry_cancels() {
     git(&repo.main, ["branch", "picker-existing"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     let run = |input: &[u8]| {
-        let mut command = Command::cargo_bin("worktrees").unwrap();
+        let mut command = Command::cargo_bin("pando").unwrap();
         command
             .arg("switch")
             .current_dir(&repo.main)
@@ -3346,7 +3333,7 @@ fn picker_branch_action_uses_the_shared_resolver_and_branch_entry_cancels() {
     assert!(created.status.success(), "{}", created.stderr);
     assert!(
         created.stderr.contains(
-            &worktrees::ui::interactive(worktrees::ui::heading_style())
+            &pando::ui::interactive(pando::ui::heading_style())
                 .apply_to("Branch name:")
                 .to_string()
         ),
@@ -3372,18 +3359,18 @@ fn malformed_incomplete_state_is_a_contextual_error() {
     git(&repo.main, ["branch", "malformed-state"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - command: exit 7\n",
     )
     .unwrap();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "malformed-state"])
         .current_dir(&repo.main)
@@ -3394,7 +3381,7 @@ fn malformed_incomplete_state_is_a_contextual_error() {
         &repo.main,
         ["rev-parse", "--path-format=absolute", "--git-common-dir"],
     ));
-    let marker_dir = common.join("worktrees-state/incomplete");
+    let marker_dir = common.join("pando-state/incomplete");
     let marker = fs::read_dir(marker_dir)
         .unwrap()
         .next()
@@ -3403,7 +3390,7 @@ fn malformed_incomplete_state_is_a_contextual_error() {
         .path();
     fs::write(marker, "truncated").unwrap();
 
-    let retried = Command::cargo_bin("worktrees")
+    let retried = Command::cargo_bin("pando")
         .unwrap()
         .args(["switch", "malformed-state"])
         .current_dir(&repo.main)
@@ -3427,18 +3414,18 @@ fn detached_incomplete_worktree_can_retry_setup_from_the_picker() {
     git(&repo.main, ["branch", "detached-retry"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - command: exit 8\n",
     )
     .unwrap();
-    let mut create = Command::cargo_bin("worktrees").unwrap();
+    let mut create = Command::cargo_bin("pando").unwrap();
     create
         .args(["switch", "detached-retry"])
         .current_dir(&repo.main)
@@ -3447,7 +3434,7 @@ fn detached_incomplete_worktree_can_retry_setup_from_the_picker() {
     assert!(!run_pty_command(create, b"y\r").status.success());
     let destination = root.join("detached-retry");
     git(&destination, ["checkout", "--detach"]);
-    let mut retry = Command::cargo_bin("worktrees").unwrap();
+    let mut retry = Command::cargo_bin("pando").unwrap();
     retry
         .arg("switch")
         .current_dir(&repo.main)
@@ -3479,19 +3466,19 @@ fn recovery_retry_uses_current_commands_and_rechecks_trust() {
     git(&repo.main, ["branch", "retry"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - command: exit 9\n",
     )
     .unwrap();
     let run = |input: &[u8]| {
-        let mut command = Command::cargo_bin("worktrees").unwrap();
+        let mut command = Command::cargo_bin("pando").unwrap();
         command
             .args(["switch", "retry"])
             .current_dir(&repo.main)
@@ -3501,7 +3488,7 @@ fn recovery_retry_uses_current_commands_and_rechecks_trust() {
     };
     assert!(!run(b"y\r").status.success());
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - command: printf repaired > repaired.txt\n",
     )
     .unwrap();
@@ -3526,18 +3513,18 @@ fn interrupted_setup_emits_no_destination_and_empty_hooks_clear_its_record() {
     git(&repo.main, ["branch", "interrupted"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - command: kill -INT $$\n",
     )
     .unwrap();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "interrupted"])
         .current_dir(&repo.main)
@@ -3549,8 +3536,8 @@ fn interrupted_setup_emits_no_destination_and_empty_hooks_clear_its_record() {
     assert!(!interrupted.status.success());
     assert!(interrupted.stdout.is_empty());
     assert!(root.join("interrupted").exists());
-    fs::remove_file(repo.main.join(".worktrees.yaml")).unwrap();
-    let cleared = Command::cargo_bin("worktrees")
+    fs::remove_file(repo.main.join(".pando.yaml")).unwrap();
+    let cleared = Command::cargo_bin("pando")
         .unwrap()
         .args(["switch", "interrupted"])
         .current_dir(&repo.main)
@@ -3580,24 +3567,24 @@ fn installed_zsh_enters_destination_but_preserves_hook_failure_status() {
     assert!(installed.status.success(), "{}", installed.stderr);
     let root = repo.temp.path().join("created");
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - command: exit 17\n",
     )
     .unwrap();
-    let integration = xdg.path().join("worktrees/worktrees.zsh");
+    let integration = xdg.path().join("pando/pando.zsh");
     let binary = PathBuf::from(
-        Command::cargo_bin("worktrees")
+        Command::cargo_bin("pando")
             .unwrap()
             .get_program()
             .to_owned(),
     );
     let script = format!(
-        "source {}; worktrees switch zsh-hook; rc=$?; builtin pwd -P; exit $rc",
+        "source {}; pando switch zsh-hook; rc=$?; builtin pwd -P; exit $rc",
         shell_quote(&integration)
     );
     let path = format!(
@@ -3637,19 +3624,19 @@ fn trust_status_reset_and_reapproval_follow_the_current_command_hash() {
     git(&repo.main, ["branch", "trusted-two"]);
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - command: 'true'\n",
     )
     .unwrap();
     let command = |args: &[&str]| {
-        Command::cargo_bin("worktrees")
+        Command::cargo_bin("pando")
             .unwrap()
             .args(args)
             .current_dir(&repo.main)
@@ -3666,7 +3653,7 @@ fn trust_status_reset_and_reapproval_follow_the_current_command_hash() {
             .contains("not trusted")
     );
 
-    let mut approve = Command::cargo_bin("worktrees").unwrap();
+    let mut approve = Command::cargo_bin("pando").unwrap();
     approve
         .args(["switch", "trusted-one"])
         .current_dir(&repo.main)
@@ -3691,7 +3678,7 @@ fn trust_status_reset_and_reapproval_follow_the_current_command_hash() {
             .unwrap()
             .contains("No saved")
     );
-    let trust_json = fs::read(xdg.path().join("worktrees/trust.json")).unwrap();
+    let trust_json = fs::read(xdg.path().join("pando/trust.json")).unwrap();
     serde_json::from_slice::<serde_json::Value>(&trust_json).unwrap();
 
     let refused = command(&["switch", "trusted-two"]);
@@ -3708,10 +3695,10 @@ fn trust_status_reset_and_reapproval_follow_the_current_command_hash() {
 fn trust_status_rejects_malformed_storage_even_without_commands() {
     let repo = Repository::new();
     let xdg = tempfile::tempdir().unwrap();
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
-    fs::write(xdg.path().join("worktrees/trust.json"), "not-json").unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(xdg.path().join("pando/trust.json"), "not-json").unwrap();
 
-    Command::cargo_bin("worktrees")
+    Command::cargo_bin("pando")
         .unwrap()
         .args(["trust", "status"])
         .current_dir(&repo.main)
@@ -3743,7 +3730,7 @@ fn run_install(home: &Path, xdg: &Path, zdotdir: Option<&Path>, input: &[u8]) ->
 }
 
 fn install_command(home: &Path, xdg: &Path, zdotdir: Option<&Path>) -> Command {
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .arg("install")
         .env("HOME", home)
@@ -3782,7 +3769,7 @@ fn contains_sgr(value: &str) -> bool {
 }
 
 fn run_switch(cwd: &Path, input: &[u8]) -> PtyOutput {
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command.arg("switch").current_dir(cwd);
     run_pty_command(command, input)
 }
@@ -3993,7 +3980,7 @@ fn commit_with_explicit_message_stages_all_change_kinds() {
     git(&repo.main, ["commit", "-m", "add deletable file"]);
     fs::remove_file(repo.main.join("deleted.txt")).unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["commit", "--stage-all", "-m", "feat: commit every change"])
         .current_dir(&repo.main)
@@ -4043,13 +4030,13 @@ fn commit_with_explicit_message_stages_all_change_kinds() {
 fn shared_commit_generator_requires_standalone_approval_interactively() {
     let repo = Repository::new();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "commit:\n  generation:\n    command: printf\n",
     )
     .unwrap();
     fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
     let xdg = tempfile::tempdir().unwrap();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["commit", "--stage-all"])
         .current_dir(&repo.main)
@@ -4060,7 +4047,7 @@ fn shared_commit_generator_requires_standalone_approval_interactively() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(
-        output.stderr.contains("run worktrees trust commit-approve"),
+        output.stderr.contains("run pando trust commit-approve"),
         "{}",
         output.stderr
     );
@@ -4079,14 +4066,14 @@ fn shared_commit_generator_requires_standalone_approval_interactively() {
 fn shared_commit_generator_approval_preflights_noninteractive_terminals() {
     let repo = Repository::new();
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "commit:\n  generation:\n    command: printf\n",
     )
     .unwrap();
     fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
     let xdg = tempfile::tempdir().unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["commit", "--stage-all"])
         .current_dir(&repo.main)
@@ -4098,7 +4085,7 @@ fn shared_commit_generator_approval_preflights_noninteractive_terminals() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(
-        stderr.contains("run worktrees trust commit-approve"),
+        stderr.contains("run pando trust commit-approve"),
         "{stderr}"
     );
     assert!(
@@ -4120,14 +4107,14 @@ fn shared_commit_generator_approval_preflights_noninteractive_terminals() {
 fn commit_generates_message_from_global_configuration() {
     let repo = Repository::new();
     let xdg = tempfile::tempdir().unwrap();
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         "commit:\n  generation:\n    command: \"printf 'feat: generated\\n\\n- first change\\n- second change\\n'\"\n",
     ).unwrap();
     fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["commit", "--stage-all"])
         .current_dir(&repo.main)
@@ -4144,7 +4131,7 @@ fn commit_generates_message_from_global_configuration() {
         "Generated commit message:",
     ] {
         assert!(
-            stderr.contains(&forced_style(worktrees::ui::heading_style(), heading)),
+            stderr.contains(&forced_style(pando::ui::heading_style(), heading)),
             "missing semantic heading {heading:?}: {stderr}"
         );
     }
@@ -4168,21 +4155,21 @@ fn commit_generates_message_from_global_configuration() {
     );
     assert!(
         stderr.contains(&forced_style(
-            worktrees::ui::worktree_data_style(),
+            pando::ui::worktree_data_style(),
             "generated.txt"
         )),
         "{stderr}"
     );
     assert!(
         stderr.contains(&forced_style(
-            worktrees::ui::worktree_data_style().bold(),
+            pando::ui::worktree_data_style().bold(),
             "feat: generated"
         )),
         "{stderr}"
     );
     assert!(
         stderr.contains(&forced_style(
-            worktrees::ui::success_style(),
+            pando::ui::success_style(),
             "Committed changes @"
         )),
         "{stderr}"
@@ -4193,7 +4180,7 @@ fn commit_generates_message_from_global_configuration() {
     );
     let hash = git_output(&repo.main, ["rev-parse", "--short=7", "HEAD"]);
     assert!(
-        stderr.contains(&forced_style(worktrees::ui::muted_style(), hash)),
+        stderr.contains(&forced_style(pando::ui::muted_style(), hash)),
         "{stderr}"
     );
     let message = Command::new("git")
@@ -4211,15 +4198,15 @@ fn commit_generates_message_from_global_configuration() {
 fn commit_generation_spinner_reports_elapsed_time() {
     let repo = Repository::new();
     let xdg = tempfile::tempdir().unwrap();
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         "commit:\n  generation:\n    command: \"sleep 2; printf 'feat: generated\\n\\n- first change\\n- second change\\n'\"\n",
     )
     .unwrap();
     fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["commit", "--stage-all"])
         .current_dir(&repo.main)
@@ -4255,14 +4242,14 @@ fn commit_generation_spinner_reports_elapsed_time() {
 fn commit_generator_failure_finishes_the_spinner_with_an_error_state() {
     let repo = Repository::new();
     let xdg = tempfile::tempdir().unwrap();
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         "commit:\n  generation:\n    command: sleep 2; exit 23\n",
     )
     .unwrap();
     fs::write(repo.main.join("generated.txt"), "content\n").unwrap();
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["commit", "--stage-all"])
         .current_dir(&repo.main)
@@ -4298,7 +4285,7 @@ fn commit_generator_failure_finishes_the_spinner_with_an_error_state() {
 fn commit_generator_trust_commands_distinguish_absent_and_user_controlled_settings() {
     let repo = Repository::new();
     let absent_xdg = tempfile::tempdir().unwrap();
-    let absent = Command::cargo_bin("worktrees")
+    let absent = Command::cargo_bin("pando")
         .unwrap()
         .args(["trust", "commit-status"])
         .current_dir(&repo.main)
@@ -4314,13 +4301,13 @@ fn commit_generator_trust_commands_distinguish_absent_and_user_controlled_settin
     );
 
     let xdg = tempfile::tempdir().unwrap();
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         "commit:\n  generation:\n    command: printf\n",
     )
     .unwrap();
-    let controlled = Command::cargo_bin("worktrees")
+    let controlled = Command::cargo_bin("pando")
         .unwrap()
         .args(["trust", "commit-status"])
         .current_dir(&repo.main)
@@ -4335,7 +4322,7 @@ fn commit_generator_trust_commands_distinguish_absent_and_user_controlled_settin
             .contains("The effective commit generator is user-controlled.")
     );
 
-    let reset = Command::cargo_bin("worktrees")
+    let reset = Command::cargo_bin("pando")
         .unwrap()
         .args(["trust", "commit-reset"])
         .current_dir(&repo.main)
@@ -4356,14 +4343,14 @@ fn commit_renders_custom_template_with_staged_context() {
     let repo = Repository::new();
     let xdg = tempfile::tempdir().unwrap();
     let captured = xdg.path().join("prompt.txt");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         "commit:\n  generation:\n    command: 'cat > \"$CAPTURE\"; printf \"chore: generated\\n\\n- one\\n- two\\n\"'\n    template: |\n      repo={{ repo }} branch={{ branch }}\n      {% for subject in recent_commits %}history={{ subject }}\n      {% endfor %}{{ git_diff_stat }}\n      {{ git_diff }}\n",
     ).unwrap();
     fs::write(repo.main.join("custom.txt"), "content\n").unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["commit", "--stage-all"])
         .current_dir(&repo.main)
@@ -4393,7 +4380,7 @@ fn bare_commit_uses_only_the_existing_index() {
     fs::write(repo.main.join("README.md"), "unstaged\n").unwrap();
     fs::write(repo.main.join("untracked.txt"), "excluded\n").unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["commit", "-m", "fix: commit staged snapshot"])
         .current_dir(&repo.main)
@@ -4420,7 +4407,7 @@ fn json_dry_run_is_one_document_and_does_not_commit() {
     git(&repo.main, ["add", "staged.txt"]);
     let before = git_output(&repo.main, ["rev-parse", "HEAD"]);
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args([
             "commit",
@@ -4451,7 +4438,7 @@ fn json_command(
     args: &[&str],
     stdin: Option<&serde_json::Value>,
 ) -> std::process::Output {
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(args)
         .current_dir(cwd)
@@ -4498,14 +4485,14 @@ fn json_list_and_switch_include_commit_times_in_stable_git_order() {
     );
 
     let xdg = tempfile::tempdir().unwrap();
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         "worktrees:\n  default-sort: branch\n",
     )
     .unwrap();
 
-    let list = Command::cargo_bin("worktrees")
+    let list = Command::cargo_bin("pando")
         .unwrap()
         .args(["list", "--output", "json"])
         .current_dir(&repo.main)
@@ -4520,7 +4507,7 @@ fn json_list_and_switch_include_commit_times_in_stable_git_order() {
     assert_eq!(worktrees[0]["last_commit_at"], "2024-01-02T03:04:05-05:00");
     assert_eq!(worktrees[1]["last_commit_at"], "2024-01-03T04:05:06+09:30");
 
-    let switch = Command::cargo_bin("worktrees")
+    let switch = Command::cargo_bin("pando")
         .unwrap()
         .args(["switch", "--output", "json"])
         .current_dir(&repo.main)
@@ -4536,7 +4523,7 @@ fn json_list_and_switch_include_commit_times_in_stable_git_order() {
     assert_eq!(choices[1]["last_commit_at"], "2024-01-03T04:05:06+09:30");
 
     for command in ["list", "switch"] {
-        let help = Command::cargo_bin("worktrees")
+        let help = Command::cargo_bin("pando")
             .unwrap()
             .args([command, "--help", "--output", "json"])
             .current_dir(&repo.main)
@@ -4586,14 +4573,14 @@ fn json_switch_new_branch_dry_run_is_nonmutating_and_execution_requires_approval
     let repo = Repository::new();
     let root = repo.temp.path().join("topics");
     let xdg = tempfile::tempdir().unwrap();
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
     let before = git_output(&repo.main, ["worktree", "list", "--porcelain"]);
-    let preview = Command::cargo_bin("worktrees")
+    let preview = Command::cargo_bin("pando")
         .unwrap()
         .args(["switch", "new-topic", "--dry-run", "--output", "json"])
         .current_dir(&repo.main)
@@ -4609,7 +4596,7 @@ fn json_switch_new_branch_dry_run_is_nonmutating_and_execution_requires_approval
         before
     );
     assert!(!root.exists());
-    let execute = Command::cargo_bin("worktrees")
+    let execute = Command::cargo_bin("pando")
         .unwrap()
         .args(["switch", "new-topic", "--output", "json"])
         .current_dir(&repo.main)
@@ -4790,7 +4777,7 @@ fn json_remove_rejects_legacy_force_in_request() {
 #[test]
 fn human_remove_dry_run_uses_preflight_without_mutation() {
     let repo = Repository::new();
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["remove", "feature", "--dry-run"])
         .current_dir(&repo.main)
@@ -4837,11 +4824,11 @@ fn json_merge_dry_run_reports_policy_and_never_mutates_refs_or_worktrees() {
     git(&repo.linked, ["add", "topic.txt"]);
     git(&repo.linked, ["commit", "-m", "topic"]);
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "worktrees:\n  target-branch: main\n",
     )
     .unwrap();
-    git(&repo.main, ["add", ".worktrees.yaml"]);
+    git(&repo.main, ["add", ".pando.yaml"]);
     git(&repo.main, ["commit", "-m", "configure target"]);
     let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
     let topic_before = git_output(&repo.linked, ["rev-parse", "HEAD"]);
@@ -4930,9 +4917,9 @@ fn advance_origin(repo: &Repository, origin: &Path) -> String {
 /// Points global configuration at `root` and appends extra `worktrees:` keys.
 fn config_home_with(root: &Path, extra: &str) -> TempDir {
     let xdg = tempfile::tempdir().unwrap();
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n{extra}", root.display()),
     )
     .unwrap();
@@ -4940,8 +4927,8 @@ fn config_home_with(root: &Path, extra: &str) -> TempDir {
 }
 
 fn write_ignored_local_config(repo: &Repository, contents: &str) {
-    fs::write(repo.main.join(".gitignore"), "/.worktrees.local.yaml\n").unwrap();
-    fs::write(repo.main.join(".worktrees.local.yaml"), contents).unwrap();
+    fs::write(repo.main.join(".gitignore"), "/.pando.local.yaml\n").unwrap();
+    fs::write(repo.main.join(".pando.local.yaml"), contents).unwrap();
 }
 
 /// Returns the rail's closing beat: the message after its final closing bar.
@@ -4966,7 +4953,7 @@ fn create_closes_the_rail_with_the_created_worktree_outro() {
     let root = repo.temp.path().join("created");
     let xdg = config_home_with_root(&root);
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["create", "topic/rail"])
         .current_dir(&repo.main)
@@ -5004,7 +4991,7 @@ fn switch_creation_closes_the_rail_like_create() {
     let root = repo.temp.path().join("created");
     let xdg = config_home_with_root(&root);
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "topic/switched"])
         .current_dir(&repo.main)
@@ -5032,12 +5019,12 @@ fn create_with_post_create_commands_keeps_creation_as_a_step() {
     let root = repo.temp.path().join("created");
     let xdg = config_home_with_root(&root);
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "hooks:\n  post-create:\n    - name: prepare\n      command: echo hook-marker\n",
     )
     .unwrap();
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["create", "hooked"])
         .current_dir(&repo.main)
@@ -5094,7 +5081,7 @@ fn create_fresh_uses_the_configured_target_branch_tracking_ref() {
     let head = advance_local_head(&repo);
     assert_ne!(published, head);
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "worktrees:\n  target-branch: main\n",
     )
     .unwrap();
@@ -5149,11 +5136,7 @@ fn create_base_resolves_local_over_shared_over_global() {
     let head = advance_local_head(&repo);
     let root = repo.temp.path().join("created");
     let xdg = config_home_with(&root, "  base: fresh\n");
-    fs::write(
-        repo.main.join(".worktrees.yaml"),
-        "worktrees:\n  base: head\n",
-    )
-    .unwrap();
+    fs::write(repo.main.join(".pando.yaml"), "worktrees:\n  base: head\n").unwrap();
 
     let shared_wins = create_command(&repo, &xdg, &["create", "topic/shared"]);
     assert!(
@@ -5187,7 +5170,7 @@ fn create_rejects_an_unknown_base_value() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("worktrees/config.yaml"), "{stderr}");
+    assert!(stderr.contains("pando/config.yaml"), "{stderr}");
     assert!(stderr.contains("stale"), "{stderr}");
 }
 
@@ -5212,7 +5195,7 @@ fn create_fresh_with_an_unfetched_tracking_ref_fails_with_guidance() {
     let repo = Repository::new();
     add_local_origin(&repo);
     fs::write(
-        repo.main.join(".worktrees.yaml"),
+        repo.main.join(".pando.yaml"),
         "worktrees:\n  target-branch: release\n",
     )
     .unwrap();
@@ -5259,7 +5242,7 @@ fn switch_confirmation_names_the_fresh_base() {
     let root = repo.temp.path().join("created");
     let xdg = config_home_with(&root, "  base: fresh\n");
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["switch", "topic/confirmed"])
         .current_dir(&repo.main)
@@ -5497,7 +5480,7 @@ fn json_request_mode_create_accepts_the_fetch_option() {
     let root = repo.temp.path().join("created");
     let xdg = config_home_with(&root, "  base: fresh\n");
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["create", "--input-output", "json"])
         .current_dir(&repo.main)
@@ -5670,18 +5653,18 @@ fn json_help_exposes_the_fetch_input_and_base_error_codes() {
 
 #[test]
 fn complete_env_emits_a_zsh_registration_script() {
-    let mut command = Command::cargo_bin("worktrees").unwrap();
-    let output = command.env("_WORKTREES_COMPLETE", "zsh").output().unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
+    let output = command.env("_PANDO_COMPLETE", "zsh").output().unwrap();
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("#compdef worktrees"));
-    assert!(stdout.contains("compdef _clap_dynamic_completer_worktrees worktrees"));
+    assert!(stdout.contains("#compdef pando"));
+    assert!(stdout.contains("compdef _clap_dynamic_completer_pando pando"));
 }
 
 #[test]
 fn complete_env_completes_subcommands() {
-    let candidates = complete(&std::env::current_dir().unwrap(), &["worktrees", ""]);
+    let candidates = complete(&std::env::current_dir().unwrap(), &["pando", ""]);
 
     assert!(candidates.iter().any(|value| value == "switch"));
     assert!(candidates.iter().any(|value| value == "create"));
@@ -5690,14 +5673,14 @@ fn complete_env_completes_subcommands() {
 
 #[test]
 fn complete_env_completes_flags() {
-    let candidates = complete(&std::env::current_dir().unwrap(), &["worktrees", "--out"]);
+    let candidates = complete(&std::env::current_dir().unwrap(), &["pando", "--out"]);
 
     assert!(candidates.iter().any(|value| value == "--output"));
 }
 
 #[test]
 fn complete_env_completes_get_properties() {
-    let candidates = complete(&std::env::current_dir().unwrap(), &["worktrees", "get", ""]);
+    let candidates = complete(&std::env::current_dir().unwrap(), &["pando", "get", ""]);
 
     assert!(candidates.iter().any(|value| value == "branch"));
     assert!(candidates.iter().any(|value| value == "port"));
@@ -5706,15 +5689,15 @@ fn complete_env_completes_get_properties() {
 
 /// `COMPLETE` is generic enough to be set in a shell for unrelated reasons.
 /// `clap_complete`'s default trigger variable name is exactly that, so the
-/// binary is configured to listen on `_WORKTREES_COMPLETE` instead. A stray
-/// `COMPLETE` in the environment must leave `worktrees list` behaving
+/// binary is configured to listen on `_PANDO_COMPLETE` instead. A stray
+/// `COMPLETE` in the environment must leave `pando list` behaving
 /// normally rather than emitting a completion script on stdout, which the
 /// installed zsh dispatcher would otherwise `cd` into for `switch`.
 #[test]
 fn stray_complete_env_var_does_not_trigger_completion() {
     let repo = Repository::new();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["list"])
         .current_dir(&repo.main)
@@ -5735,14 +5718,14 @@ fn stray_complete_env_var_does_not_trigger_completion() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("Worktrees"));
 }
 
-/// Drives the `_WORKTREES_COMPLETE=zsh` protocol and returns candidate values
+/// Drives the `_PANDO_COMPLETE=zsh` protocol and returns candidate values
 /// with any `:help` suffix stripped. The final entry of `words` is the word
 /// being completed, matching how zsh passes `${words[@]}`.
 fn complete(dir: &Path, words: &[&str]) -> Vec<String> {
     let index = words.len() - 1;
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     let output = command
-        .env("_WORKTREES_COMPLETE", "zsh")
+        .env("_PANDO_COMPLETE", "zsh")
         .env("_CLAP_COMPLETE_INDEX", index.to_string())
         .arg("--")
         .args(words)
@@ -5778,7 +5761,7 @@ fn switch_completes_local_and_remote_branches() {
         ["update-ref", "refs/remotes/origin/remote-only", "HEAD"],
     );
 
-    let candidates = complete(&repo.main, &["worktrees", "switch", ""]);
+    let candidates = complete(&repo.main, &["pando", "switch", ""]);
 
     assert!(candidates.iter().any(|value| value == "main"));
     assert!(candidates.iter().any(|value| value == "feature"));
@@ -5799,7 +5782,7 @@ fn switch_hides_remote_refs_that_shadow_a_local_branch() {
         ["update-ref", "refs/remotes/origin/main", "HEAD"],
     );
 
-    let candidates = complete(&repo.main, &["worktrees", "switch", ""]);
+    let candidates = complete(&repo.main, &["pando", "switch", ""]);
 
     assert!(candidates.iter().any(|value| value == "main"));
     assert!(
@@ -5820,7 +5803,7 @@ fn switch_deduplicates_a_short_name_offered_by_multiple_remotes() {
         ["update-ref", "refs/remotes/upstream/shared", "HEAD"],
     );
 
-    let candidates = complete(&repo.main, &["worktrees", "switch", ""]);
+    let candidates = complete(&repo.main, &["pando", "switch", ""]);
 
     assert_eq!(
         candidates.iter().filter(|value| *value == "shared").count(),
@@ -5831,7 +5814,7 @@ fn switch_deduplicates_a_short_name_offered_by_multiple_remotes() {
 
 /// Proves the completed value actually resolves, not just that it looks
 /// right: a repo whose only remote ref is `refs/remotes/origin/remote-only`
-/// must let `worktrees create remote-only` track that remote branch, rather
+/// must let `pando create remote-only` track that remote branch, rather
 /// than creating a literal `origin/remote-only` local branch with no upstream.
 #[test]
 fn create_resolves_the_completed_remote_branch_value_to_its_remote() {
@@ -5849,7 +5832,7 @@ fn create_resolves_the_completed_remote_branch_value_to_its_remote() {
     git(&repo.main, ["push", "origin", "remote-only"]);
     git(&repo.main, ["branch", "-D", "remote-only"]);
 
-    let candidates = complete(&repo.main, &["worktrees", "switch", ""]);
+    let candidates = complete(&repo.main, &["pando", "switch", ""]);
     let value = candidates
         .iter()
         .find(|value| value.as_str() != "main" && value.as_str() != "feature")
@@ -5858,14 +5841,14 @@ fn create_resolves_the_completed_remote_branch_value_to_its_remote() {
 
     let xdg = tempfile::tempdir().unwrap();
     let root = repo.temp.path().join("created");
-    fs::create_dir_all(xdg.path().join("worktrees")).unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
-        xdg.path().join("worktrees/config.yaml"),
+        xdg.path().join("pando/config.yaml"),
         format!("worktrees:\n  root: {}\n", root.display()),
     )
     .unwrap();
 
-    let output = Command::cargo_bin("worktrees")
+    let output = Command::cargo_bin("pando")
         .unwrap()
         .args(["create", value])
         .current_dir(&repo.main)
@@ -5904,7 +5887,7 @@ fn create_excludes_branches_that_already_have_a_worktree() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "solo"]);
 
-    let candidates = complete(&repo.main, &["worktrees", "create", ""]);
+    let candidates = complete(&repo.main, &["pando", "create", ""]);
 
     assert!(candidates.iter().any(|value| value == "solo"));
     assert!(
@@ -5922,7 +5905,7 @@ fn remove_offers_only_branches_with_a_topic_worktree() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "solo"]);
 
-    let candidates = complete(&repo.main, &["worktrees", "remove", ""]);
+    let candidates = complete(&repo.main, &["pando", "remove", ""]);
 
     assert!(candidates.iter().any(|value| value == "feature"));
     assert!(
@@ -5941,7 +5924,7 @@ fn branch_completion_filters_by_prefix() {
     git(&repo.main, ["branch", "feat-a"]);
     git(&repo.main, ["branch", "other"]);
 
-    let candidates = complete(&repo.main, &["worktrees", "switch", "feat"]);
+    let candidates = complete(&repo.main, &["pando", "switch", "feat"]);
 
     assert!(candidates.iter().any(|value| value == "feat-a"));
     assert!(!candidates.iter().any(|value| value == "other"));
@@ -5951,12 +5934,12 @@ fn branch_completion_filters_by_prefix() {
 fn branch_completion_outside_a_repository_is_silent() {
     let outside = tempfile::tempdir().unwrap();
 
-    let mut command = Command::cargo_bin("worktrees").unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
     let output = command
-        .env("_WORKTREES_COMPLETE", "zsh")
+        .env("_PANDO_COMPLETE", "zsh")
         .env("_CLAP_COMPLETE_INDEX", "2")
         .arg("--")
-        .args(["worktrees", "switch", ""])
+        .args(["pando", "switch", ""])
         .current_dir(outside.path())
         .output()
         .unwrap();

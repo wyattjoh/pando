@@ -443,7 +443,7 @@ fn preflight(repository: &Repository, source: &MessageSource) -> Result<Option<E
     .flatten()
     .any(|value| value.source == GenerationSource::Shared);
     if shared && !trust::is_generation_trusted(repository, &config.generation)? {
-        bail!("shared commit generator approval is required; run worktrees trust commit-approve");
+        bail!("shared commit generator approval is required; run pando trust commit-approve");
     }
     let _ = command;
     Ok(Some(config))
@@ -889,9 +889,9 @@ fn recovery_steps(request_mode: bool, request_id: Option<&str>) -> Vec<NextStep>
             requires_human_approval: false,
             invocation: invocation(
                 if request_mode {
-                    vec!["worktrees", "commit", "--input-output", "json"]
+                    vec!["pando", "commit", "--input-output", "json"]
                 } else {
-                    vec!["worktrees", "commit", "--stage-all", "--output", "json"]
+                    vec!["pando", "commit", "--stage-all", "--output", "json"]
                 },
                 stdin,
             ),

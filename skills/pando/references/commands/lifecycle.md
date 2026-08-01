@@ -1,15 +1,15 @@
 # `remove`, `merge` — topic worktree lifecycle
 
 **Never use raw `git worktree remove` or `git merge`/`git rebase` for these
-operations.** `worktrees remove` keeps the local branch ref and runs
-`pre-remove` hooks; `worktrees merge` resolves the configured target
+operations.** `pando remove` keeps the local branch ref and runs
+`pre-remove` hooks; `pando merge` resolves the configured target
 branch, runs `pre-merge` hooks, and is crash-recoverable across
 invocations — a plain `git merge` skips all of that.
 
-## `worktrees remove [OPTIONS] [BRANCHES...]`
+## `pando remove [OPTIONS] [BRANCHES...]`
 
 ```
-Usage: worktrees remove [OPTIONS] [BRANCHES]...
+Usage: pando remove [OPTIONS] [BRANCHES]...
 ```
 
 | Flag/Arg | Purpose |
@@ -26,17 +26,17 @@ destination.
 Both JSON modes are supported; agents use versioned request mode.
 
 ```sh
-worktrees remove                          # (inferred) removes the current topic
-worktrees remove --force feature/login    # (inferred) force-remove a dirty topic
+pando remove                          # (inferred) removes the current topic
+pando remove --force feature/login    # (inferred) force-remove a dirty topic
 ```
 No literal example ships in README.md for `remove` — only prose describing
 the flags and no-argument behavior; the invocations above combine the
 documented flag/positional spellings and are marked **(inferred)**.
 
-## `worktrees merge [OPTIONS]`
+## `pando merge [OPTIONS]`
 
 ```
-Usage: worktrees merge [OPTIONS]
+Usage: pando merge [OPTIONS]
 ```
 
 | Flag | Purpose |
@@ -48,7 +48,7 @@ Usage: worktrees merge [OPTIONS]
 Integrates the current clean topic into the resolved target branch
 (checked out in the primary worktree) via `git merge --ff-only`. A diverged
 topic rebases onto the target by default. `--yolo` first runs the equivalent
-of `worktrees commit --stage-all` and continues only if the commit succeeds.
+of `pando commit --stage-all` and continues only if the commit succeeds.
 It supports human output only and conflicts with `--dry-run`. Phase-specific
 `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries (see
 `../config.md`).
@@ -64,13 +64,13 @@ destination is written to stdout. The plan/context reports `in_place: true`.
 Running it from the primary worktree while the target branch itself is checked
 out fails with `merge.nothing_to_merge`.
 
-Uses `worktrees.target-branch` when set in `.worktrees.yaml` or the global
+Uses `worktrees.target-branch` when set in `.pando.yaml` or the global
 config. Otherwise, it falls back to the local branch pointed to by
 `origin/HEAD`, then local `main`, then local `master`. It errors only when no
 configured or fallback branch exists.
 
 ```yaml
-# .worktrees.yaml or global config.yaml
+# .pando.yaml or global config.yaml
 worktrees:
   target-branch: main
 ```
@@ -95,10 +95,10 @@ written to stdout. See `docs/adr/0001-journal-merge-lifecycle.md`.
 Both JSON modes are supported; agents use versioned request mode.
 
 ```sh
-worktrees merge                    # (inferred)
-worktrees merge --no-rebase        # (inferred)
-worktrees merge --no-remove        # (inferred)
-worktrees merge --yolo             # commit every change, then merge
+pando merge                    # (inferred)
+pando merge --no-rebase        # (inferred)
+pando merge --no-remove        # (inferred)
+pando merge --yolo             # commit every change, then merge
 ```
 No literal example ships in README.md for `merge` — only prose; flag
 spellings are confirmed from the compiled binary's `--help`, but the

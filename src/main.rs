@@ -3,7 +3,7 @@ use std::env;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::engine::ArgValueCandidates;
-use worktrees::{
+use pando::{
     Row, commit, completion,
     config::EffectiveConfig,
     git, install, machine, pr, render,
@@ -19,7 +19,10 @@ enum OutputFormat {
 }
 
 #[derive(Debug, Parser)]
-#[command(version, about)]
+// `name` is pinned rather than inherited from `CARGO_PKG_NAME`: the package is
+// `pando-cli` (the bare crate name is taken on crates.io) and `--version` would
+// otherwise report a name no user ever types.
+#[command(name = "pando", version, about)]
 struct Cli {
     /// Select human terminal output or one structured JSON document.
     #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Human)]
@@ -157,13 +160,13 @@ fn main() {
     // stdout must not be written to beforehand. Placing it here also keeps a
     // completion request out of the `--output json` protocol path below.
     //
-    // The variable is `_WORKTREES_COMPLETE` rather than clap_complete's default
+    // The variable is `_PANDO_COMPLETE` rather than clap_complete's default
     // `COMPLETE`: that name is generic enough to be set in an environment for
     // unrelated reasons, and the installed zsh dispatcher captures `switch`
     // stdout and `cd`s to it, so an accidental completion script on stdout
     // would silently break directory switching.
     clap_complete::CompleteEnv::with_factory(Cli::command)
-        .var("_WORKTREES_COMPLETE")
+        .var("_PANDO_COMPLETE")
         .complete();
 
     let args: Vec<_> = env::args_os().collect();
@@ -192,13 +195,13 @@ fn main() {
     };
     if let Err(error) = run(cli) {
         if json_requested {
-            let response = worktrees::protocol::failure(
+            let response = pando::protocol::failure(
                 json_command.as_deref().unwrap_or("cli"),
                 None,
                 "command.execution_failed",
                 format!("{error:#}"),
             );
-            let _ = worktrees::protocol::write(&response);
+            let _ = pando::protocol::write(&response);
             std::process::exit(1);
         }
         let interaction = error.downcast_ref::<ui::InteractionError>();
@@ -329,12 +332,12 @@ fn run(cli: Cli) -> Result<()> {
             force,
             dry_run: false,
             branches,
-        } => worktrees::lifecycle::remove(&branches, force),
+        } => pando::lifecycle::remove(&branches, force),
         Commands::Remove {
             force,
             dry_run: true,
             branches,
-        } => worktrees::lifecycle::remove_dry_run(&branches, force),
+        } => pando::lifecycle::remove_dry_run(&branches, force),
         Commands::Merge {
             no_rebase: _,
             no_remove: _,
@@ -360,20 +363,20 @@ fn run(cli: Cli) -> Result<()> {
                 json: false,
                 request_mode: false,
             })?;
-            worktrees::lifecycle::merge(no_rebase, no_remove)
+            pando::lifecycle::merge(no_rebase, no_remove)
         }
         Commands::Merge {
             no_rebase,
             no_remove,
             yolo: false,
             dry_run: false,
-        } => worktrees::lifecycle::merge(no_rebase, no_remove),
+        } => pando::lifecycle::merge(no_rebase, no_remove),
         Commands::Merge {
             no_rebase,
             no_remove,
             yolo: false,
             dry_run: true,
-        } => worktrees::lifecycle::merge_dry_run(no_rebase, no_remove),
+        } => pando::lifecycle::merge_dry_run(no_rebase, no_remove),
         Commands::Merge {
             yolo: true,
             dry_run: true,
@@ -502,8 +505,8 @@ fn branch_summary(rows: &[Row]) -> String {
     ui::muted_style().apply_to(summary.join(", ")).to_string()
 }
 
-fn list_summary(worktrees: &[worktrees::Worktree]) -> String {
-    use worktrees::Condition;
+fn list_summary(worktrees: &[pando::Worktree]) -> String {
+    use pando::Condition;
 
     let mut summary = vec![format!(
         "{} worktree{}",
