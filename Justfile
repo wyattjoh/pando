@@ -6,6 +6,10 @@ build:
 test:
     cargo test --all-features
 
+# Install the pre-commit hooks managed by prek.
+install-hooks:
+    prek install
+
 # Install the binary from this checkout as `pando` and `pd`.
 install:
     cargo install --locked --path .

@@ -7,6 +7,7 @@ Guidance for coding agents working in this repository. `CLAUDE.md` is a symlink 
 ```sh
 just build            # cargo build --all-features
 just test             # cargo test --all-features
+just install-hooks    # prek install
 just install          # cargo install --path .
 
 cargo fmt --check

@@ -333,6 +333,15 @@ pando list --branches
 
 ## Development
 
+Install [prek](https://prek.j178.dev/installation/) from a prebuilt binary, then install the repository's pre-commit hooks:
+
+```sh
+cargo binstall prek
+just install-hooks
+```
+
+The hooks check staged Rust changes with the same formatting and lint commands used by CI. Run the complete checks manually with:
+
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
