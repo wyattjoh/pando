@@ -3723,6 +3723,24 @@ fn git_output<const N: usize>(dir: &Path, args: [&str; N]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+fn branch_description(dir: &Path, branch: &str) -> Option<String> {
+    let key = format!("branch.{branch}.description");
+    let mut output = Command::new("git")
+        .args(["config", "--null", "--get", &key])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    match output.status.code() {
+        Some(0) => {
+            assert_eq!(output.stdout.last(), Some(&0));
+            output.stdout.pop();
+            Some(String::from_utf8(output.stdout).unwrap())
+        }
+        Some(1) => None,
+        _ => panic!("{}", String::from_utf8_lossy(&output.stderr)),
+    }
+}
+
 fn run_install(home: &Path, xdg: &Path, zdotdir: Option<&Path>, input: &[u8]) -> PtyOutput {
     let mut command = install_command(home, xdg, zdotdir);
     command.env("CLICOLOR_FORCE", "1");
@@ -4445,6 +4463,30 @@ fn json_command(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    run_json_command(command, stdin)
+}
+
+fn json_create_request(
+    repo: &Repository,
+    xdg: &TempDir,
+    request: &serde_json::Value,
+) -> std::process::Output {
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["create", "--input-output", "json"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run_json_command(command, Some(request))
+}
+
+fn run_json_command(
+    mut command: Command,
+    stdin: Option<&serde_json::Value>,
+) -> std::process::Output {
     let mut child = command.spawn().unwrap();
     let mut child_stdin = child.stdin.take().unwrap();
     if let Some(value) = stdin {
@@ -4637,6 +4679,7 @@ fn json_create_makes_a_new_branch_and_reports_both_effects() {
     let value = assert_json_pure(&execute);
     assert_eq!(value["result"]["outcome"], "created");
     assert_eq!(value["result"]["start_point"], head);
+    assert_eq!(value["effects"].as_array().unwrap().len(), 2);
     assert_eq!(value["effects"][0]["action"], "create_branch");
     assert_eq!(value["effects"][0]["completed"], true);
     assert_eq!(value["effects"][1]["action"], "create_worktree");
@@ -4674,6 +4717,184 @@ fn json_create_request_mode_requires_a_branch() {
     assert_eq!(value["command"], "create");
     assert_eq!(value["request_id"], "create-1");
     assert_eq!(value["error"]["code"], "create.branch_required");
+}
+
+#[test]
+fn json_create_request_sets_the_exact_branch_description() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("topics");
+    let xdg = config_home_with_root(&root);
+    let description = "Replace lifecycle guidance with\nnative Pando commands.";
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "request_id": "create-description-1",
+        "input": {
+            "branch": "topic/described",
+            "description": description
+        }
+    });
+
+    let output = json_create_request(&repo, &xdg, &request);
+
+    assert!(output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["request_id"], "create-description-1");
+    assert_eq!(value["result"]["outcome"], "created");
+    assert_eq!(value["effects"][2]["action"], "set_branch_description");
+    assert_eq!(value["effects"][2]["attempted"], true);
+    assert_eq!(value["effects"][2]["completed"], true);
+    assert_eq!(value["effects"][2]["details"]["description"], description);
+    assert_eq!(
+        branch_description(&repo.main, "topic/described").as_deref(),
+        Some(description)
+    );
+}
+
+#[test]
+fn json_create_description_dry_run_reports_without_mutating() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("topics");
+    let xdg = config_home_with_root(&root);
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {
+            "branch": "topic/planned",
+            "description": "Planned description",
+            "dry_run": true
+        }
+    });
+
+    let output = json_create_request(&repo, &xdg, &request);
+
+    assert!(output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["result"]["outcome"], "creation_plan");
+    assert_eq!(value["effects"][2]["action"], "set_branch_description");
+    assert_eq!(value["effects"][2]["attempted"], false);
+    assert_eq!(value["effects"][2]["completed"], false);
+    assert!(!root.exists());
+    assert_eq!(branch_description(&repo.main, "topic/planned"), None);
+}
+
+#[test]
+fn json_create_description_overwrites_an_existing_local_branch_description() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "topic/existing"]);
+    git(
+        &repo.main,
+        [
+            "config",
+            "branch.topic/existing.description",
+            "Old description",
+        ],
+    );
+    let root = repo.temp.path().join("topics");
+    let xdg = config_home_with_root(&root);
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {
+            "branch": "topic/existing",
+            "description": "New description"
+        }
+    });
+
+    let output = json_create_request(&repo, &xdg, &request);
+
+    assert!(output.status.success());
+    assert_eq!(
+        branch_description(&repo.main, "topic/existing").as_deref(),
+        Some("New description")
+    );
+}
+
+#[test]
+fn json_create_description_does_not_modify_a_registered_branch() {
+    let repo = Repository::new();
+    git(
+        &repo.main,
+        ["config", "branch.feature.description", "Keep this"],
+    );
+    let root = repo.temp.path().join("topics");
+    let xdg = config_home_with_root(&root);
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {
+            "branch": "feature",
+            "description": "Do not write this"
+        }
+    });
+
+    let output = json_create_request(&repo, &xdg, &request);
+
+    assert!(!output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["error"]["code"], "create.branch_registered");
+    assert!(value["effects"].as_array().unwrap().is_empty());
+    assert_eq!(
+        branch_description(&repo.main, "feature").as_deref(),
+        Some("Keep this")
+    );
+}
+
+#[test]
+fn json_create_description_failure_reports_partial_creation_and_recovery() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("topics");
+    let xdg = config_home_with_root(&root);
+    let fake_bin = repo.temp.path().join("description-failure-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        "#!/bin/sh\nif [ \"$1\" = config ] && [ \"$2\" = --local ] && [ \"$3\" = --replace-all ]; then echo 'description write failed' >&2; exit 71; fi\nexec \"$REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {
+            "branch": "topic/partial",
+            "description": "Requested description"
+        }
+    });
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["create", "--input-output", "json"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .env("PATH", &fake_bin)
+        .env("REAL_GIT", find_executable("git"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = run_json_command(command, Some(&request));
+
+    assert!(!output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["error"]["code"], "create.description_failed");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("description write failed")
+    );
+    assert_eq!(value["effects"][0]["completed"], true);
+    assert_eq!(value["effects"][1]["completed"], true);
+    assert_eq!(value["effects"][2]["action"], "set_branch_description");
+    assert_eq!(value["effects"][2]["attempted"], true);
+    assert_eq!(value["effects"][2]["completed"], false);
+    assert_eq!(
+        value["next_steps"][0]["action"],
+        "git.set_branch_description"
+    );
+    assert_eq!(
+        value["next_steps"][0]["invocation"]["argv"][4],
+        "branch.topic/partial.description"
+    );
+    assert!(root.join("topic/partial/.git").exists());
+    assert_eq!(branch_description(&repo.main, "topic/partial"), None);
 }
 
 #[test]
@@ -5629,16 +5850,26 @@ fn json_rejects_a_fetch_for_a_branch_that_is_not_genuinely_new() {
 }
 
 #[test]
-fn json_help_exposes_the_fetch_input_and_base_error_codes() {
+fn json_help_exposes_create_description_and_shared_base_inputs() {
     let repo = Repository::new();
 
     for command in ["switch", "create"] {
         let output = json_command(&repo.main, &[command, "--help", "--output", "json"], None);
         let value = assert_json_pure(&output);
-        let schema = serde_json::to_string(&value["result"]["request_schema"]).unwrap();
-        assert!(schema.contains("\"fetch\""), "{command}: {schema}");
-        assert!(schema.contains("\"branch\""), "{command}: {schema}");
-        assert!(schema.contains("\"dry_run\""), "{command}: {schema}");
+        let schema = &value["result"]["request_schema"];
+        let input_type = schema["properties"]["input"]["$ref"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap();
+        let properties = schema["definitions"][input_type]["properties"]
+            .as_object()
+            .unwrap();
+        assert!(properties.contains_key("fetch"), "{command}: {schema}");
+        assert!(properties.contains_key("branch"), "{command}: {schema}");
+        assert!(properties.contains_key("dry_run"), "{command}: {schema}");
+        assert_eq!(properties.contains_key("description"), command == "create");
         let errors = serde_json::to_string(&value["result"]["error_codes"]).unwrap();
         assert!(
             errors.contains(&format!("{command}.fetch_not_applicable")),
@@ -5648,7 +5879,37 @@ fn json_help_exposes_the_fetch_input_and_base_error_codes() {
             errors.contains(&format!("{command}.base_unavailable")),
             "{command}: {errors}"
         );
+        let actions = serde_json::to_string(&value["result"]["actions"]).unwrap();
+        assert_eq!(
+            actions.contains("set_branch_description"),
+            command == "create"
+        );
+        assert_eq!(
+            errors.contains("create.description_failed"),
+            command == "create"
+        );
     }
+}
+
+#[test]
+fn json_switch_rejects_the_create_only_description_field() {
+    let repo = Repository::new();
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {"branch": "feature", "description": "Not valid for switch"}
+    });
+
+    let output = json_command(
+        &repo.main,
+        &["switch", "--input-output", "json"],
+        Some(&request),
+    );
+
+    assert!(!output.status.success());
+    assert_eq!(
+        assert_json_pure(&output)["error"]["code"],
+        "json.invalid_request"
+    );
 }
 
 #[test]

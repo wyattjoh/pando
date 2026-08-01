@@ -1292,6 +1292,28 @@ fn check_ignored(cwd: &Path, path: &Path, no_index: bool) -> Result<bool> {
     }
 }
 
+/// Sets a branch description in the repository's local Git configuration.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot update the local configuration.
+pub fn set_branch_description(cwd: &Path, branch: &str, description: &str) -> Result<()> {
+    let key = format!("branch.{branch}.description");
+    let output = Command::new("git")
+        .args(["config", "--local", "--replace-all", &key, description])
+        .current_dir(cwd)
+        .output()
+        .context("failed to start Git while setting the branch description")?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "Git failed to set the description for branch {branch:?}: {}",
+            stderr_detail(&output)
+        )
+    }
+}
+
 /// Adds a worktree for an existing local branch.
 ///
 /// # Errors

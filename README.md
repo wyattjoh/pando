@@ -58,6 +58,8 @@ printf '%s\n' '{"schema_version":1,"request_id":"example","input":{}}' \
   | pando list --input-output json
 printf '%s\n' '{"schema_version":1,"input":{"property":"primary_worktree_path"}}' \
   | pando get --input-output json
+printf '%s\n' '{"schema_version":1,"input":{"branch":"feature/login","description":"Add the login flow"}}' \
+  | pando create --input-output json
 ```
 
 `--output json` instead uses ordinary argv flags as input. Both modes emit exactly one newline-terminated JSON document on stdout and no ordinary stderr on typed success or failure. Requests reject unknown fields, unsupported versions, trailing data, and mixed stdin/argv command input. Paths use tagged UTF-8 or base64 objects; responses carry typed results or errors plus context, effects, bounded diagnostics, and recovery steps. Structured `list` worktrees and `switch.selection_required` choices include nullable `last_commit_at` values as RFC 3339 committer timestamps with explicit offsets. These records stay in Git order regardless of personal sort configuration; metadata lookup failures use `null` values and a bounded diagnostic.
@@ -98,6 +100,8 @@ pando create feature/login
 ```
 
 It reports the branch it is about to create instead of asking, so it works without a terminal, and it refuses a branch that already has a registered worktree rather than entering it. Post-create hook approval is unaffected and still requires a human. Unlike `switch`, `create` requires a branch name and has no picker.
+
+Versioned JSON requests may include `input.description`. After creating the worktree, Pando stores that exact value as the repository-local `branch.<name>.description` before running post-create hooks. This also applies when `create` resolves an existing local branch or a fetched remote branch, replacing any prior description. The field is request-only; there is no human `--description` flag. Dry runs report an unattempted `set_branch_description` effect without changing Git configuration. If the configuration write fails, `create.description_failed` reports the already-created worktree and an executable recovery step instead of rolling creation back.
 
 Created worktrees use the complete branch name below the configured root, so `feature/login` becomes `<root>/feature/login`. Existing destinations and broken registered worktrees are rejected; the tool never adopts, repairs, prunes, moves, backs up, or deletes them.
 

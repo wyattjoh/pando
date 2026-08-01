@@ -62,6 +62,9 @@ when a returned next step explicitly requires a person's approval.
 
 Requests reject unknown fields, trailing data, unsupported versions, and
 mixed command flags. Dry-run mutating requests use `input.dry_run:true`.
+`create` requests may include `input.description` to set the repository-local
+Git branch description as part of creation, so do not follow a successful
+request with a separate `git config branch.<name>.description` call.
 Force is argv-only authorization for removal. Pass `--force` only with explicit user approval; never put `force` in a remove request document. JSON cannot grant hook or generator trust or authorize installer
 writes. Structured worktree records expose nullable RFC 3339
 `last_commit_at` values and always retain Git discovery order, regardless of
@@ -123,6 +126,10 @@ pando switch                 # interactive picker
 pando switch --branches      # interactive picker, starting in branch view
 pando create feature/login   # create without confirming; fails if it exists
 pando create --fetch topic   # refresh the fresh base ref first (base: fresh only)
+
+# Agents create and describe a branch in one request
+printf '%s\n' '{"schema_version":1,"input":{"branch":"feature/login","description":"Add the login flow"}}' \
+  | pando create --input-output json
 ```
 New branches start at the invoking worktree's `HEAD` unless `worktrees.base`
 is `fresh`, which cuts them from the target branch's remote-tracking ref

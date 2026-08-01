@@ -25,6 +25,56 @@ struct SwitchInput {
     dry_run: bool,
 }
 
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CreateInput {
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    remote: Option<String>,
+    /// Refresh the resolved base ref before creating a genuinely new branch.
+    #[serde(default)]
+    fetch: bool,
+    #[serde(default)]
+    dry_run: bool,
+    /// Repository-local Git description to set on the resolved branch.
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug)]
+struct ResolveInput {
+    branch: Option<String>,
+    remote: Option<String>,
+    fetch: bool,
+    dry_run: bool,
+    description: Option<String>,
+}
+
+impl From<SwitchInput> for ResolveInput {
+    fn from(input: SwitchInput) -> Self {
+        Self {
+            branch: input.branch,
+            remote: input.remote,
+            fetch: input.fetch,
+            dry_run: input.dry_run,
+            description: None,
+        }
+    }
+}
+
+impl From<CreateInput> for ResolveInput {
+    fn from(input: CreateInput) -> Self {
+        Self {
+            branch: input.branch,
+            remote: input.remote,
+            fetch: input.fetch,
+            dry_run: input.dry_run,
+            description: input.description,
+        }
+    }
+}
+
 #[derive(Debug, JsonSchema, Serialize)]
 struct WorktreeRecord {
     kind: String,
@@ -100,32 +150,47 @@ struct SwitchSelectionContext {
     unregistered_branch: Value,
 }
 
-fn switch_request(
+fn checked_request<I>(
+    request: protocol::Request<I>,
+) -> std::result::Result<(Option<String>, I), String> {
+    if request.schema_version != protocol::SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported schema version {}",
+            request.schema_version
+        ));
+    }
+    Ok((request.request_id, request.input))
+}
+
+fn resolve_request(
+    intent: Intent,
     request_mode: bool,
     branch: Option<String>,
-) -> std::result::Result<(Option<String>, SwitchInput), String> {
-    if request_mode {
-        if branch.is_some() {
-            return Err("command arguments are forbidden with --input-output json".into());
-        }
-        let request = protocol::read_request::<SwitchInput>()?;
-        if request.schema_version != protocol::SCHEMA_VERSION {
-            return Err(format!(
-                "unsupported schema version {}",
-                request.schema_version
-            ));
-        }
-        Ok((request.request_id, request.input))
-    } else {
-        Ok((
+) -> std::result::Result<(Option<String>, ResolveInput), String> {
+    if !request_mode {
+        return Ok((
             None,
-            SwitchInput {
+            ResolveInput {
                 branch,
                 remote: None,
                 fetch: false,
                 dry_run: false,
+                description: None,
             },
-        ))
+        ));
+    }
+    if branch.is_some() {
+        return Err("command arguments are forbidden with --input-output json".into());
+    }
+    match intent {
+        Intent::Switch => {
+            let (id, input) = checked_request(protocol::read_request::<SwitchInput>()?)?;
+            Ok((id, input.into()))
+        }
+        Intent::Create => {
+            let (id, input) = checked_request(protocol::read_request::<CreateInput>()?)?;
+            Ok((id, input.into()))
+        }
     }
 }
 
@@ -206,7 +271,7 @@ fn resolve(
             "command options are forbidden with --input-output json",
         );
     }
-    let (id, mut input) = match switch_request(request_mode, branch) {
+    let (id, mut input) = match resolve_request(intent, request_mode, branch) {
         Ok(value) => value,
         Err(error) => return emit_err(command, None, "json.invalid_request", error),
     };
@@ -554,6 +619,16 @@ fn resolve(
         completed: !input.dry_run,
         details: Some(json!({"destination":BytePath::path(&destination)})),
     });
+    let description_effect = input.description.as_ref().map(|description| {
+        let index = effects.len();
+        effects.push(Effect {
+            action: "set_branch_description".into(),
+            attempted: false,
+            completed: false,
+            details: Some(json!({"branch":branch,"description":description})),
+        });
+        index
+    });
     let mut diagnostics = Vec::new();
     if !input.dry_run {
         if let Some(parent) = destination.parent() {
@@ -596,6 +671,48 @@ fn resolve(
         let identity = git::worktree_identity(&destination)?;
         if let Some(pending) = pending {
             pending.commit(&repo.common_dir, &identity)?;
+        }
+        if let (Some(description), Some(effect_index)) =
+            (input.description.as_deref(), description_effect)
+        {
+            effects[effect_index].attempted = true;
+            if let Err(error) =
+                git::set_branch_description(&repo.current().path, &branch, description)
+            {
+                let mut response = protocol::failure(
+                    command,
+                    id,
+                    "create.description_failed",
+                    format!(
+                        "the worktree was created, but its branch description could not be set: {error:#}"
+                    ),
+                );
+                response.context =
+                    json!({"branch":branch,"destination":BytePath::path(&destination)});
+                response.effects = effects;
+                response.next_steps.push(protocol::NextStep {
+                    action: "git.set_branch_description".into(),
+                    description: "Set the requested branch description in repository-local Git configuration".into(),
+                    mutation: "config".into(),
+                    requires_human_approval: false,
+                    invocation: json!({
+                        "argv":["git","config","--local","--replace-all",format!("branch.{branch}.description"),description],
+                        "stdin":null,
+                        "working_directory":BytePath::path(&repo.current().path)
+                    }),
+                });
+                if !config.post_create.is_empty() {
+                    response.next_steps.push(protocol::NextStep {
+                        action: format!("{command}.recover_setup"),
+                        description: "After setting the description, retry or explicitly complete setup interactively".into(),
+                        mutation: "setup".into(),
+                        requires_human_approval: true,
+                        invocation: json!({"argv":["pando","switch",branch],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}),
+                    });
+                }
+                return emit(response, true);
+            }
+            effects[effect_index].completed = true;
         }
         if !config.post_create.is_empty() {
             let (outcome, output) =
@@ -1620,7 +1737,8 @@ pub fn help(command: &str) -> Value {
         "list" | "trust.status" | "trust.commit_status" => json!(schemars::schema_for!(
             protocol::OptionalInputRequest<EmptyInput>
         )),
-        "switch" | "create" => json!(schemars::schema_for!(protocol::Request<SwitchInput>)),
+        "switch" => json!(schemars::schema_for!(protocol::Request<SwitchInput>)),
+        "create" => json!(schemars::schema_for!(protocol::Request<CreateInput>)),
         "get" => json!(schemars::schema_for!(protocol::Request<GetInput>)),
         "remove" => json!(schemars::schema_for!(protocol::Request<RemoveInput>)),
         "merge" => json!(schemars::schema_for!(protocol::Request<MergeInput>)),
@@ -1681,10 +1799,16 @@ pub fn help(command: &str) -> Value {
                 "create.fetch_not_applicable",
                 "create.base_unavailable",
                 "create.creation_failed",
+                "create.description_failed",
                 "create.setup_failed",
                 "trust.approval_required",
             ],
-            &["fetch_base_ref", "create_branch", "create_worktree"],
+            &[
+                "fetch_base_ref",
+                "create_branch",
+                "create_worktree",
+                "set_branch_description",
+            ],
         ),
         "remove" => (
             &[
