@@ -4,6 +4,10 @@
 
 `pando` is a small Rust CLI for inspecting, creating, and navigating the worktrees of the Git repository containing the current directory. Git remains the source of truth: the tool calls the installed `git` executable and never fetches or maintains a repository registry.
 
+## Why pando?
+
+[Pando](https://en.wikipedia.org/wiki/Pando_(tree)) is a grove of quaking aspens in Utah that looks like a forest but is really one organism, with thousands of trunks sharing a single root system. Git worktrees feel much the same: many working directories, one repository underneath.
+
 ## Requirements
 
 - macOS or Linux
