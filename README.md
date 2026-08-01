@@ -13,7 +13,14 @@
 
 ## Install
 
-Build and install the binary as both `pando` and `pd`, then explicitly install the zsh integration:
+Install `pando` and its `pd` alias with Homebrew, then explicitly install the zsh integration:
+
+```sh
+brew install wyattjoh/stable/pando
+pando install
+```
+
+To build from source instead, run:
 
 ```sh
 just install

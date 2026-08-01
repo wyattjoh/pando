@@ -31,7 +31,7 @@ the four operations above must go through `pando`, not `git`.
 
 ## Local setup
 
-- Binaries: `pando` and its `pd` symlink on `PATH` when installed with `just install` (pinned during generation: **v0.1.0**).
+- Binaries: `pando` and its `pd` symlink on `PATH` when installed with Homebrew or `just install` (pinned during generation: **v0.1.1**).
 - The installed zsh integration wraps both `pando` and `pd` so
   `switch`/`create`/`remove`/`merge` can `cd` to the destination the selected binary
   prints. `command pando ...` and `command pd ...` bypass the wrappers.
@@ -95,11 +95,11 @@ for leaf contracts and approval rules.
 
 ### Install and enable the zsh integration
 ```sh
-just install
+brew install wyattjoh/stable/pando
 pando install
 source ${ZDOTDIR:-$HOME}/.zshrc
 ```
-`just install` installs `pando` with Cargo and creates `pd` as a relative symlink beside it. `pando install` also adds an idempotent commented scaffold to the global config without enabling or overwriting user settings.
+To build from source, run `just install` before `pando install` instead. Homebrew and `just install` both provide `pando` plus its `pd` symlink. `pando install` adds an idempotent commented scaffold to the global config without enabling or overwriting user settings.
 Source: README.md ("Install")
 
 ### Configure a root before creating any worktrees
