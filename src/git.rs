@@ -330,10 +330,7 @@ fn parse_branch_refs(bytes: &[u8]) -> (Vec<BranchRecord>, Vec<String>) {
     let mut records = Vec::new();
     let mut excluded = Vec::new();
     let mut fields = bytes.split(|byte| *byte == 0);
-    loop {
-        let Some(raw_head) = fields.next() else {
-            break;
-        };
+    while let Some(raw_head) = fields.next() {
         let head_field = raw_head.strip_prefix(b"\n").unwrap_or(raw_head);
         if head_field.is_empty() {
             break;
@@ -359,10 +356,7 @@ fn parse_branch_refs(bytes: &[u8]) -> (Vec<BranchRecord>, Vec<String>) {
 fn parse_remote_branch_refs(bytes: &[u8]) -> Vec<String> {
     let mut records = Vec::new();
     let mut fields = bytes.split(|byte| *byte == 0);
-    loop {
-        let Some(raw_name) = fields.next() else {
-            break;
-        };
+    while let Some(raw_name) = fields.next() {
         let name_field = raw_name.strip_prefix(b"\n").unwrap_or(raw_name);
         if name_field.is_empty() {
             break;
