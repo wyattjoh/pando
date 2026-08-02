@@ -1642,6 +1642,488 @@ fn merge_yolo_stages_commits_and_merges_all_changes() {
     assert_eq!(git_output(&repo.main, ["show", "HEAD:yolo.txt"]), "ship it");
 }
 
+/// Writes a global config whose squash generator echoes a fixed message and
+/// saves the prompt it received, so tests can assert on both.
+fn squash_generator_config(xdg: &Path, prompt_log: &Path) {
+    fs::create_dir_all(xdg.join("pando")).unwrap();
+    fs::write(
+        xdg.join("pando/config.yaml"),
+        format!(
+            "merge:\n  generation:\n    command: \"cat > {} && printf 'feat: squashed topic\\\\n\\\\n- collapsed the branch\\\\n'\"\n",
+            prompt_log.display()
+        ),
+    )
+    .unwrap();
+}
+
+/// Puts three commits on the topic worktree so a squash has something to collapse.
+fn commit_three_on_topic(repo: &Repository) {
+    for (index, name) in ["one.txt", "two.txt", "three.txt"].iter().enumerate() {
+        fs::write(repo.linked.join(name), format!("{index}\n")).unwrap();
+        git(&repo.linked, ["add", name]);
+        git(&repo.linked, ["commit", "-m", &format!("change {index}")]);
+    }
+}
+
+#[test]
+fn merge_squashes_a_multi_commit_topic_into_one_generated_commit() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let prompt_log = xdg.path().join("prompt.txt");
+    squash_generator_config(xdg.path(), &prompt_log);
+    commit_three_on_topic(&repo);
+    let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Squash"), "{stderr}");
+    // Three commits collapsed into exactly one commit on top of the target.
+    assert_eq!(
+        git_output(
+            &repo.main,
+            ["rev-list", "--count", &format!("{main_before}..HEAD")]
+        ),
+        "1"
+    );
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s"]),
+        "feat: squashed topic"
+    );
+    // Every file from every collapsed commit survived the squash.
+    for name in ["one.txt", "two.txt", "three.txt"] {
+        assert_eq!(
+            git_output(&repo.main, ["show", &format!("HEAD:{name}")]).len(),
+            1
+        );
+    }
+    // The generator saw the branch context, not a staged-diff prompt.
+    let prompt = fs::read_to_string(&prompt_log).unwrap();
+    for expected in ["change 0", "change 2", "three.txt", "Merging into: main"] {
+        assert!(
+            prompt.contains(expected),
+            "prompt missing {expected:?}:\n{prompt}"
+        );
+    }
+}
+
+#[test]
+fn merge_no_squash_preserves_every_topic_commit() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let prompt_log = xdg.path().join("prompt.txt");
+    squash_generator_config(xdg.path(), &prompt_log);
+    commit_three_on_topic(&repo);
+    let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove", "--no-squash"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git_output(
+            &repo.main,
+            ["rev-list", "--count", &format!("{main_before}..HEAD")]
+        ),
+        "3"
+    );
+    assert!(
+        !prompt_log.exists(),
+        "the generator ran despite --no-squash"
+    );
+}
+
+#[test]
+fn merge_config_can_disable_squashing() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        "merge:\n  squash: false\n",
+    )
+    .unwrap();
+    commit_three_on_topic(&repo);
+    let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git_output(
+            &repo.main,
+            ["rev-list", "--count", &format!("{main_before}..HEAD")]
+        ),
+        "3"
+    );
+}
+
+#[test]
+fn merge_leaves_a_single_commit_topic_and_its_message_alone() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let prompt_log = xdg.path().join("prompt.txt");
+    squash_generator_config(xdg.path(), &prompt_log);
+    fs::write(repo.linked.join("solo.txt"), "solo\n").unwrap();
+    git(&repo.linked, ["add", "solo.txt"]);
+    git(&repo.linked, ["commit", "-m", "hand written subject"]);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s"]),
+        "hand written subject"
+    );
+    assert!(
+        !prompt_log.exists(),
+        "a single-commit topic invoked the generator"
+    );
+}
+
+#[test]
+fn merge_refuses_to_squash_without_a_configured_generator() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    commit_three_on_topic(&repo);
+    let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--no-squash"), "{stderr}");
+    assert!(stderr.contains("generation.command"), "{stderr}");
+    // The refusal is a preflight, so nothing moved.
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), main_before);
+}
+
+#[test]
+fn merge_squash_falls_back_to_the_commit_generator() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        "commit:\n  generation:\n    command: 'printf \"feat: reused generator\\n\"'\n",
+    )
+    .unwrap();
+    commit_three_on_topic(&repo);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s"]),
+        "feat: reused generator"
+    );
+}
+
+#[test]
+fn merge_squashes_after_rebasing_onto_an_advanced_target() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let prompt_log = xdg.path().join("prompt.txt");
+    squash_generator_config(xdg.path(), &prompt_log);
+    commit_three_on_topic(&repo);
+    // Advance the target so the merge must rebase before it can squash.
+    fs::write(repo.main.join("target.txt"), "target\n").unwrap();
+    git(&repo.main, ["add", "target.txt"]);
+    git(&repo.main, ["commit", "-m", "target moved"]);
+    let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // One squashed commit sits directly on the advanced target.
+    assert_eq!(
+        git_output(
+            &repo.main,
+            ["rev-list", "--count", &format!("{main_before}..HEAD")]
+        ),
+        "1"
+    );
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s"]),
+        "feat: squashed topic"
+    );
+    // The squash ran against replayed history, so the target's own commit is
+    // not part of what the generator was asked to summarize.
+    let prompt = fs::read_to_string(&prompt_log).unwrap();
+    assert!(!prompt.contains("target moved"), "{prompt}");
+}
+
+#[test]
+fn json_merge_dry_run_reports_the_squash_effect_without_mutating() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let prompt_log = xdg.path().join("prompt.txt");
+    squash_generator_config(xdg.path(), &prompt_log);
+    commit_three_on_topic(&repo);
+    let topic_before = git_output(&repo.linked, ["rev-parse", "HEAD"]);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove", "--dry-run", "--output", "json"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = assert_json_pure(&output);
+    assert_eq!(value["result"]["policy"]["no_squash"], false);
+    assert_eq!(value["context"]["squashes"], true);
+    assert_eq!(value["context"]["squash_commits"], 3);
+    let squash = value["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["action"] == "squash")
+        .expect("the squash effect is reported");
+    assert_eq!(squash["attempted"], false);
+    assert_eq!(squash["details"]["applicable"], true);
+    assert_eq!(squash["details"]["commits"], 3);
+    assert_eq!(
+        git_output(&repo.linked, ["rev-parse", "HEAD"]),
+        topic_before
+    );
+    assert!(!prompt_log.exists());
+}
+
+#[test]
+fn json_merge_squashes_by_default_like_the_human_path() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let prompt_log = xdg.path().join("prompt.txt");
+    squash_generator_config(xdg.path(), &prompt_log);
+    commit_three_on_topic(&repo);
+    let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--input-output", "json"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = run_json_command(
+        command,
+        Some(&serde_json::json!({"schema_version":1,"input":{"no_remove":true}})),
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = assert_json_pure(&output);
+    assert_eq!(value["status"], "success");
+    let squash = value["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["action"] == "squash")
+        .expect("the squash effect is reported");
+    assert_eq!(squash["attempted"], true);
+    assert_eq!(squash["completed"], true);
+    assert_eq!(
+        git_output(
+            &repo.main,
+            ["rev-list", "--count", &format!("{main_before}..HEAD")]
+        ),
+        "1"
+    );
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s"]),
+        "feat: squashed topic"
+    );
+}
+
+/// A shared (committed) generator is untrusted until approved. The refusal must
+/// come before the rebase, not after it has already rewritten the topic.
+#[test]
+fn merge_refuses_an_untrusted_shared_squash_generator_before_rebasing() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        "merge:\n  generation:\n    command: 'printf \"feat: shared\\n\"'\n",
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(&repo.linked, ["commit", "-m", "configure shared generator"]);
+    commit_three_on_topic(&repo);
+    // Advance the target so a rebase would be required if preflight let it through.
+    fs::write(repo.main.join("target.txt"), "target\n").unwrap();
+    git(&repo.main, ["add", "target.txt"]);
+    git(&repo.main, ["commit", "-m", "target moved"]);
+    let topic_before = git_output(&repo.linked, ["rev-parse", "HEAD"]);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("trust merge-approve"), "{stderr}");
+    // The topic is untouched: no rebase happened before the refusal.
+    assert_eq!(
+        git_output(&repo.linked, ["rev-parse", "HEAD"]),
+        topic_before
+    );
+}
+
+#[test]
+fn json_trust_merge_leaves_answer_structurally_instead_of_panicking() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        "merge:\n  generation:\n    command: my-generator\n",
+    )
+    .unwrap();
+
+    let status = trust_json(&repo, &xdg, "merge-status");
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let value = assert_json_pure(&status);
+    assert_eq!(value["command"], "trust.merge_status");
+    // A global generator is user-controlled, so no approval identity applies.
+    assert_eq!(value["result"]["state"], "user_controlled");
+    assert_eq!(value["result"]["source"], "global");
+
+    let reset = trust_json(&repo, &xdg, "merge-reset");
+    let value = assert_json_pure(&reset);
+    assert_eq!(value["result"]["outcome"], "already_reset");
+
+    // JSON never grants approval; it hands back a human-only next step.
+    let approve = trust_json(&repo, &xdg, "merge-approve");
+    assert!(!approve.status.success());
+    let value = assert_json_pure(&approve);
+    assert_eq!(value["error"]["code"], "trust.approval_required");
+    assert_eq!(
+        value["next_steps"][0]["action"],
+        "trust.approve_merge_generator"
+    );
+    assert_eq!(
+        value["next_steps"][0]["invocation"]["argv"][2],
+        "merge-approve"
+    );
+}
+
+/// `pr-*` has no JSON implementation. It must refuse structurally rather than
+/// panicking on an unmatched trust leaf.
+#[test]
+fn json_trust_rejects_an_unimplemented_leaf_without_panicking() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let output = trust_json(&repo, &xdg, "pr-status");
+
+    assert!(!output.status.success());
+    assert_ne!(
+        output.status.code(),
+        Some(101),
+        "the leaf panicked instead of answering"
+    );
+    let value = assert_json_pure(&output);
+    assert_eq!(value["error"]["code"], "trust.json_unsupported");
+}
+
+fn trust_json(repo: &Repository, xdg: &TempDir, subcommand: &str) -> std::process::Output {
+    Command::cargo_bin("pando")
+        .unwrap()
+        .args(["trust", subcommand, "--output", "json"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn pr_missing_metadata_generator_fails_before_dirty_worktree_handling() {
     let repo = Repository::new();

@@ -1200,6 +1200,141 @@ pub fn staged_diff_stat(cwd: &Path) -> Result<String> {
     )
 }
 
+/// Counts the commits reachable from `descendant` but not from `ancestor`.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot walk the range.
+pub fn count_commits_between(cwd: &Path, ancestor: &str, descendant: &str) -> Result<usize> {
+    let range = format!("{ancestor}..{descendant}");
+    git_stdout(cwd, ["rev-list", "--count", &range])
+        .with_context(|| format!("failed to count commits in {range}"))?
+        .trim()
+        .parse()
+        .with_context(|| format!("git rev-list --count {range} returned a non-numeric count"))
+}
+
+/// Returns the full messages of the commits in `ancestor..descendant`, oldest first.
+///
+/// Each entry keeps its subject and body so a squash generator sees the
+/// reasoning the author already wrote, not just a list of subjects.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot walk the range.
+pub fn range_messages(cwd: &Path, ancestor: &str, descendant: &str) -> Result<Vec<String>> {
+    let range = format!("{ancestor}..{descendant}");
+    // %x00 terminates each record so a multi-line body cannot be mistaken for
+    // a record boundary the way a newline separator would be.
+    let raw = git_stdout(cwd, ["log", "--reverse", "--format=%B%x00", &range])
+        .with_context(|| format!("failed to read commit messages in {range}"))?;
+    Ok(raw
+        .split('\0')
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Returns a stable patch for `ancestor..descendant`.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot produce the diff.
+pub fn range_diff(cwd: &Path, ancestor: &str, descendant: &str) -> Result<String> {
+    range_diff_args(cwd, ancestor, descendant, None)
+}
+
+/// Returns stable diff statistics for `ancestor..descendant`.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot produce the statistics.
+pub fn range_diff_stat(cwd: &Path, ancestor: &str, descendant: &str) -> Result<String> {
+    range_diff_args(cwd, ancestor, descendant, Some("--stat"))
+}
+
+fn range_diff_args(
+    cwd: &Path,
+    ancestor: &str,
+    descendant: &str,
+    extra: Option<&str>,
+) -> Result<String> {
+    let range = format!("{ancestor}..{descendant}");
+    // `--stat` is passed as an empty flag when absent so both shapes share the
+    // fixed-size argument array `git_stdout` requires.
+    let output = run_git(
+        cwd,
+        [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            extra.unwrap_or("--patch"),
+            &range,
+        ],
+    )
+    .with_context(|| format!("failed to diff {range}"))?;
+    if !output.status.success() {
+        bail!("git diff {range} failed: {}", stderr_detail(&output));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Moves the current branch to `commit` while leaving the index and worktree alone.
+///
+/// This is how a squash collapses history: the tree is already correct, so only
+/// the branch pointer moves and every change becomes staged.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot move the branch.
+pub fn reset_soft(cwd: &Path, commit: &str, inherit: bool) -> Result<String> {
+    run_lifecycle_git(cwd, &["reset", "--soft", commit], "soft reset", inherit)
+}
+
+/// Creates a commit from the current index, returning Git's captured output.
+///
+/// Unlike [`commit`], the message arrives on stdin rather than the command
+/// line, so an arbitrarily long generated body cannot run into `ARG_MAX`.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot create the commit.
+///
+/// # Panics
+///
+/// Panics if the child's piped stdin is unavailable, which cannot happen for a
+/// process spawned with `Stdio::piped`.
+pub fn commit_message_stdin(cwd: &Path, message: &str) -> Result<String> {
+    let mut child = Command::new("git")
+        .args(["commit", "--file", "-"])
+        .current_dir(cwd)
+        .env("GIT_EDITOR", "true")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to start git commit")?;
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(message.as_bytes())
+        .context("failed to send the commit message to git commit")?;
+    let output = child
+        .wait_with_output()
+        .context("failed to await git commit")?;
+    let transcript = combined_output(&output);
+    if output.status.success() {
+        return Ok(transcript);
+    }
+    if transcript.is_empty() {
+        bail!("git commit failed with {}", output.status);
+    }
+    bail!("git commit failed with {}\n{transcript}", output.status)
+}
+
 /// Returns up to ten reachable commit subjects, newest first.
 ///
 /// # Errors

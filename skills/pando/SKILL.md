@@ -24,7 +24,7 @@ often "work":
 | `git worktree add ...` / `git checkout -b ...` | `pando switch [--dry-run] [branch]`, or `pando create [--dry-run] <branch>` to skip the new-branch confirmation | Applies the branch-resolution order, the configured root, and post-create hooks/trust |
 | `git commit -m "<message you wrote>"` | `pando commit --input-output json` (omit a message in the request to let the **configured generator** write it) | If the user didn't give you a message, do not invent one yourself — let the generator write it. Only supply a literal message when the user gave you that exact text |
 | `git worktree remove ...` | `pando remove [--force] [--dry-run] [branch...]` | Keeps the local branch ref; runs `pre-remove` hooks |
-| `git merge ...` / `git rebase ...` onto the target | `pando merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Resolves the configured target branch, or origin/HEAD, main, then master without fetching, runs `pre-merge` hooks, and is crash-recoverable |
+| `git merge ...` / `git rebase ...` onto the target | `pando merge [--no-rebase] [--no-remove] [--no-squash] [--yolo] [--dry-run]` | Resolves the configured target branch, or origin/HEAD, main, then master without fetching, squashes the topic into one generated-message commit by default, runs `pre-merge` hooks, and is crash-recoverable |
 
 `git add`/`git add --patch` are still the right tool for **staging** — only
 the four operations above must go through `pando`, not `git`.
@@ -88,9 +88,9 @@ for leaf contracts and approval rules.
 | `create [--fetch] [--dry-run] <branch>` | Create a worktree and print its path, without confirming a new branch | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `get <property>` | Print one current-worktree property | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `remove [--force] [--dry-run] [branches...]` | Remove one or more topic worktrees while retaining their branches | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
-| `merge [--no-rebase] [--no-remove] [--yolo] [--dry-run]` | Integrate the current topic into the configured target branch | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
+| `merge [--no-rebase] [--no-remove] [--no-squash] [--yolo] [--dry-run]` | Integrate the current topic into the configured target branch, squashing it into one commit by default | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `commit [-m MSG] [--stage-all] [--dry-run]` | Commit the existing index, optionally staging every change first | [`references/commands/commit.md`](references/commands/commit.md) |
-| `trust [--dry-run] <subcommand>` | Inspect, approve, or revoke hook-phase or commit-generation trust. Subcommands: `status`, `reset`, `commit-status`, `commit-reset`, `commit-approve` | [`references/commands/trust.md`](references/commands/trust.md) |
+| `trust [--dry-run] <subcommand>` | Inspect, approve, or revoke hook-phase, commit-generation, squash-message-generation, or PR-generation trust. Subcommands: `status`, `reset`, `commit-status`, `commit-reset`, `commit-approve`, `merge-status`, `merge-reset`, `merge-approve`, `pr-status`, `pr-reset`, `pr-approve` | [`references/commands/trust.md`](references/commands/trust.md) |
 | `install [--dry-run]` | Install or preview the managed zsh integration (including dynamic tab completion) and global config scaffold | [`references/commands/install.md`](references/commands/install.md) |
 | `pr create` | Create a draft or ready pull request from a published topic branch | [`references/commands/pr.md`](references/commands/pr.md) |
 
@@ -244,6 +244,26 @@ The setting is legal in global, shared, and local configuration, with local
 winning over shared, then global. Set it to `github` or `tea` to require one
 adapter. Pando represents Tea draft status by adding the default `WIP:` title
 prefix for compatibility across Tea versions.
+
+### Merge a topic back into the target (squashes by default)
+```sh
+pando merge --dry-run             # preview, including how many commits collapse
+
+# agents: squashing is the default in JSON too
+printf '%s\n' '{"schema_version":1,"input":{}}' | pando merge --input-output json
+
+pando merge --no-squash           # keep the topic's individual commits
+```
+`merge` collapses the topic into one commit after any rebase and before the
+fast-forward, generating that commit's message. A topic that is already one
+commit is left alone. This needs `merge.generation.command`, or
+`commit.generation.command` as a fallback: a multi-commit topic with neither
+is refused in preflight (`merge.squash_generator_missing`) rather than merged
+unsquashed. A generator set in committed `.pando.yaml` is untrusted until
+`pando trust merge-approve`; until then JSON answers
+`merge.squash_approval_required`. Turn it off with `--no-squash` or
+`merge.squash: false`.
+Source: README.md ("Lifecycle commands" / "Squashing")
 
 ### Inspect the JSON request/response schema and Schema version
 ```sh

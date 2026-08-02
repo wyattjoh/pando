@@ -47,6 +47,12 @@ pub enum TrustCommand {
     PrStatus,
     PrReset,
     PrApprove,
+    /// Show approval state for the effective squash-message generator settings.
+    MergeStatus,
+    /// Revoke squash-message-generator approval for this repository clone.
+    MergeReset,
+    /// Preview and approve effective shared squash-message-generation settings.
+    MergeApprove,
 }
 
 /// Resolves, creates when needed, and emits a switch destination.
@@ -217,7 +223,9 @@ pub fn trust_dry_run(command: TrustCommand) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = git::repository(&cwd)?;
     match command {
-        TrustCommand::Status | TrustCommand::CommitStatus => trust_command(command),
+        TrustCommand::Status | TrustCommand::CommitStatus | TrustCommand::MergeStatus => {
+            trust_command(command)
+        }
         TrustCommand::Reset => ui::finish("Would reset hook trust; no changes made."),
         TrustCommand::CommitReset => {
             ui::finish("Would reset commit generator trust; no changes made.")
@@ -225,6 +233,12 @@ pub fn trust_dry_run(command: TrustCommand) -> Result<()> {
         TrustCommand::PrStatus | TrustCommand::PrReset | TrustCommand::PrApprove => {
             ui::finish("Would update PR generator trust; no changes made.")
         }
+        TrustCommand::MergeReset => {
+            ui::finish("Would reset squash message generator trust; no changes made.")
+        }
+        TrustCommand::MergeApprove => ui::finish(
+            "Would approve the effective shared squash message generator after human review; no changes made.",
+        ),
         TrustCommand::CommitApprove => {
             let config = EffectiveConfig::load(&repository)?;
             trust::generation_hash(&config.generation).context(
@@ -242,6 +256,7 @@ pub fn trust_dry_run(command: TrustCommand) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error when repository, configuration, or trust storage is invalid.
+#[allow(clippy::too_many_lines)] // One arm per trust subcommand; splitting hides the surface.
 pub fn trust_command(command: TrustCommand) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = git::repository(&cwd)?;
@@ -292,6 +307,52 @@ pub fn trust_command(command: TrustCommand) -> Result<()> {
         TrustCommand::PrReset => {
             trust::reset_pr_generation(&repository)?;
             ui::success("Reset PR generator trust for this repository.")?;
+        }
+        TrustCommand::MergeStatus => {
+            let config = EffectiveConfig::load(&repository)?;
+            if config.merge_generation.command.is_none() {
+                ui::info("No squash message generator is configured.")?;
+            } else if trust::is_merge_generation_trusted(&repository, &config.merge_generation)? {
+                ui::success("The effective squash message generator is trusted.")?;
+            } else {
+                ui::warning("The effective shared squash message generator is not trusted.")?;
+            }
+        }
+        TrustCommand::MergeReset => {
+            if trust::reset_merge_generation(&repository)? {
+                ui::success("Reset squash message generator trust for this repository.")?;
+            } else {
+                ui::info("No saved squash message generator trust existed for this repository.")?;
+            }
+        }
+        TrustCommand::MergeApprove => {
+            let config = EffectiveConfig::load(&repository)?;
+            if trust::is_merge_generation_trusted(&repository, &config.merge_generation)? {
+                ui::info("The effective squash message generator is already trusted.")?;
+                return Ok(());
+            }
+            ui::ensure_interactive(
+                "squash message generator approval requires an interactive human terminal",
+            )?;
+            ui::info("Effective shared squash message generation settings:")?;
+            if let Some(value) = &config.merge_generation.command {
+                ui::step(format!("command: {}", value.value))?;
+            }
+            if let Some(value) = &config.merge_generation.template {
+                ui::step(format!("template:\n{}", value.value))?;
+            }
+            let approved = ui::prompt_result(
+                confirm("Trust these settings for this repository?")
+                    .initial_value(false)
+                    .interact(),
+                "squash message generator approval cancelled",
+                "failed to read squash message generator approval",
+            )?;
+            if !approved {
+                return Err(ui::declined("squash message generator approval declined"));
+            }
+            trust::approve_merge_generation(&repository, &config.merge_generation)?;
+            ui::success("Approved squash message generator for this repository.")?;
         }
         TrustCommand::PrApprove => {
             let config = EffectiveConfig::load(&repository)?;

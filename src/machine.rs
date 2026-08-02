@@ -1088,7 +1088,10 @@ pub fn trust(command: &str, request_mode: bool, dry_run_flag: bool) -> Result<()
                 "command options are forbidden with --input-output json",
             );
         }
-        if matches!(command, "trust.status" | "trust.commit_status") {
+        if matches!(
+            command,
+            "trust.status" | "trust.commit_status" | "trust.merge_status"
+        ) {
             match protocol::read_optional_request::<EmptyInput>() {
                 Ok(r) if r.schema_version == 1 => (r.request_id, false),
                 Ok(r) => {
@@ -1180,9 +1183,68 @@ pub fn trust(command: &str, request_mode: bool, dry_run_flag: bool) -> Result<()
                 return emit(response, true);
             }
         }
-        _ => unreachable!(),
+        "trust.merge_status" => {
+            let c = EffectiveConfig::load(&repo)?;
+            let hash = trust::merge_generation_hash(&c.merge_generation);
+            let state = if c.merge_generation.command.is_none() {
+                "absent"
+            } else if hash.is_none() {
+                "user_controlled"
+            } else if trust::is_merge_generation_trusted(&repo, &c.merge_generation)? {
+                "trusted_shared"
+            } else {
+                "untrusted_shared"
+            };
+            let source = c
+                .merge_generation
+                .command
+                .as_ref()
+                .map(|v| format!("{:?}", v.source).to_lowercase());
+            json!({"outcome":"status","state":state,"identity":hash,"source":source})
+        }
+        "trust.merge_reset" => {
+            let changed = if dry {
+                false
+            } else {
+                trust::reset_merge_generation(&repo)?
+            };
+            json!({"outcome":if changed{"reset"}else if dry{"dry_run"}else{"already_reset"}})
+        }
+        "trust.merge_approve" => {
+            let c = EffectiveConfig::load(&repo)?;
+            let details = json!({"command":c.merge_generation.command.as_ref().map(|v|&v.value),"template":c.merge_generation.template.as_ref().map(|v|&v.value),"identity":trust::merge_generation_hash(&c.merge_generation)});
+            if dry {
+                json!({"outcome":"dry_run","candidate":details})
+            } else {
+                let mut response = protocol::failure(
+                    command,
+                    id,
+                    "trust.approval_required",
+                    "approval requires a manual human invocation",
+                );
+                response.context = json!({"candidate":details});
+                response.next_steps.push(crate::protocol::NextStep {
+                    action: "trust.approve_merge_generator".into(), description: "Review these settings and approve interactively".into(), mutation: "trust".into(), requires_human_approval: true,
+                    invocation: json!({"argv":["pando","trust","merge-approve"],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}),
+                });
+                return emit(response, true);
+            }
+        }
+        // `pr-*` trust leaves have no JSON implementation yet. Report that as a
+        // structured refusal rather than panicking on an unmatched leaf.
+        _ => {
+            return emit_err(
+                command,
+                id,
+                "trust.json_unsupported",
+                format!("{command} does not support structured output; run it interactively"),
+            );
+        }
     };
-    let effects = if matches!(command, "trust.reset" | "trust.commit_reset") {
+    let effects = if matches!(
+        command,
+        "trust.reset" | "trust.commit_reset" | "trust.merge_reset"
+    ) {
         vec![Effect {
             action: command.into(),
             attempted: !dry,
@@ -1435,11 +1497,14 @@ fn add_remove_retry(
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Each flag is an independent policy opt-out.
 struct MergeInput {
     #[serde(default)]
     no_rebase: bool,
     #[serde(default)]
     no_remove: bool,
+    #[serde(default)]
+    no_squash: bool,
     #[serde(default)]
     dry_run: bool,
 }
@@ -1448,10 +1513,21 @@ struct MergeInput {
 ///
 /// # Errors
 /// Returns an error when repository state cannot be inspected, mutation fails, or stdout cannot be written.
+///
+/// # Panics
+///
+/// Panics if a recorded lifecycle phase was not planned, which the effect list
+/// above makes impossible.
 #[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
-pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool) -> Result<()> {
+pub fn merge(
+    request_mode: bool,
+    no_rebase: bool,
+    no_remove: bool,
+    no_squash: bool,
+    dry_run: bool,
+) -> Result<()> {
     let (id, input) = if request_mode {
-        if no_rebase || no_remove || dry_run {
+        if no_rebase || no_remove || no_squash || dry_run {
             return emit_err(
                 "merge",
                 None,
@@ -1477,11 +1553,13 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
             MergeInput {
                 no_rebase,
                 no_remove,
+                no_squash,
                 dry_run,
             },
         )
     };
-    let plan = match crate::lifecycle::plan_merge(input.no_rebase, input.no_remove) {
+    let plan = match crate::lifecycle::plan_merge(input.no_rebase, input.no_remove, input.no_squash)
+    {
         Ok(plan) => plan,
         Err(e) => {
             let message = e.to_string();
@@ -1492,6 +1570,9 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
                     "merge.not_fast_forwardable"
                 }
                 crate::lifecycle::PreflightFailureKind::NothingToMerge => "merge.nothing_to_merge",
+                crate::lifecycle::PreflightFailureKind::SquashGeneratorMissing => {
+                    "merge.squash_generator_missing"
+                }
                 _ => "merge.blocked",
             };
             return emit_err("merge", id, code, message);
@@ -1512,6 +1593,14 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
             attempted: false,
             completed: false,
             details: Some(json!({"applicable":plan.needs_rebase || plan.context.rebase_active})),
+        },
+        Effect {
+            action: "squash".into(),
+            attempted: false,
+            completed: false,
+            details: Some(
+                json!({"applicable":plan.context.squashes,"commits":plan.context.squash_commits,"trusted":plan.context.squash_generator_trusted}),
+            ),
         },
         Effect {
             action: "pre_merge_hooks".into(),
@@ -1551,7 +1640,7 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
     let approval_blocked = if plan.context.cleanup_pending {
         !plan.context.pre_remove_hooks_trusted
     } else {
-        !plan.context.pre_merge_hooks_trusted
+        !plan.context.pre_merge_hooks_trusted || plan.squash.approval_required()
     };
     if input.dry_run {
         let mut response = protocol::success(
@@ -1567,15 +1656,29 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
         return emit(response, false);
     }
     if approval_blocked {
-        let mut response = protocol::failure(
-            "merge",
-            id,
-            "merge.hook_approval_required",
-            "configured lifecycle hooks are not trusted",
-        );
+        let squash_blocked = !plan.context.cleanup_pending && plan.squash.approval_required();
+        let mut response = if squash_blocked {
+            protocol::failure(
+                "merge",
+                id,
+                "merge.squash_approval_required",
+                "the shared squash message generator is not trusted",
+            )
+        } else {
+            protocol::failure(
+                "merge",
+                id,
+                "merge.hook_approval_required",
+                "configured lifecycle hooks are not trusted",
+            )
+        };
         response.context = context;
         response.effects = effects;
-        response.next_steps.push(protocol::NextStep { action:"trust.review".into(), description:"Review and explicitly trust the configured lifecycle hooks before retrying".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["pando","trust","show"],"working_directory":plan.context.topic_worktree}) });
+        response.next_steps.push(if squash_blocked {
+            protocol::NextStep { action:"trust.review_squash_generator".into(), description:"Review and explicitly trust the shared squash message generator before retrying, or retry with no_squash".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["pando","trust","merge-approve"],"working_directory":plan.context.topic_worktree}) }
+        } else {
+            protocol::NextStep { action:"trust.review".into(), description:"Review and explicitly trust the configured lifecycle hooks before retrying".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["pando","trust","show"],"working_directory":plan.context.topic_worktree}) }
+        });
         return emit(response, true);
     }
     let mut command = std::process::Command::new(std::env::current_exe()?);
@@ -1589,31 +1692,62 @@ pub fn merge(request_mode: bool, no_rebase: bool, no_remove: bool, dry_run: bool
     if input.no_remove {
         command.arg("--no-remove");
     }
+    if input.no_squash {
+        command.arg("--no-squash");
+    }
     let output = command.output()?;
     // The human lifecycle remains the single crash-recovery engine; its streams are captured here.
-    let after = crate::lifecycle::plan_merge(input.no_rebase, input.no_remove).ok();
+    let after =
+        crate::lifecycle::plan_merge(input.no_rebase, input.no_remove, input.no_squash).ok();
     let succeeded = output.status.success();
     let after_cleanup = after.as_ref().is_some_and(|p| p.context.cleanup_pending);
     let after_journaled = after.as_ref().is_some_and(|p| p.context.journaled);
     let after_rebase = after.as_ref().is_some_and(|p| p.context.rebase_active);
     // Record only phases proven by the journal/repository state. A subprocess failure
     // must never make later lifecycle phases look attempted merely because it exited.
-    effects[0].attempted = !plan.context.journaled;
-    effects[0].completed = plan.context.journaled || after_journaled || succeeded;
+    // The topic no longer needs squashing once it has been collapsed, so a
+    // replanned context that dropped the flag proves the phase ran.
+    let after_squashed = after.as_ref().is_some_and(|p| !p.context.squashes);
     let rebase_applicable = plan.needs_rebase || plan.context.rebase_active;
-    effects[1].attempted = rebase_applicable;
-    effects[1].completed = rebase_applicable && !after_rebase && (after_cleanup || succeeded);
-    effects[2].attempted = !plan.context.cleanup_pending && !after_rebase;
-    effects[2].completed = after_cleanup || succeeded;
-    effects[3].attempted = !plan.context.cleanup_pending && !after_rebase;
-    effects[3].completed = after_cleanup || succeeded;
+    let integration_attempted = !plan.context.cleanup_pending && !after_rebase;
     let cleanup_attempted = removes && (plan.context.cleanup_pending || after_cleanup || succeeded);
-    effects[4].attempted = cleanup_attempted;
-    effects[4].completed = removes && succeeded;
-    effects[5].attempted = cleanup_attempted;
-    effects[5].completed = removes && succeeded;
-    effects[6].attempted = removes && succeeded;
-    effects[6].completed = removes && succeeded;
+    // Address effects by action rather than index; the phase list grows.
+    let mut record = |action: &str, attempted: bool, completed: bool| {
+        let effect = effects
+            .iter_mut()
+            .find(|effect| effect.action == action)
+            .expect("every recorded phase is planned above");
+        effect.attempted = attempted;
+        effect.completed = completed;
+    };
+    record(
+        "journal",
+        !plan.context.journaled,
+        plan.context.journaled || after_journaled || succeeded,
+    );
+    record(
+        "rebase",
+        rebase_applicable,
+        rebase_applicable && !after_rebase && (after_cleanup || succeeded),
+    );
+    record(
+        "squash",
+        plan.context.squashes && integration_attempted,
+        plan.context.squashes && (after_squashed || after_cleanup || succeeded),
+    );
+    record(
+        "pre_merge_hooks",
+        integration_attempted,
+        after_cleanup || succeeded,
+    );
+    record(
+        "fast_forward_merge",
+        integration_attempted,
+        after_cleanup || succeeded,
+    );
+    record("pre_remove_hooks", cleanup_attempted, removes && succeeded);
+    record("remove_worktree", cleanup_attempted, removes && succeeded);
+    record("destination", removes && succeeded, removes && succeeded);
     let mut response = if succeeded {
         protocol::success(
             "merge",
@@ -1734,21 +1868,28 @@ pub fn install(request_mode: bool, dry_flag: bool) -> Result<()> {
 #[allow(clippy::too_many_lines)]
 pub fn help(command: &str) -> Value {
     let request_schema = match command {
-        "list" | "trust.status" | "trust.commit_status" => json!(schemars::schema_for!(
-            protocol::OptionalInputRequest<EmptyInput>
-        )),
+        "list" | "trust.status" | "trust.commit_status" | "trust.merge_status" => {
+            json!(schemars::schema_for!(
+                protocol::OptionalInputRequest<EmptyInput>
+            ))
+        }
         "switch" => json!(schemars::schema_for!(protocol::Request<SwitchInput>)),
         "create" => json!(schemars::schema_for!(protocol::Request<CreateInput>)),
         "get" => json!(schemars::schema_for!(protocol::Request<GetInput>)),
         "remove" => json!(schemars::schema_for!(protocol::Request<RemoveInput>)),
         "merge" => json!(schemars::schema_for!(protocol::Request<MergeInput>)),
-        "trust.reset" | "trust.commit_reset" | "trust.commit_approve" | "install" => {
+        "trust.reset"
+        | "trust.commit_reset"
+        | "trust.commit_approve"
+        | "trust.merge_reset"
+        | "trust.merge_approve"
+        | "install" => {
             json!(schemars::schema_for!(protocol::Request<DryRunInput>))
         }
         _ => Value::Null,
     };
     let (errors, actions): (&[&str], &[&str]) = match command {
-        "list" | "trust.status" | "trust.commit_status" => (
+        "list" | "trust.status" | "trust.commit_status" | "trust.merge_status" => (
             &[
                 "json.invalid_request",
                 "json.unsupported_schema_version",
@@ -1831,6 +1972,8 @@ pub fn help(command: &str) -> Value {
                 "merge.primary_forbidden",
                 "merge.dirty",
                 "merge.not_fast_forwardable",
+                "merge.squash_generator_missing",
+                "merge.squash_approval_required",
                 "merge.policy_conflict",
                 "merge.hook_approval_required",
                 "merge.rebase_conflict",
@@ -1841,6 +1984,7 @@ pub fn help(command: &str) -> Value {
             &[
                 "journal",
                 "rebase",
+                "squash",
                 "pre_merge_hooks",
                 "fast_forward_merge",
                 "pre_remove_hooks",
@@ -1848,9 +1992,10 @@ pub fn help(command: &str) -> Value {
                 "destination",
                 "trust.review",
                 "merge.retry",
+                "trust.review_squash_generator",
             ],
         ),
-        "trust.reset" | "trust.commit_reset" => (
+        "trust.reset" | "trust.commit_reset" | "trust.merge_reset" => (
             &[
                 "json.invalid_request",
                 "json.unsupported_schema_version",
@@ -1866,6 +2011,15 @@ pub fn help(command: &str) -> Value {
                 "trust.approval_required",
             ],
             &["trust.approve_commit_generator"],
+        ),
+        "trust.merge_approve" => (
+            &[
+                "json.invalid_request",
+                "json.unsupported_schema_version",
+                "repository.invalid",
+                "trust.approval_required",
+            ],
+            &["trust.approve_merge_generator"],
         ),
         "install" => (
             &[

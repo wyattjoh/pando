@@ -19,7 +19,7 @@ use crate::{
     render,
     setup::{self, HookOutcome},
     smart::approve_hooks,
-    trust, ui,
+    squash, trust, ui,
 };
 
 /// Stable, journal-aware merge state exposed to command adapters.
@@ -40,6 +40,13 @@ pub struct MergeContext {
     pub cleanup_pending: bool,
     pub journaled: bool,
     pub rebase_active: bool,
+    /// The topic will be collapsed into one generated-message commit.
+    pub squashes: bool,
+    /// Commits between the target and the topic's `HEAD` at plan time. When a
+    /// rebase is still pending this previews what the squash would collapse.
+    pub squash_commits: usize,
+    pub squash_generator_configured: bool,
+    pub squash_generator_trusted: bool,
     pub pre_merge_hooks_trusted: bool,
     pub pre_remove_hooks_trusted: bool,
 }
@@ -49,6 +56,7 @@ pub struct MergeContext {
 pub enum MergePhase {
     Planned,
     Rebase,
+    Squash,
     Validation,
     Integration,
     Cleanup,
@@ -59,6 +67,7 @@ pub enum MergePhase {
 pub struct MergePolicy {
     pub no_rebase: bool,
     pub no_remove: bool,
+    pub no_squash: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -71,6 +80,7 @@ pub enum PreflightFailureKind {
     UnknownTarget,
     NothingToMerge,
     PolicyConflict,
+    SquashGeneratorMissing,
     Dirty,
     NotFastForwardable,
     Blocked,
@@ -109,6 +119,7 @@ pub struct MergePlan {
     pub context: MergeContext,
     pub config: EffectiveConfig,
     pub needs_rebase: bool,
+    pub squash: squash::SquashPlan,
 }
 
 /// Performs all lifecycle checks without changing Git, trust, hooks, or the journal.
@@ -116,7 +127,7 @@ pub struct MergePlan {
 /// # Errors
 /// Returns an error for an invalid or blocked lifecycle state.
 #[allow(clippy::too_many_lines)]
-pub fn plan_merge(no_rebase: bool, no_remove: bool) -> PreflightResult<MergePlan> {
+pub fn plan_merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> PreflightResult<MergePlan> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = git::repository(&cwd)?;
     let primary = repository
@@ -137,7 +148,10 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool) -> PreflightResult<MergePlan
             )
             .into());
         }
-        if state.no_rebase != no_rebase || state.no_remove != no_remove {
+        if state.no_rebase != no_rebase
+            || state.no_remove != no_remove
+            || state.no_squash != no_squash
+        {
             return Err(preflight(
                 PreflightFailureKind::PolicyConflict,
                 "merge retry flags conflict with the journaled lifecycle policy; rerun with the original flags",
@@ -198,10 +212,29 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool) -> PreflightResult<MergePlan
             ),
         ));
     }
+    // Squashing is off the table once the branch has already been collapsed,
+    // and during cleanup the integration is behind us entirely.
+    let squash_enabled =
+        !no_squash && !cleanup_pending && !journal.as_ref().is_some_and(|state| state.squashed);
+    let squash = squash::plan(
+        &repository,
+        &config,
+        &target,
+        squash_enabled,
+        !rebase_active,
+    )?;
+    if squash.applicable && !squash.generator_configured {
+        return Err(preflight(
+            PreflightFailureKind::SquashGeneratorMissing,
+            "no squash message generator is configured; set merge.generation.command or commit.generation.command, or rerun with --no-squash",
+        ));
+    }
     let phase = if cleanup_pending {
         MergePhase::Cleanup
     } else if rebase_active {
         MergePhase::Rebase
+    } else if squash.applicable {
+        MergePhase::Squash
     } else {
         MergePhase::Planned
     };
@@ -223,6 +256,7 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool) -> PreflightResult<MergePlan
         policy: MergePolicy {
             no_rebase,
             no_remove,
+            no_squash,
         },
         source_commit,
         target_commit,
@@ -232,6 +266,10 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool) -> PreflightResult<MergePlan
         cleanup_pending,
         journaled: journal.is_some(),
         rebase_active,
+        squashes: squash.applicable,
+        squash_commits: squash.commit_count,
+        squash_generator_configured: squash.generator_configured,
+        squash_generator_trusted: squash.generator_trusted,
         pre_merge_hooks_trusted,
         pre_remove_hooks_trusted,
     };
@@ -240,11 +278,13 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool) -> PreflightResult<MergePlan
         context,
         config,
         needs_rebase,
+        squash,
     })
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // A journal records pinned policy facts, not state switches.
 struct MergeJournal {
     version: u8,
     topic_path: PathBuf,
@@ -253,6 +293,11 @@ struct MergeJournal {
     target_branch: String,
     no_rebase: bool,
     no_remove: bool,
+    #[serde(default)]
+    no_squash: bool,
+    /// The topic has already been collapsed, so a retry must not squash again.
+    #[serde(default)]
+    squashed: bool,
     #[serde(default)]
     cleanup_pending: bool,
     #[serde(default)]
@@ -364,8 +409,21 @@ pub fn remove_dry_run(branches: &[String], force: bool) -> Result<()> {
 ///
 /// # Errors
 /// Returns an error when merge preflight fails or output cannot be rendered.
-pub fn merge_dry_run(no_rebase: bool, no_remove: bool) -> Result<()> {
-    let plan = plan_merge(no_rebase, no_remove)?;
+pub fn merge_dry_run(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
+    let plan = plan_merge(no_rebase, no_remove, no_squash)?;
+    if plan.squash.applicable {
+        ui::info(if plan.squash.commit_count == 0 {
+            format!(
+                "Would squash the topic into a single generated-message commit after the rebase onto {}.",
+                plan.context.target_branch
+            )
+        } else {
+            format!(
+                "Would squash {} commits into a single generated-message commit.",
+                plan.squash.commit_count
+            )
+        })?;
+    }
     let follow_up = if plan.context.in_place {
         format!(
             " and switch the primary worktree to {}",
@@ -388,7 +446,7 @@ pub fn merge_dry_run(no_rebase: bool, no_remove: bool) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error when merge preconditions, hooks, Git execution, or cleanup fails.
-pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
+pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = git::repository(&cwd)?;
     let primary = repository
@@ -417,7 +475,10 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
                 "a different lifecycle operation is recorded for this topic worktree; inspect its journal before retrying"
             );
         }
-        if existing.no_rebase != no_rebase || existing.no_remove != no_remove {
+        if existing.no_rebase != no_rebase
+            || existing.no_remove != no_remove
+            || existing.no_squash != no_squash
+        {
             bail!(
                 "merge retry flags conflict with the journaled lifecycle policy; rerun with the original flags"
             );
@@ -444,6 +505,12 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
     if let Some(state) = journal.as_ref().filter(|state| state.cleanup_pending) {
         return cleanup_merge(&repository, state);
     }
+    // Refuse an impossible squash before the journal, the rebase, or any other
+    // mutation. Discovering a missing or untrusted generator only after the
+    // rebase has landed would leave work to recover for no reason.
+    if !no_squash && !journal.as_ref().is_some_and(|state| state.squashed) {
+        squash::ensure_ready(&repository, &config, &target, !rebase_active)?;
+    }
     if journal.is_none() {
         let state = MergeJournal {
             version: 1,
@@ -453,6 +520,8 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
             target_branch: target.clone(),
             no_rebase,
             no_remove,
+            no_squash,
+            squashed: false,
             cleanup_pending: false,
             validated_source: None,
             validated_target: None,
@@ -484,9 +553,26 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
             |animated| git::rebase_onto(&repository.current().path, &target, !animated),
         )?)?;
     }
+    let mut state = journal.context("lifecycle journal was not recorded before integration")?;
+    // Squash after the rebase so the collapse starts from the replayed history,
+    // and before validation so the pre-merge hooks see the commit that actually
+    // lands on the target.
+    if !state.no_squash && !state.squashed {
+        let plan = squash::plan(&repository, &config, &target, true, true)?;
+        if plan.applicable {
+            report(&ui::run_timed(
+                true,
+                &format!("Squashing {} commits...", plan.commit_count),
+                "Squashed the topic into a single commit",
+                "Failed to squash the topic",
+                |_| squash::apply(&repository, &config, &target),
+            )?)?;
+            state.squashed = true;
+            write_journal(&repository.common_dir, &state)?;
+        }
+    }
     let refreshed = git::head_commit(&repository.current().path)?;
     let target_commit = git::branch_commit(primary, &target)?;
-    let mut state = journal.context("lifecycle journal was not recorded before integration")?;
     if state.validated_source.as_deref() != Some(&refreshed)
         || state.validated_target.as_deref() != Some(&target_commit)
     {
@@ -503,7 +589,7 @@ pub fn merge(no_rebase: bool, no_remove: bool) -> Result<()> {
             );
         }
         if git::head_commit(&repository.current().path)? != refreshed {
-            return merge(no_rebase, no_remove);
+            return merge(no_rebase, no_remove, no_squash);
         }
         state.validated_source = Some(refreshed.clone());
         state.validated_target = Some(target_commit);
@@ -585,7 +671,11 @@ fn merge_summary(state: &MergeJournal, worktree_outcome: MergeWorktreeOutcome) -
     };
     format!(
         "{} {} {} {}{}",
-        ui::success_style().apply_to("Merged"),
+        ui::success_style().apply_to(if state.squashed {
+            "Squashed and merged"
+        } else {
+            "Merged"
+        }),
         ui::worktree_data_style().apply_to(&state.source_branch),
         ui::success_style().apply_to("into"),
         ui::worktree_data_style().apply_to(&state.target_branch),

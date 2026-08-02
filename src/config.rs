@@ -114,12 +114,27 @@ struct GlobalConfig {
     #[serde(default)]
     commit: Option<CommitConfig>,
     #[serde(default)]
+    merge: Option<MergeConfig>,
+    #[serde(default)]
     pr: Option<PrConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommitConfig {
+    #[serde(default)]
+    generation: Option<GenerationConfig>,
+}
+
+/// Squash policy and the generator that writes the squashed commit's message.
+///
+/// `squash` is legal in every layer for the same reason `worktrees.base` is: a
+/// project may commit its integration convention while a clone overrides it.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergeConfig {
+    #[serde(default)]
+    squash: Option<bool>,
     #[serde(default)]
     generation: Option<GenerationConfig>,
 }
@@ -163,6 +178,8 @@ struct SharedConfig {
     #[serde(default)]
     commit: Option<CommitConfig>,
     #[serde(default)]
+    merge: Option<MergeConfig>,
+    #[serde(default)]
     pr: Option<PrConfig>,
 }
 
@@ -175,6 +192,8 @@ struct LocalConfig {
     hooks: Option<HooksConfig>,
     #[serde(default)]
     commit: Option<CommitConfig>,
+    #[serde(default)]
+    merge: Option<MergeConfig>,
     #[serde(default)]
     pr: Option<PrConfig>,
 }
@@ -208,6 +227,11 @@ pub struct EffectiveConfig {
     pub pre_merge: Vec<HookStep>,
     pub pre_remove: Vec<HookStep>,
     pub generation: EffectiveGeneration,
+    /// Whether `pando merge` collapses the topic into one commit. Defaults to true.
+    pub squash: bool,
+    /// Generator for the squashed commit's message. Its `command` falls back to
+    /// [`Self::generation`]'s so a single configured generator covers both.
+    pub merge_generation: EffectiveGeneration,
     pub pr_provider: PrProvider,
     pub pr_generation: EffectiveGeneration,
     pub pull_request_template: Option<GenerationValue>,
@@ -261,13 +285,14 @@ impl EffectiveConfig {
             .commit
             .as_ref()
             .and_then(|commit| commit.generation.clone());
+        let shared_merge = shared.merge.clone().unwrap_or_default();
         let shared_pr_provider = shared.pr.as_ref().and_then(|pr| pr.provider);
         let shared_pr_generation = shared.pr.as_ref().and_then(|pr| pr.generation.clone());
         let shared_pr_template = shared
             .pr
             .as_ref()
             .and_then(|pr| pr.pull_request_template.clone());
-        validate_generation(shared_generation.as_ref(), &shared_path)?;
+        validate_generation("commit", shared_generation.as_ref(), &shared_path)?;
 
         let local_path = repository
             .primary
@@ -294,17 +319,19 @@ impl EffectiveConfig {
             .commit
             .as_ref()
             .and_then(|commit| commit.generation.clone());
+        let global_merge = global.merge.clone().unwrap_or_default();
         let global_pr_provider = global.pr.as_ref().and_then(|pr| pr.provider);
         let global_pr_generation = global.pr.as_ref().and_then(|pr| pr.generation.clone());
         let global_pr_template = global
             .pr
             .as_ref()
             .and_then(|pr| pr.pull_request_template.clone());
-        validate_generation(global_generation.as_ref(), &global_path)?;
+        validate_generation("commit", global_generation.as_ref(), &global_path)?;
         let local_generation = local
             .commit
             .as_ref()
             .and_then(|commit| commit.generation.clone());
+        let local_merge = local.merge.clone().unwrap_or_default();
         let local_pr_provider = local.pr.as_ref().and_then(|pr| pr.provider);
         let local_pr_generation = local.pr.as_ref().and_then(|pr| pr.generation.clone());
         let local_pr_template = local
@@ -312,12 +339,17 @@ impl EffectiveConfig {
             .as_ref()
             .and_then(|pr| pr.pull_request_template.clone());
         if let Some(path) = &local_path {
-            validate_generation(local_generation.as_ref(), path)?;
+            validate_generation("commit", local_generation.as_ref(), path)?;
             validate_pull_request_template(local_pr_template.as_deref(), path)?;
         }
 
-        validate_generation(shared_pr_generation.as_ref(), &shared_path)?;
-        validate_generation(global_pr_generation.as_ref(), &global_path)?;
+        validate_generation("pr", shared_pr_generation.as_ref(), &shared_path)?;
+        validate_generation("pr", global_pr_generation.as_ref(), &global_path)?;
+        validate_generation("merge", shared_merge.generation.as_ref(), &shared_path)?;
+        validate_generation("merge", global_merge.generation.as_ref(), &global_path)?;
+        if let Some(path) = &local_path {
+            validate_generation("merge", local_merge.generation.as_ref(), path)?;
+        }
         validate_pull_request_template(shared_pr_template.as_deref(), &shared_path)?;
         validate_pull_request_template(global_pr_template.as_deref(), &global_path)?;
         let generation = EffectiveGeneration {
@@ -382,6 +414,44 @@ impl EffectiveConfig {
             post_create: combine(&shared_hooks, &local_hooks, HookPhase::PostCreate),
             pre_merge: combine(&shared_hooks, &local_hooks, HookPhase::PreMerge),
             pre_remove: combine(&shared_hooks, &local_hooks, HookPhase::PreRemove),
+            squash: local_merge
+                .squash
+                .or(shared_merge.squash)
+                .or(global_merge.squash)
+                .unwrap_or(true),
+            merge_generation: EffectiveGeneration {
+                // The command falls back to the commit generator so one
+                // configured process writes both kinds of message.
+                command: resolve_generation_value(
+                    local_merge
+                        .generation
+                        .as_ref()
+                        .and_then(|v| v.command.clone()),
+                    shared_merge
+                        .generation
+                        .as_ref()
+                        .and_then(|v| v.command.clone()),
+                    global_merge
+                        .generation
+                        .as_ref()
+                        .and_then(|v| v.command.clone()),
+                )
+                .or_else(|| generation.command.clone()),
+                template: resolve_generation_value(
+                    local_merge
+                        .generation
+                        .as_ref()
+                        .and_then(|v| v.template.clone()),
+                    shared_merge
+                        .generation
+                        .as_ref()
+                        .and_then(|v| v.template.clone()),
+                    global_merge
+                        .generation
+                        .as_ref()
+                        .and_then(|v| v.template.clone()),
+                ),
+            },
             generation,
             pr_provider: resolve_pr_provider(
                 local_pr_provider,
@@ -477,7 +547,11 @@ fn combine(shared: &HooksConfig, local: &HooksConfig, phase: HookPhase) -> Vec<H
     steps
 }
 
-fn validate_generation(generation: Option<&GenerationConfig>, source_hint: &Path) -> Result<()> {
+fn validate_generation(
+    section: &str,
+    generation: Option<&GenerationConfig>,
+    source_hint: &Path,
+) -> Result<()> {
     let Some(generation) = generation else {
         return Ok(());
     };
@@ -487,7 +561,7 @@ fn validate_generation(generation: Option<&GenerationConfig>, source_hint: &Path
     ] {
         if value.is_some_and(|value| value.trim().is_empty()) {
             bail!(
-                "commit.generation.{name} cannot be empty while loading configuration near {}",
+                "{section}.generation.{name} cannot be empty while loading configuration near {}",
                 source_hint.display()
             );
         }

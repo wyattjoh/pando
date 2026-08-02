@@ -269,6 +269,8 @@ pando trust commit-reset
 
 `commit-approve` is interactive, default-negative, and records trust without staging or committing. `commit-reset` is idempotent and does not alter post-create approval. Supplying `-m`/`--message` bypasses all generator configuration, template validation, and generator trust.
 
+The squash-message generator has its own namespace, so approving one generator never silently approves the other: `pando trust merge-status`, `merge-approve`, and `merge-reset` behave the same way for `merge.generation`.
+
 ### Structured commit I/O
 
 Use ordinary argv with a structured response, or a strict versioned request on stdin:
@@ -289,7 +291,22 @@ JSON mode emits exactly one document on stdout and nothing on stderr. Errors are
 
 `pando pr create` requires `pr.generation.command` only when `--title` or `--description` is omitted. Supplying both explicit values bypasses generator configuration and trust checks. Missing generator configuration is rejected before any dirty-worktree commit, skip, or yolo handling. The PR provider defaults to `auto`: GitHub remotes use `gh`, while other forge hosts use a matching `tea` login for Gitea or Forgejo. Set `pr.provider` to `github` or `tea` in global, shared, or local configuration to override detection; local wins over shared, then global. The Tea adapter represents draft PRs with the server-default `WIP:` title prefix for compatibility across Tea versions. When no target branch is configured, PR and merge operations fall back to the fetched `origin/HEAD`, then local `main`, then local `master`.
 
-`pando merge [--no-rebase] [--no-remove] [--yolo]` integrates the current clean topic into the configured target checked out in the primary worktree using `git merge --ff-only`. When no target is configured, it falls back to the already-fetched `origin/HEAD` branch, then local `main`, then local `master`, without fetching. A diverged topic rebases by default. `--yolo` first runs the equivalent of `pando commit --stage-all`, using the configured commit-message generator, and then merges if the commit succeeds. It is available only with human output and cannot be combined with `--dry-run`. Phase-specific `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries; the journal pins recovery state through conflicts and cleanup retries.
+`pando merge [--no-rebase] [--no-remove] [--no-squash] [--yolo]` integrates the current clean topic into the configured target checked out in the primary worktree using `git merge --ff-only`. When no target is configured, it falls back to the already-fetched `origin/HEAD` branch, then local `main`, then local `master`, without fetching. A diverged topic rebases by default. `--yolo` first runs the equivalent of `pando commit --stage-all`, using the configured commit-message generator, and then merges if the commit succeeds. It is available only with human output and cannot be combined with `--dry-run`. Phase-specific `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries; the journal pins recovery state through conflicts and cleanup retries.
+
+### Squashing
+
+By default `merge` collapses the topic into a single commit before it fast-forwards, after any rebase, and writes that commit's message with a configured generator. A topic that is already one commit is left alone, message included. `--no-squash` merges the commits as they are, and `merge.squash: false` makes that the default. Because the squash runs after the rebase, the generator only ever sees the topic's own replayed changes, never the target's.
+
+The message comes from `merge.generation.command`, falling back to `commit.generation.command` so one configured generator serves both. `merge.generation.template` overrides the built-in prompt and receives `branch`, `target`, `repo`, `commit_count`, `commits` (the full messages being collapsed), `git_diff`, and `git_diff_stat`, all scoped to the range between the target and the topic. Squashing a multi-commit topic with no generator configured is an error naming both fixes rather than a silent fall-through.
+
+`merge.squash` and `merge.generation` are legal in all three configuration layers, resolving local over shared over global. A generator that comes from committed `.pando.yaml` needs approval before it runs: check it with `pando trust merge-status` and grant it with `pando trust merge-approve`.
+
+```yaml
+merge:
+  squash: true
+  generation:
+    command: my-message-generator
+```
 
 `merge` also works from the primary worktree when a topic branch is checked out there directly rather than in a linked worktree. It rebases and fast-forwards as usual, then switches the primary worktree to the target branch and keeps the topic branch. There is nothing to remove, so `pre-remove` hooks do not run and no destination is written to stdout. Running it from the primary worktree while the target branch is already checked out fails.
 

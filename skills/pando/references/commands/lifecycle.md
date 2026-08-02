@@ -43,6 +43,7 @@ Usage: pando merge [OPTIONS]
 |---|---|
 | `--no-rebase` | Disable the default rebase when the topic has diverged from its target |
 | `--no-remove` | Keep the topic worktree/branch after a successful merge |
+| `--no-squash` | Merge the topic's commits as they are instead of collapsing them into one |
 | `--yolo` | Stage and commit every change with the configured generator before merging |
 
 Integrates the current clean topic into the resolved target branch
@@ -52,6 +53,26 @@ of `pando commit --stage-all` and continues only if the commit succeeds.
 It supports human output only and conflicts with `--dry-run`. Phase-specific
 `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries (see
 `../config.md`).
+
+### Squashing (default)
+
+`merge` collapses the topic into one commit **after** any rebase and
+**before** the fast-forward, and generates that commit's message. A topic that
+is already a single commit is left untouched, message included. `--no-squash`
+opts out for one invocation; `merge.squash: false` opts out by default.
+
+The message generator resolves from `merge.generation.command`, falling back
+to `commit.generation.command`. Squashing a multi-commit topic with neither
+configured fails rather than merging unsquashed; JSON reports
+`merge.squash_generator_missing`. A generator that comes from committed
+`.pando.yaml` must be approved first (`pando trust merge-approve`); until then
+JSON answers `merge.squash_approval_required`. Both refusals are **preflight**:
+they happen before the journal, the rebase, and every other mutation, so a
+blocked squash never leaves a rebased topic to recover. See `../config.md`
+for the template variables.
+
+The lifecycle journal pins `no_squash` alongside the other policy flags and
+records the collapse, so a retry after a later failure never squashes twice.
 
 ### In-place merges from the primary worktree
 
@@ -77,12 +98,12 @@ worktrees:
 
 Crash-recoverable and safe to re-invoke: before its first Git mutation,
 `merge` records the topic worktree/branch, target branch, and initial
-rebase/cleanup policy under Git's common state directory. A later invocation
+rebase/squash/cleanup policy under Git's common state directory. A later invocation
 resumes the same operation with the pinned target/policy, including continuing
 through rebase conflicts or retrying cleanup after a completed integration.
 
-Human mode runs the rebase, rebase continuation, and fast-forward merge under
-timed progress indicators and renders Git's own output as terminal UI steps on
+Human mode runs the rebase, rebase continuation, squash, and fast-forward
+merge under timed progress indicators and renders Git's own output as terminal UI steps on
 stderr rather than streaming it raw. A failure folds the same Git output into
 the reported error, so rebase conflicts stay readable. The continuation
 neutralizes `GIT_EDITOR`, keeping the commit message Git already recorded.
@@ -98,6 +119,7 @@ Both JSON modes are supported; agents use versioned request mode.
 pando merge                    # (inferred)
 pando merge --no-rebase        # (inferred)
 pando merge --no-remove        # (inferred)
+pando merge --no-squash        # (inferred) keep the topic's individual commits
 pando merge --yolo             # commit every change, then merge
 ```
 No literal example ships in README.md for `merge` — only prose; flag
@@ -106,4 +128,4 @@ invocations above are marked **(inferred)**.
 
 ## Structured JSON contract
 
-Agents use request mode. `remove` input contains `branches` and `dry_run`. Force is an argv-only authorization: pass `--force` explicitly after user approval. Never put `force` in the request document. `merge` input contains `no_rebase`, `no_remove`, and `dry_run`. Request mode rejects mixed command arguments and flags. Results distinguish dry runs, no-ops, removals, retained topics, in-place merges (`plan: "in_place"`, context `in_place: true`), and completed cleanup. Effects identify hook, Git, and target worktree actions; failures use stable codes with diagnostics and recovery context. Dry runs execute no hooks or mutations. Exact-leaf JSON help exposes runtime schemas and the error/action catalogs.
+Agents use request mode. `remove` input contains `branches` and `dry_run`. Force is an argv-only authorization: pass `--force` explicitly after user approval. Never put `force` in the request document. `merge` input contains `no_rebase`, `no_remove`, `no_squash`, and `dry_run`; squashing is on by default in JSON exactly as it is for humans. Request mode rejects mixed command arguments and flags. Results distinguish dry runs, no-ops, removals, retained topics, in-place merges (`plan: "in_place"`, context `in_place: true`), and completed cleanup. Effects identify hook, Git, and target worktree actions, including a `squash` effect whose details carry `applicable`, `commits`, and `trusted`; failures use stable codes with diagnostics and recovery context. Dry runs execute no hooks or mutations. Exact-leaf JSON help exposes runtime schemas and the error/action catalogs.

@@ -4,11 +4,11 @@ All three files are strict YAML (`deny_unknown_fields` on every struct):
 malformed files, duplicate/unknown keys, wrong types, empty `command`
 strings, and empty `name` strings are all hard errors with file context.
 
-| Layer | Path | Can set placement (`worktrees.root`) | Can set `worktrees.default-sort` | Can set `worktrees.base` | Can set hooks | Can set `commit.generation.*` | Can set `pr.*` |
-|---|---|---|---|---|---|---|---|
-| Global | `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml` | yes | yes | yes | **no** | yes | yes |
-| Shared | `.pando.yaml` in the **invoking** worktree | **no** (only `target-branch` and `base`) | **no** | yes | yes | yes (untrusted, needs `pando trust commit-approve`) | yes |
-| Local | `.pando.local.yaml` in the **primary** worktree | yes | yes | yes | yes | yes | yes |
+| Layer | Path | Can set placement (`worktrees.root`) | Can set `worktrees.default-sort` | Can set `worktrees.base` | Can set hooks | Can set `commit.generation.*` | Can set `merge.*` | Can set `pr.*` |
+|---|---|---|---|---|---|---|---|---|
+| Global | `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml` | yes | yes | yes | **no** | yes | yes | yes |
+| Shared | `.pando.yaml` in the **invoking** worktree | **no** (only `target-branch` and `base`) | **no** | yes | yes | yes (untrusted, needs `pando trust commit-approve`) | yes (untrusted, needs `pando trust merge-approve`) | yes |
+| Local | `.pando.local.yaml` in the **primary** worktree | yes | yes | yes | yes | yes | yes | yes |
 
 `pando install` adds a commented scaffold to the global YAML file. It
 never enables a setting or edits existing user configuration. The scaffold is
@@ -37,6 +37,17 @@ May also set the commit generator globally:
 ```yaml
 commit:
   generation:
+    command: pi --no-session --no-tools
+```
+
+May also set the merge squash policy and its message generator:
+
+```yaml
+merge:
+  # Collapse the topic into one commit before merging. Defaults to true.
+  squash: true
+  generation:
+    # Falls back to commit.generation.command when omitted.
     command: pi --no-session --no-tools
 ```
 
@@ -198,6 +209,11 @@ pr:
   committed shared file cannot set this personal interface preference.
 - **Commit generation** (`command` and `template` resolve independently):
   local, then shared, then global; the first layer that sets the value wins.
+- **Merge squash and generation** (`merge.squash`, `merge.generation.command`,
+  `merge.generation.template`, each resolving independently): local, then
+  shared, then global. `merge.squash` defaults to `true`.
+  `merge.generation.command` falls back to the resolved
+  `commit.generation.command` when no layer sets it.
 - **PR provider**: local, then shared, then global, defaulting to `auto`.
 
 ## Commit-generation MiniJinja template
@@ -205,3 +221,12 @@ pr:
 Available variables: `git_diff`, `git_diff_stat`, `branch`, `repo`,
 `recent_commits` (up to ten newest subjects). See
 `commands/commit.md` for the full behavior and a worked template.
+
+## Squash-generation MiniJinja template
+
+`merge.generation.template` is a separate prompt with its own variables, all
+scoped to the range between the target branch and the topic's `HEAD`:
+`branch`, `target`, `repo`, `commit_count`, `commits` (the full messages of
+the commits being collapsed, oldest first), `git_diff`, and `git_diff_stat`.
+The built-in prompt asks for a conventional-commit message describing the
+branch as one coherent change. See `commands/lifecycle.md`.

@@ -25,6 +25,8 @@ struct TrustFile {
     commit_generators: BTreeMap<String, String>,
     #[serde(default)]
     pr_generators: BTreeMap<String, String>,
+    #[serde(default)]
+    merge_generators: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -236,6 +238,65 @@ pub fn reset_pr_generation(repository: &Repository) -> Result<bool> {
     let mut trust = read_trust()?;
     let removed = trust
         .pr_generators
+        .remove(&repository_key(repository)?)
+        .is_some();
+    if removed {
+        write_trust(&trust)?;
+    }
+    Ok(removed)
+}
+
+/// Returns the approval identity for the effective shared squash-message generator.
+///
+/// `None` means every effective value is user-controlled, so no approval applies.
+#[must_use]
+pub fn merge_generation_hash(generation: &EffectiveGeneration) -> Option<String> {
+    generation_hash_named(generation, b"pando-merge-generation-v1")
+}
+
+/// Reports whether the effective shared squash-message generator is approved.
+///
+/// # Errors
+/// Returns an error when repository identity or trust storage cannot be resolved.
+pub fn is_merge_generation_trusted(
+    repository: &Repository,
+    generation: &EffectiveGeneration,
+) -> Result<bool> {
+    let Some(hash) = merge_generation_hash(generation) else {
+        return Ok(true);
+    };
+    Ok(read_trust()?
+        .merge_generators
+        .get(&repository_key(repository)?)
+        == Some(&hash))
+}
+
+/// Approves shared squash-message generation settings.
+///
+/// # Errors
+/// Returns an error when trust storage cannot be updated.
+pub fn approve_merge_generation(
+    repository: &Repository,
+    generation: &EffectiveGeneration,
+) -> Result<()> {
+    let Some(hash) = merge_generation_hash(generation) else {
+        return Ok(());
+    };
+    let mut trust = read_trust()?;
+    trust
+        .merge_generators
+        .insert(repository_key(repository)?, hash);
+    write_trust(&trust)
+}
+
+/// Resets squash-message generator approval.
+///
+/// # Errors
+/// Returns an error when trust storage cannot be updated.
+pub fn reset_merge_generation(repository: &Repository) -> Result<bool> {
+    let mut trust = read_trust()?;
+    let removed = trust
+        .merge_generators
         .remove(&repository_key(repository)?)
         .is_some();
     if removed {

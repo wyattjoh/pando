@@ -90,6 +90,9 @@ enum Commands {
         no_rebase: bool,
         #[arg(long)]
         no_remove: bool,
+        /// Merge the topic's commits as they are instead of squashing them into one.
+        #[arg(long)]
+        no_squash: bool,
         /// Stage and commit all changes before merging.
         #[arg(long, conflicts_with = "dry_run")]
         yolo: bool,
@@ -339,20 +342,21 @@ fn run(cli: Cli) -> Result<()> {
             branches,
         } => pando::lifecycle::remove_dry_run(&branches, force),
         Commands::Merge {
-            no_rebase: _,
-            no_remove: _,
             yolo: true,
             dry_run: false,
+            ..
         } if json => anyhow::bail!("--yolo only supports human output"),
         Commands::Merge {
             no_rebase,
             no_remove,
+            no_squash,
             yolo: false,
             dry_run,
-        } if json => machine::merge(request_mode, no_rebase, no_remove, dry_run),
+        } if json => machine::merge(request_mode, no_rebase, no_remove, no_squash, dry_run),
         Commands::Merge {
             no_rebase,
             no_remove,
+            no_squash,
             yolo: true,
             dry_run: false,
         } => {
@@ -363,20 +367,22 @@ fn run(cli: Cli) -> Result<()> {
                 json: false,
                 request_mode: false,
             })?;
-            pando::lifecycle::merge(no_rebase, no_remove)
+            pando::lifecycle::merge(no_rebase, no_remove, no_squash)
         }
         Commands::Merge {
             no_rebase,
             no_remove,
+            no_squash,
             yolo: false,
             dry_run: false,
-        } => pando::lifecycle::merge(no_rebase, no_remove),
+        } => pando::lifecycle::merge(no_rebase, no_remove, no_squash),
         Commands::Merge {
             no_rebase,
             no_remove,
+            no_squash,
             yolo: false,
             dry_run: true,
-        } => pando::lifecycle::merge_dry_run(no_rebase, no_remove),
+        } => pando::lifecycle::merge_dry_run(no_rebase, no_remove, no_squash),
         Commands::Merge {
             yolo: true,
             dry_run: true,
@@ -392,6 +398,9 @@ fn run(cli: Cli) -> Result<()> {
                 TrustCommand::PrStatus => "trust.pr_status",
                 TrustCommand::PrReset => "trust.pr_reset",
                 TrustCommand::PrApprove => "trust.pr_approve",
+                TrustCommand::MergeStatus => "trust.merge_status",
+                TrustCommand::MergeReset => "trust.merge_reset",
+                TrustCommand::MergeApprove => "trust.merge_approve",
             };
             machine::trust(id, request_mode, dry_run)
         }
@@ -413,6 +422,9 @@ fn run(cli: Cli) -> Result<()> {
                 TrustCommand::PrStatus => "PR generator trust status checked.",
                 TrustCommand::PrReset => "PR generator trust reset checked.",
                 TrustCommand::PrApprove => "PR generator trust approval checked.",
+                TrustCommand::MergeStatus => "Squash message generator trust status checked.",
+                TrustCommand::MergeReset => "Squash message generator trust reset checked.",
+                TrustCommand::MergeApprove => "Squash message generator trust approval checked.",
             };
             ui::finish(ui::muted_style().apply_to(summary))
         }

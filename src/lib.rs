@@ -11,6 +11,7 @@ pub mod protocol;
 pub mod render;
 pub mod setup;
 pub mod smart;
+pub mod squash;
 pub mod trust;
 pub mod ui;
 
