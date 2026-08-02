@@ -612,7 +612,7 @@ impl PickerViewState {
     fn worktree(choices: &[&Worktree], sort: SortMode) -> Self {
         let rows: Vec<Row> = choices.iter().copied().map(Row::from_worktree).collect();
         let row_refs: Vec<&Row> = rows.iter().collect();
-        let labels = render::menu_labels(&row_refs);
+        let labels = render::menu_labels(&row_refs, sort);
         let mut items = choices
             .iter()
             .enumerate()
@@ -636,7 +636,7 @@ impl PickerViewState {
             .map(|record| Row::from_branch(record, &repository.worktrees))
             .collect();
         let row_refs: Vec<&Row> = rows.iter().collect();
-        let labels = render::menu_labels(&row_refs);
+        let labels = render::menu_labels(&row_refs, sort);
         let mut items = branches
             .iter()
             .zip(labels)
@@ -659,6 +659,10 @@ impl PickerViewState {
 
     fn resort(&mut self, sort: SortMode) {
         let row_refs: Vec<&Row> = self.rows.iter().collect();
+        let labels = render::menu_labels(&row_refs, sort);
+        for (item, label) in self.items.iter_mut().zip(labels) {
+            item.label = label;
+        }
         let mut order = sorted_row_indices(&row_refs, sort);
         order.push(self.items.len() - 1);
         self.order = order;

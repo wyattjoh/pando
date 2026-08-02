@@ -135,8 +135,9 @@ New branches start at the invoking worktree's `HEAD` unless `worktrees.base`
 is `fresh`, which cuts them from the target branch's remote-tracking ref
 instead. Nothing is fetched implicitly; `--fetch` refreshes exactly that one
 ref. See [`references/config.md`](references/config.md).
-The picker shows local HEAD committer timestamps and starts in the configured
-sort mode. Ctrl-S cycles Git order, branch A-Z, last commit newest-first, and
+The picker shows local HEAD committer timestamps and uses the same anchored
+`.../` path abbreviation as human `pando list` output. It starts in the
+configured sort mode. Ctrl-S cycles Git order, branch A-Z, last commit newest-first, and
 path A-Z without persisting the change or losing the filter/selection. Ctrl-B
 toggles between worktree view and branch view (local branches, including
 ones with no worktree yet) for the current invocation only — selecting an

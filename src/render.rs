@@ -14,25 +14,27 @@ pub fn table(rows: &[Row], sort: SortMode) -> String {
         ui::muted_style().apply_to(pad(last_commit_header(sort), LAST_COMMIT_WIDTH)),
         ui::muted_style().apply_to(path_header(sort)),
     );
+    let paths = display_paths(&row_refs, sort);
     for index in sorted_row_indices(&row_refs, sort) {
-        output.push_str(&styled_row(row_refs[index], branch_width));
+        output.push_str(&styled_row(row_refs[index], branch_width, &paths[index]));
         output.push('\n');
     }
     output
 }
 
 #[must_use]
-pub fn menu_labels(rows: &[&Row]) -> Vec<String> {
+pub fn menu_labels(rows: &[&Row], sort: SortMode) -> Vec<String> {
     let branch_width = branch_width(rows);
+    let paths = display_paths(rows, sort);
     rows.iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(index, row)| {
             format!(
                 "{}  {}  {}",
                 styled_branch_label(row, branch_width, true),
                 ui::interactive(ui::muted_style())
                     .apply_to(pad(&row.human_last_commit_at(), LAST_COMMIT_WIDTH)),
-                ui::interactive(ui::worktree_data_style())
-                    .apply_to(abbreviated_path(row.path.as_deref())),
+                ui::interactive(ui::worktree_data_style()).apply_to(&paths[index]),
             )
         })
         .collect()
@@ -115,7 +117,7 @@ fn branch_width(rows: &[&Row]) -> usize {
         .max(UnicodeWidthStr::width("BRANCH ↑"))
 }
 
-fn styled_row(row: &Row, branch_width: usize) -> String {
+fn styled_row(row: &Row, branch_width: usize, path: &str) -> String {
     let current_marker = if row.current {
         ui::accent_style().bold().apply_to("*").to_string()
     } else {
@@ -125,7 +127,7 @@ fn styled_row(row: &Row, branch_width: usize) -> String {
         "{current_marker} {}  {}  {}",
         styled_branch_label(row, branch_width, false),
         ui::muted_style().apply_to(pad(&row.human_last_commit_at(), LAST_COMMIT_WIDTH)),
-        ui::worktree_data_style().apply_to(abbreviated_path(row.path.as_deref())),
+        ui::worktree_data_style().apply_to(path),
     )
 }
 
@@ -158,6 +160,37 @@ fn marked_branch_label(row: &Row) -> String {
     } else {
         row.label.clone()
     }
+}
+
+fn display_paths(rows: &[&Row], sort: SortMode) -> Vec<String> {
+    let mut paths = vec![String::new(); rows.len()];
+    let mut path_anchor = None;
+    for index in sorted_row_indices(rows, sort) {
+        let row = rows[index];
+        paths[index] = table_path(row.path.as_deref(), path_anchor);
+        if relative_to_anchor(row.path.as_deref(), path_anchor).is_none() {
+            path_anchor = row.path.as_deref();
+        }
+    }
+    paths
+}
+
+fn table_path(path: Option<&std::path::Path>, path_anchor: Option<&std::path::Path>) -> String {
+    let Some(path) = path else {
+        return String::new();
+    };
+    if let Some(relative) = relative_to_anchor(Some(path), path_anchor) {
+        return format!(".../{}", relative.display());
+    }
+    abbreviated_path(Some(path))
+}
+
+fn relative_to_anchor<'a>(
+    path: Option<&'a std::path::Path>,
+    path_anchor: Option<&std::path::Path>,
+) -> Option<&'a std::path::Path> {
+    path.and_then(|path| path_anchor.and_then(|anchor| path.strip_prefix(anchor).ok()))
+        .filter(|relative| !relative.as_os_str().is_empty())
 }
 
 fn abbreviated_path(path: Option<&std::path::Path>) -> String {

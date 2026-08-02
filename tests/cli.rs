@@ -425,6 +425,41 @@ fn list_abbreviates_home_directory_with_tilde() {
 }
 
 #[test]
+fn list_abbreviates_consecutive_paths_under_the_same_parent() {
+    let repo = Repository::new();
+    let first_nested = repo.main.join(".claude/worktrees/first");
+    let second_nested = repo.main.join(".claude/worktrees/second");
+    add_worktree(&repo.main, &first_nested, "nested-first");
+    add_worktree(&repo.main, &second_nested, "nested-second");
+    let home = repo.temp.path().canonicalize().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        "worktrees:\n  default-sort: branch\n",
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .arg("list")
+        .current_dir(&repo.main)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("~/feature worktree"), "{stderr}");
+    assert!(stderr.contains("~/main"), "{stderr}");
+    assert!(stderr.contains(".../.claude/worktrees/first"), "{stderr}");
+    assert!(stderr.contains(".../.claude/worktrees/second"), "{stderr}");
+    assert!(!stderr.contains("~/main/.claude/worktrees/"), "{stderr}");
+}
+
+#[test]
 fn list_uses_semantic_terminal_styles_without_writing_stdout() {
     let repo = Repository::new();
     fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();
@@ -1040,7 +1075,7 @@ fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
         .map(|worktree| pando::Row::from_worktree(worktree))
         .collect();
     let row_refs: Vec<_> = rows.iter().collect();
-    let labels = pando::render::menu_labels(&row_refs);
+    let labels = pando::render::menu_labels(&row_refs, pando::SortMode::Git);
     let current = choices
         .iter()
         .position(|worktree| worktree.current)
@@ -1283,6 +1318,39 @@ fn switch_picker_marks_dirty_branches_and_shows_paths() {
         output.stderr
     );
     assert!(!output.stderr.contains("dirty"), "{}", output.stderr);
+}
+
+#[test]
+fn switch_picker_abbreviates_consecutive_paths_under_the_same_parent() {
+    let repo = Repository::new();
+    let first_nested = repo.main.join(".claude/worktrees/first");
+    let second_nested = repo.main.join(".claude/worktrees/second");
+    add_worktree(&repo.main, &first_nested, "nested-first");
+    add_worktree(&repo.main, &second_nested, "nested-second");
+    let home = repo.temp.path().canonicalize().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        "worktrees:\n  default-sort: branch\n",
+    )
+    .unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .arg("switch")
+        .current_dir(&repo.main)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("NO_COLOR", "1");
+
+    let output = run_pty_command(command, b"\x1b");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let picker = console::strip_ansi_codes(&output.stderr);
+    assert!(picker.contains(".../.claude/worktrees/first"), "{picker}");
+    assert!(picker.contains(".../.claude/worktrees/second"), "{picker}");
+    assert!(!picker.contains("~/main/.claude/worktrees/"), "{picker}");
 }
 
 #[test]

@@ -13,7 +13,8 @@ Usage: pando list [OPTIONS]
 No positional args, no subcommands. Prints aligned `BRANCH`, `LAST COMMIT AT`,
 and `PATH` columns with the current `*` marker, dirty state, and exceptional
 detached, bare, locked, prunable, missing, inaccessible, or unknown states.
-The timestamp is the HEAD commit's committer time, rendered in local
+Once a full parent path is shown, consecutive descendant rows reuse it as an
+anchor and render the shared prefix as `.../`. The timestamp is the HEAD commit's committer time, rendered in local
 `YYYY-MM-DD HH:MM` form or as `unknown`. Human output starts in the configured
 Git, branch A-Z, last-commit newest-first, or path A-Z order and marks the
 active order in its heading or column header.
@@ -62,7 +63,8 @@ trailing newline. Prompts, warnings, and hook output go to stderr — this is
 load-bearing: the installed zsh function captures stdout and `cd`s to it.
 
 Picker behavior: lists navigable worktrees with the same branch,
-last-commit, and path columns, starts in `worktrees.default-sort`, defaults
+last-commit, and path columns, including the anchored `.../` path abbreviation
+used by human `pando list` output. It starts in `worktrees.default-sort`, defaults
 to the current worktree, and ends with "Create or switch branch…". Ctrl-S
 cycles Git order, branch A-Z, last commit newest-first, and path A-Z for the
 current invocation only. Re-sorting preserves the active filter and selected

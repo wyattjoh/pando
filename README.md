@@ -75,7 +75,7 @@ pando switch feature/login
 pando switch
 ```
 
-The picker lists navigable worktrees with aligned branch, last-commit, and path columns, defaults to the current worktree, and ends with **Create or switch branch…**. Last commit means the HEAD commit's committer time and is shown in local time as `YYYY-MM-DD HH:MM`, or `unknown` when it cannot be resolved. The initial order comes from `worktrees.default-sort` and falls back to Git order. Ctrl-S cycles temporarily through Git order, branch A-Z, last commit newest-first, and path A-Z while preserving the filter and selected worktree. Escape cancels without changing directory.
+The picker lists navigable worktrees with aligned branch, last-commit, and path columns, defaults to the current worktree, and ends with **Create or switch branch…**. Path abbreviation matches `pando list`: once a full parent path is shown, consecutive descendant rows render its shared prefix as `.../`. Last commit means the HEAD commit's committer time and is shown in local time as `YYYY-MM-DD HH:MM`, or `unknown` when it cannot be resolved. The initial order comes from `worktrees.default-sort` and falls back to Git order. Ctrl-S cycles temporarily through Git order, branch A-Z, last commit newest-first, and path A-Z while preserving the filter and selected worktree. Escape cancels without changing directory.
 
 `pando switch --branches` (or `-b`) opens the picker in **branch view**: local branches instead of worktrees, including ones that have never been checked out anywhere. Ctrl-B toggles between worktree view and branch view for the current invocation only — nothing persists, and there is no configuration key for the default view. Toggling never touches Git, keeps the typed filter, and keeps the highlighted selection whenever it exists in both views; a highlighted worktree or branch with no counterpart in the other view falls back to the top of the list. Selecting an already-checked-out branch in branch view navigates to its worktree exactly as worktree view does. Selecting a branch with no worktree runs the same resolution below, creating a worktree for it.
 
@@ -338,7 +338,7 @@ Queries work from nested directories. Branch-dependent properties fail in detach
 pando list
 ```
 
-The aligned table shows `BRANCH`, `LAST COMMIT AT`, and `PATH`, plus the current `*` marker, dirty state, and exceptional detached, bare, locked, prunable, missing, inaccessible, or unknown states. Last-commit values use each HEAD commit's committer timestamp in local `YYYY-MM-DD HH:MM` form, or `unknown` when metadata is unavailable. The active branch, last-commit, or path sort has a direction arrow; Git order is named in the heading. Human ordering follows `worktrees.default-sort`, while structured JSON always preserves Git's discovery order.
+The aligned table shows `BRANCH`, `LAST COMMIT AT`, and `PATH`, plus the current `*` marker, dirty state, and exceptional detached, bare, locked, prunable, missing, inaccessible, or unknown states. Once a full parent path is shown, consecutive descendant rows reuse it as an anchor and render the shared prefix as `.../`. Last-commit values use each HEAD commit's committer timestamp in local `YYYY-MM-DD HH:MM` form, or `unknown` when metadata is unavailable. The active branch, last-commit, or path sort has a direction arrow; Git order is named in the heading. Human ordering follows `worktrees.default-sort`, while structured JSON always preserves Git's discovery order.
 
 ```sh
 pando list --branches
