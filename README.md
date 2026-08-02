@@ -297,6 +297,8 @@ JSON mode emits exactly one document on stdout and nothing on stderr. Errors are
 
 By default `merge` collapses the topic into a single commit before it fast-forwards, after any rebase, and writes that commit's message with a configured generator. A topic that is already one commit is left alone, message included. `--no-squash` merges the commits as they are, and `merge.squash: false` makes that the default. Because the squash runs after the rebase, the generator only ever sees the topic's own replayed changes, never the target's.
 
+In human mode the generated message is printed on the rail before the collapse runs, styled the way `pando commit` renders its own generated message. Git's commit transcript for the squash is not echoed, since the message and the fast-forward's diffstat already cover it.
+
 The message comes from `merge.generation.command`, falling back to `commit.generation.command` so one configured generator serves both. `merge.generation.template` overrides the built-in prompt and receives `branch`, `target`, `repo`, `commit_count`, `commits` (the full messages being collapsed), `git_diff`, and `git_diff_stat`, all scoped to the range between the target and the topic. Squashing a multi-commit topic with no generator configured is an error naming both fixes rather than a silent fall-through.
 
 `merge.squash` and `merge.generation` are legal in all three configuration layers, resolving local over shared over global. A generator that comes from committed `.pando.yaml` needs approval before it runs: check it with `pando trust merge-status` and grant it with `pando trust merge-approve`.

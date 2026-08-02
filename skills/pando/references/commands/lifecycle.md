@@ -102,8 +102,13 @@ rebase/squash/cleanup policy under Git's common state directory. A later invocat
 resumes the same operation with the pinned target/policy, including continuing
 through rebase conflicts or retrying cleanup after a completed integration.
 
-Human mode runs the rebase, rebase continuation, squash, and fast-forward
-merge under timed progress indicators and renders Git's own output as terminal UI steps on
+Human mode prints the generated squash message on the rail before the collapse
+runs, using the same bold-subject styling `pando commit` gives its generated
+message. Git's own transcript for the squash commit is not echoed; the message
+and the fast-forward's diffstat already report it.
+
+Human mode runs the rebase, rebase continuation, message generation, squash,
+and fast-forward merge under timed progress indicators and renders Git's own output as terminal UI steps on
 stderr rather than streaming it raw. A failure folds the same Git output into
 the reported error, so rebase conflicts stay readable. The continuation
 neutralizes `GIT_EDITOR`, keeping the commit message Git already recorded.
@@ -128,4 +133,4 @@ invocations above are marked **(inferred)**.
 
 ## Structured JSON contract
 
-Agents use request mode. `remove` input contains `branches` and `dry_run`. Force is an argv-only authorization: pass `--force` explicitly after user approval. Never put `force` in the request document. `merge` input contains `no_rebase`, `no_remove`, `no_squash`, and `dry_run`; squashing is on by default in JSON exactly as it is for humans. Request mode rejects mixed command arguments and flags. Results distinguish dry runs, no-ops, removals, retained topics, in-place merges (`plan: "in_place"`, context `in_place: true`), and completed cleanup. Effects identify hook, Git, and target worktree actions, including a `squash` effect whose details carry `applicable`, `commits`, and `trusted`; failures use stable codes with diagnostics and recovery context. Dry runs execute no hooks or mutations. Exact-leaf JSON help exposes runtime schemas and the error/action catalogs.
+Agents use request mode. `remove` input contains `branches` and `dry_run`. Force is an argv-only authorization: pass `--force` explicitly after user approval. Never put `force` in the request document. `merge` input contains `no_rebase`, `no_remove`, `no_squash`, and `dry_run`; squashing is on by default in JSON exactly as it is for humans. Request mode rejects mixed command arguments and flags. Results distinguish dry runs, no-ops, removals, retained topics, in-place merges (`plan: "in_place"`, context `in_place: true`), and completed cleanup. Effects identify hook, Git, and target worktree actions, including a `squash` effect whose details carry `applicable`, `commits`, and `trusted`; failures use stable codes with diagnostics and recovery context. **The generated squash message is not part of `result`** — the structured response reports the lifecycle outcome, not the commit's content. It reaches JSON only through the captured `merge` stderr diagnostic. When you need the message itself, read it back from Git with `git log -1 --format=%B <target-branch>`. Dry runs execute no hooks or mutations. Exact-leaf JSON help exposes runtime schemas and the error/action catalogs.

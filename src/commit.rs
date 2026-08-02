@@ -211,7 +211,7 @@ fn run_human(invocation: &Invocation, source: &MessageSource) -> Result<()> {
         |_| git::commit(&repository.current().path, &message.value),
     )?;
     let hash = git::head_commit(&repository.current().path)?;
-    let rendered_message = render_commit_message(&message.value);
+    let rendered_message = render::commit_message(&message.value);
     if message.generated {
         ui::step(rendered_message)?;
     } else {
@@ -696,18 +696,6 @@ fn render_prompt(repository: &Repository, template: &str) -> Result<String> {
         |value| value.to_string_lossy().into_owned(),
     );
     environment.get_template("commit")?.render(context! { git_diff => git::staged_diff(&repository.current().path)?, git_diff_stat => git::staged_diff_stat(&repository.current().path)?, branch, repo, recent_commits => git::recent_subjects(&repository.current().path)? }).context("failed to render commit generation template")
-}
-fn render_commit_message(message: &str) -> String {
-    match message.split_once('\n') {
-        Some((subject, body)) => format!(
-            "{}\n{body}",
-            ui::worktree_data_style().bold().apply_to(subject)
-        ),
-        None => ui::worktree_data_style()
-            .bold()
-            .apply_to(message)
-            .to_string(),
-    }
 }
 fn context_json(repository: &Repository) -> Value {
     let path = &repository.current().path;

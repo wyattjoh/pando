@@ -255,7 +255,9 @@ printf '%s\n' '{"schema_version":1,"input":{}}' | pando merge --input-output jso
 pando merge --no-squash           # keep the topic's individual commits
 ```
 `merge` collapses the topic into one commit after any rebase and before the
-fast-forward, generating that commit's message. A topic that is already one
+fast-forward, generating that commit's message. Human mode prints the message
+on the rail before collapsing; JSON callers find it in the captured `merge`
+stderr diagnostic, not in `result`. A topic that is already one
 commit is left alone. This needs `merge.generation.command`, or
 `commit.generation.command` as a fallback: a multi-commit topic with neither
 is refused in preflight (`merge.squash_generator_missing`) rather than merged

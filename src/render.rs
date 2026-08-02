@@ -48,6 +48,24 @@ pub fn menu_header(rows: &[&Row], sort: SortMode) -> String {
     )
 }
 
+/// Styles a commit message for the rail: bold subject, plain body.
+///
+/// Shared by `commit` and the merge lifecycle's squash so a generated message
+/// reads identically wherever it is shown.
+#[must_use]
+pub fn commit_message(message: &str) -> String {
+    match message.split_once('\n') {
+        Some((subject, body)) => format!(
+            "{}\n{body}",
+            ui::worktree_data_style().bold().apply_to(subject)
+        ),
+        None => ui::worktree_data_style()
+            .bold()
+            .apply_to(message)
+            .to_string(),
+    }
+}
+
 /// Styles captured Git output for presentation inside the terminal UI rail.
 ///
 /// Diffstat rows keep their path highlighted; every other line stays muted so

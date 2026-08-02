@@ -1719,6 +1719,90 @@ fn merge_squashes_a_multi_commit_topic_into_one_generated_commit() {
     }
 }
 
+/// The squash message must reach the rail the way `commit` shows its generated
+/// message: a colon-suffixed completion followed by the bold-subject message.
+#[test]
+fn merge_prints_the_generated_squash_message_on_the_rail() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let prompt_log = xdg.path().join("prompt.txt");
+    squash_generator_config(xdg.path(), &prompt_log);
+    commit_three_on_topic(&repo);
+
+    let mut merge = Command::cargo_bin("pando").unwrap();
+    merge
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .env("CLICOLOR_FORCE", "1");
+    let output = run_terminal_command(merge);
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    let stderr = &output.stderr;
+    for heading in [
+        "Generating squash commit message...",
+        "Generated squash commit message:",
+    ] {
+        assert!(stderr.contains(heading), "missing {heading:?}: {stderr}");
+    }
+    // The subject uses the same bold treatment `commit` gives a generated message.
+    assert!(
+        stderr.contains(&forced_style(
+            pando::ui::worktree_data_style().bold(),
+            "feat: squashed topic"
+        )),
+        "{stderr}"
+    );
+    let plain = console::strip_ansi_codes(stderr);
+    // The body is shown too, not just the subject.
+    assert!(plain.contains("- collapsed the branch"), "{plain}");
+    // The message is rendered before the collapse it describes.
+    let generated = plain.find("Generated squash commit message:").unwrap();
+    let squashing = plain.find("Squashing 3 commits").unwrap();
+    assert!(
+        generated < squashing,
+        "the message came after the collapse:\n{plain}"
+    );
+    assert_eq!(
+        plain.matches("Generated squash commit message").count(),
+        1,
+        "generation completion printed more than once: {plain}"
+    );
+    // Like `commit`, the squash does not echo Git's own commit transcript; the
+    // rendered message and the fast-forward's diffstat already cover it.
+    assert!(
+        !plain.contains("] feat: squashed topic"),
+        "git's commit transcript duplicated the message:\n{plain}"
+    );
+}
+
+/// Nothing is generated or printed when there is no squash to describe.
+#[test]
+fn merge_prints_no_squash_message_when_it_does_not_squash() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let prompt_log = xdg.path().join("prompt.txt");
+    squash_generator_config(xdg.path(), &prompt_log);
+    fs::write(repo.linked.join("solo.txt"), "solo\n").unwrap();
+    git(&repo.linked, ["add", "solo.txt"]);
+    git(&repo.linked, ["commit", "-m", "hand written subject"]);
+
+    let mut merge = Command::cargo_bin("pando").unwrap();
+    merge
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .env("CLICOLOR_FORCE", "1");
+    let output = run_terminal_command(merge);
+
+    assert!(output.status.success(), "{}", output.stderr);
+    let plain = console::strip_ansi_codes(&output.stderr);
+    assert!(!plain.contains("squash commit message"), "{plain}");
+}
+
 #[test]
 fn merge_no_squash_preserves_every_topic_commit() {
     let repo = Repository::new();
@@ -1963,6 +2047,46 @@ fn json_merge_dry_run_reports_the_squash_effect_without_mutating() {
     assert!(!prompt_log.exists());
 }
 
+/// Agents only ever see JSON, so pin down where the generated squash message
+/// is reachable from: the captured `merge` stderr diagnostic, not `result`.
+#[test]
+fn json_merge_exposes_the_squash_message_only_in_diagnostics() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let prompt_log = xdg.path().join("prompt.txt");
+    squash_generator_config(xdg.path(), &prompt_log);
+    commit_three_on_topic(&repo);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove", "--output", "json"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = assert_json_pure(&output);
+    // The structured result stays a lifecycle outcome; it carries no message.
+    assert!(value["result"].get("message").is_none());
+    let diagnostics = value["diagnostics"].as_array().unwrap();
+    let merged = diagnostics
+        .iter()
+        .filter(|d| d["source"] == "merge")
+        .map(|d| d["content"].as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        merged.contains("feat: squashed topic"),
+        "the generated message is not recoverable from diagnostics:\n{merged}"
+    );
+}
+
 #[test]
 fn json_merge_squashes_by_default_like_the_human_path() {
     let repo = Repository::new();
@@ -2011,6 +2135,36 @@ fn json_merge_squashes_by_default_like_the_human_path() {
         git_output(&repo.main, ["log", "-1", "--format=%s"]),
         "feat: squashed topic"
     );
+}
+
+/// The squash inherits `commit.generation.command`, but not its approval. A
+/// shared commit generator must still clear `trust merge-approve` before the
+/// merge lifecycle will execute it.
+#[test]
+fn merge_does_not_inherit_commit_generator_approval_for_the_squash() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        "commit:\n  generation:\n    command: 'printf \"feat: shared commit generator\\n\"'\n",
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(&repo.linked, ["commit", "-m", "configure shared generator"]);
+    commit_three_on_topic(&repo);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("trust merge-approve"), "{stderr}");
 }
 
 /// A shared (committed) generator is untrusted until approved. The refusal must

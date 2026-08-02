@@ -180,3 +180,11 @@ When no template is configured, the built-in prompt requests a factual
 imperative conventional-commit subject under 50 characters, a blank line,
 and at least two concrete bullets. Empty generation values and invalid
 YAML/templates fail before staging.
+
+`commit.generation.command` is also the fallback generator for `pando
+merge`'s default squash, so configuring it here enables squash-message
+generation too. Only the `command` is shared — the squash uses its own
+prompt (`merge.generation.template`, with different variables) and its own
+trust namespace (`pando trust merge-approve`). Approving a shared commit
+generator therefore does **not** approve it for merge. See
+`lifecycle.md`.

@@ -153,40 +153,36 @@ pub fn ensure_ready(
     Ok(())
 }
 
-/// Generates a message and collapses the topic onto `target`, returning Git's transcript.
+/// Collapses the topic onto `target` under `message`.
+///
+/// Generation is a separate step ([`generate_message`]) so the caller can show
+/// the message it is about to commit before the history is rewritten.
+///
+/// Git's transcript is deliberately discarded on success: the caller has
+/// already rendered the message, and the fast-forward that follows reports the
+/// same diffstat. Failures still carry it, because `git` output is folded into
+/// the error.
 ///
 /// # Errors
 ///
-/// Returns an error when the generator is missing, untrusted, or fails, or when
-/// Git cannot rewrite the branch.
-pub fn apply(repository: &Repository, config: &EffectiveConfig, target: &str) -> Result<String> {
-    // Re-checked here, not just in the caller's preflight, so no future caller
-    // can reach the collapse without having cleared approval.
-    let generation = &config.merge_generation;
-    if is_shared(generation) && !trust::is_merge_generation_trusted(repository, generation)? {
-        bail!(
-            "shared squash message generator approval is required; run pando trust merge-approve, or rerun with --no-squash"
-        );
-    }
-    let message = generate_message(repository, config, target)?;
+/// Returns an error when Git cannot rewrite the branch.
+pub fn collapse(repository: &Repository, target: &str, message: &str) -> Result<()> {
     let cwd = &repository.current().path;
-    let mut transcript = git::reset_soft(cwd, target, false)?;
-    let commit = git::commit_message_stdin(cwd, &message)?;
-    if !commit.is_empty() {
-        if !transcript.is_empty() {
-            transcript.push('\n');
-        }
-        transcript.push_str(&commit);
-    }
-    Ok(transcript)
+    git::reset_soft(cwd, target, false)?;
+    git::commit_message_stdin(cwd, message)?;
+    Ok(())
 }
 
 /// Renders the squash prompt and runs the configured generator.
 ///
+/// The approval check is repeated here rather than left to the caller's
+/// preflight: this is where the configured command actually executes, so no
+/// future caller can reach it without having cleared trust.
+///
 /// # Errors
 ///
-/// Returns an error when no generator is configured, the template is invalid,
-/// or the command fails or returns an unusable message.
+/// Returns an error when the generator is missing, untrusted, or fails, or
+/// when its output is not a usable message.
 ///
 /// # Panics
 ///
@@ -197,6 +193,12 @@ pub fn generate_message(
     config: &EffectiveConfig,
     target: &str,
 ) -> Result<String> {
+    let generation = &config.merge_generation;
+    if is_shared(generation) && !trust::is_merge_generation_trusted(repository, generation)? {
+        bail!(
+            "shared squash message generator approval is required; run pando trust merge-approve, or rerun with --no-squash"
+        );
+    }
     let command = &config
         .merge_generation
         .command

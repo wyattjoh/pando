@@ -560,13 +560,23 @@ pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
     if !state.no_squash && !state.squashed {
         let plan = squash::plan(&repository, &config, &target, true, true)?;
         if plan.applicable {
-            report(&ui::run_timed(
+            // Generate first and show the message, so the rail reports what is
+            // about to be committed before the collapse rewrites history.
+            let message = ui::run_timed(
+                true,
+                "Generating squash commit message...",
+                "Generated squash commit message:",
+                "Failed to generate the squash commit message",
+                |_| squash::generate_message(&repository, &config, &target),
+            )?;
+            ui::step(render::commit_message(&message))?;
+            ui::run_timed(
                 true,
                 &format!("Squashing {} commits...", plan.commit_count),
                 "Squashed the topic into a single commit",
                 "Failed to squash the topic",
-                |_| squash::apply(&repository, &config, &target),
-            )?)?;
+                |_| squash::collapse(&repository, &target, &message),
+            )?;
             state.squashed = true;
             write_journal(&repository.common_dir, &state)?;
         }
