@@ -44,13 +44,15 @@ Usage: pando merge [OPTIONS]
 | `--no-rebase` | Disable the default rebase when the topic has diverged from its target |
 | `--no-remove` | Keep the topic worktree/branch after a successful merge |
 | `--no-squash` | Merge the topic's commits as they are instead of collapsing them into one |
-| `--yolo` | Stage and commit every change with the configured generator before merging |
+| `--yolo` | Stage every change and include it in the generated squash commit |
 
 Integrates the current clean topic into the resolved target branch
 (checked out in the primary worktree) via `git merge --ff-only`. A diverged
-topic rebases onto the target by default. `--yolo` first runs the equivalent
-of `pando commit --stage-all` and continues only if the commit succeeds.
-It supports human output only and conflicts with `--dry-run`. Phase-specific
+topic rebases onto the target by default. `--yolo` stages every local change
+and, when squashing (the default), includes it directly in the generated
+squash commit without invoking the commit generator. With `--no-squash`, it
+runs the equivalent of `pando commit --stage-all` and continues only if that
+configured-generator commit succeeds. It supports human output only and conflicts with `--dry-run`. Phase-specific
 `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries (see
 `../config.md`).
 
@@ -125,7 +127,7 @@ pando merge                    # (inferred)
 pando merge --no-rebase        # (inferred)
 pando merge --no-remove        # (inferred)
 pando merge --no-squash        # (inferred) keep the topic's individual commits
-pando merge --yolo             # commit every change, then merge
+pando merge --yolo             # stage every change into one generated squash commit
 ```
 No literal example ships in README.md for `merge` — only prose; flag
 spellings are confirmed from the compiled binary's `--help`, but the

@@ -359,7 +359,14 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Merge {
             no_rebase,
             no_remove,
-            no_squash,
+            no_squash: false,
+            yolo: true,
+            dry_run: false,
+        } => pando::lifecycle::merge_yolo(no_rebase, no_remove),
+        Commands::Merge {
+            no_rebase,
+            no_remove,
+            no_squash: true,
             yolo: true,
             dry_run: false,
         } => {
@@ -370,7 +377,7 @@ fn run(cli: Cli) -> Result<()> {
                 json: false,
                 request_mode: false,
             })?;
-            pando::lifecycle::merge(no_rebase, no_remove, no_squash)
+            pando::lifecycle::merge(no_rebase, no_remove, true)
         }
         Commands::Merge {
             no_rebase,

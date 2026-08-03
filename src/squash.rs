@@ -92,6 +92,7 @@ pub fn plan(
     target: &str,
     enabled: bool,
     countable: bool,
+    include_staged: bool,
 ) -> Result<SquashPlan> {
     if !enabled || !config.squash {
         return Ok(SquashPlan::skipped());
@@ -99,9 +100,9 @@ pub fn plan(
     let commit_count = if countable {
         let head = git::head_commit(&repository.current().path)?;
         let count = git::count_commits_between(&repository.current().path, target, &head)?;
-        // One commit is already the shape a squash produces, so rewriting it
-        // would only discard a message the author wrote deliberately.
-        if count < 2 {
+        // One commit is already the shape a squash produces, unless staged
+        // yolo changes must be folded into a newly generated message.
+        if count < 2 && !include_staged {
             return Ok(SquashPlan {
                 commit_count: count,
                 ..SquashPlan::skipped()
@@ -135,8 +136,9 @@ pub fn ensure_ready(
     config: &EffectiveConfig,
     target: &str,
     countable: bool,
+    include_staged: bool,
 ) -> Result<()> {
-    let plan = plan(repository, config, target, true, countable)?;
+    let plan = plan(repository, config, target, true, countable, include_staged)?;
     if !plan.applicable {
         return Ok(());
     }
@@ -192,6 +194,7 @@ pub fn generate_message(
     repository: &Repository,
     config: &EffectiveConfig,
     target: &str,
+    include_staged: bool,
 ) -> Result<String> {
     let generation = &config.merge_generation;
     if is_shared(generation) && !trust::is_merge_generation_trusted(repository, generation)? {
@@ -212,7 +215,7 @@ pub fn generate_message(
         .template
         .as_ref()
         .map_or(BUILTIN_TEMPLATE, |value| value.value.as_str());
-    let prompt = render_prompt(repository, template, target)?;
+    let prompt = render_prompt(repository, template, target, include_staged)?;
     let mut child = Command::new("/bin/sh")
         .args(["-c", command])
         .current_dir(&repository.current().path)
@@ -258,7 +261,12 @@ pub fn generate_message(
     Ok(message)
 }
 
-fn render_prompt(repository: &Repository, template: &str, target: &str) -> Result<String> {
+fn render_prompt(
+    repository: &Repository,
+    template: &str,
+    target: &str,
+    include_staged: bool,
+) -> Result<String> {
     let mut environment = Environment::new();
     environment
         .add_template("squash", template)
@@ -282,8 +290,16 @@ fn render_prompt(repository: &Repository, template: &str, target: &str) -> Resul
             repo,
             commit_count => git::count_commits_between(cwd, target, &head)?,
             commits => git::range_messages(cwd, target, &head)?,
-            git_diff => git::range_diff(cwd, target, &head)?,
-            git_diff_stat => git::range_diff_stat(cwd, target, &head)?,
+            git_diff => if include_staged {
+                git::staged_diff_against(cwd, target)?
+            } else {
+                git::range_diff(cwd, target, &head)?
+            },
+            git_diff_stat => if include_staged {
+                git::staged_diff_stat_against(cwd, target)?
+            } else {
+                git::range_diff_stat(cwd, target, &head)?
+            },
         })
         .context("failed to render the squash generation template")
 }

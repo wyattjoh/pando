@@ -222,6 +222,7 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Prefligh
         &target,
         squash_enabled,
         !rebase_active,
+        false,
     )?;
     if squash.applicable && !squash.generator_configured {
         return Err(preflight(
@@ -295,6 +296,9 @@ struct MergeJournal {
     no_remove: bool,
     #[serde(default)]
     no_squash: bool,
+    /// Stage local changes into the generated squash commit.
+    #[serde(default)]
+    yolo_stage_all: bool,
     /// The topic has already been collapsed, so a retry must not squash again.
     #[serde(default)]
     squashed: bool,
@@ -329,6 +333,12 @@ enum MergeWorktreeOutcome {
     Retained,
     Removed,
     SwitchedInPlace,
+}
+
+#[derive(Clone, Copy)]
+enum MergeIntent {
+    Normal,
+    StageAll,
 }
 
 /// Removes selected topic worktrees and emits a destination only if the current
@@ -441,12 +451,31 @@ pub fn merge_dry_run(no_rebase: bool, no_remove: bool, no_squash: bool) -> Resul
 }
 
 /// Integrates the current topic branch into the resolved target branch.
-#[allow(clippy::too_many_lines)] // This is the explicit lifecycle state-machine boundary.
 ///
 /// # Errors
 ///
 /// Returns an error when merge preconditions, hooks, Git execution, or cleanup fails.
 pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
+    merge_inner(no_rebase, no_remove, no_squash, MergeIntent::Normal)
+}
+
+/// Integrates local changes directly into one generated squash commit.
+///
+/// # Errors
+///
+/// Returns an error when merge preconditions, hooks, Git execution, or cleanup fails.
+pub fn merge_yolo(no_rebase: bool, no_remove: bool) -> Result<()> {
+    merge_inner(no_rebase, no_remove, false, MergeIntent::StageAll)
+}
+
+#[allow(clippy::too_many_lines)] // This is the explicit lifecycle state-machine boundary.
+fn merge_inner(
+    no_rebase: bool,
+    no_remove: bool,
+    no_squash: bool,
+    intent: MergeIntent,
+) -> Result<()> {
+    let yolo_stage_all = matches!(intent, MergeIntent::StageAll);
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = git::repository(&cwd)?;
     let primary = repository
@@ -461,9 +490,12 @@ pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
         Some(state) => state.source_branch.clone(),
         None => git::current_branch(&repository)?.to_owned(),
     };
-    if !rebase_active && git::is_dirty(&repository.current().path)? {
-        // TODO: support an explicit auto-commit workflow in a future lifecycle release.
+    let dirty = !rebase_active && git::is_dirty(&repository.current().path)?;
+    if dirty && !yolo_stage_all {
         bail!("the topic worktree has local changes; commit or discard them before merging");
+    }
+    if yolo_stage_all && journal.is_none() && !dirty {
+        bail!("nothing to commit");
     }
     let config = EffectiveConfig::load(&repository)?;
     if let Some(existing) = &journal {
@@ -478,6 +510,7 @@ pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
         if existing.no_rebase != no_rebase
             || existing.no_remove != no_remove
             || existing.no_squash != no_squash
+            || existing.yolo_stage_all != yolo_stage_all
         {
             bail!(
                 "merge retry flags conflict with the journaled lifecycle policy; rerun with the original flags"
@@ -509,7 +542,13 @@ pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
     // mutation. Discovering a missing or untrusted generator only after the
     // rebase has landed would leave work to recover for no reason.
     if !no_squash && !journal.as_ref().is_some_and(|state| state.squashed) {
-        squash::ensure_ready(&repository, &config, &target, !rebase_active)?;
+        squash::ensure_ready(
+            &repository,
+            &config,
+            &target,
+            !rebase_active,
+            yolo_stage_all,
+        )?;
     }
     if journal.is_none() {
         let state = MergeJournal {
@@ -521,6 +560,7 @@ pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
             no_rebase,
             no_remove,
             no_squash,
+            yolo_stage_all,
             squashed: false,
             cleanup_pending: false,
             validated_source: None,
@@ -530,6 +570,19 @@ pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
         journal = Some(state);
     }
 
+    if yolo_stage_all
+        && journal.as_ref().is_some_and(|state| !state.squashed)
+        && git::is_dirty(&repository.current().path)?
+    {
+        // Preflight and journal creation must precede this mutation.
+        ui::run_timed(
+            true,
+            "Staging all changes...",
+            "Staged all changes",
+            "Failed to stage changes",
+            |_| git::stage_all(&repository.current().path),
+        )?;
+    }
     if rebase_active {
         report(&ui::run_timed(
             true,
@@ -550,15 +603,33 @@ pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
             &format!("Rebasing onto {target}..."),
             &format!("Rebased onto {target}"),
             &format!("Failed to rebase onto {target}"),
-            |animated| git::rebase_onto(&repository.current().path, &target, !animated),
+            |animated| {
+                if yolo_stage_all {
+                    git::rebase_onto_autostash(&repository.current().path, &target, !animated)
+                } else {
+                    git::rebase_onto(&repository.current().path, &target, !animated)
+                }
+            },
         )?)?;
+    }
+    if yolo_stage_all
+        && journal.as_ref().is_some_and(|state| !state.squashed)
+        && git::is_dirty(&repository.current().path)?
+    {
+        ui::run_timed(
+            true,
+            "Staging all changes...",
+            "Staged all changes",
+            "Failed to stage changes",
+            |_| git::stage_all(&repository.current().path),
+        )?;
     }
     let mut state = journal.context("lifecycle journal was not recorded before integration")?;
     // Squash after the rebase so the collapse starts from the replayed history,
     // and before validation so the pre-merge hooks see the commit that actually
     // lands on the target.
     if !state.no_squash && !state.squashed {
-        let plan = squash::plan(&repository, &config, &target, true, true)?;
+        let plan = squash::plan(&repository, &config, &target, true, true, yolo_stage_all)?;
         if plan.applicable {
             // Generate first and show the message, so the rail reports what is
             // about to be committed before the collapse rewrites history.
@@ -567,7 +638,7 @@ pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
                 "Generating squash commit message...",
                 "Generated squash commit message:",
                 "Failed to generate the squash commit message",
-                |_| squash::generate_message(&repository, &config, &target),
+                |_| squash::generate_message(&repository, &config, &target, yolo_stage_all),
             )?;
             ui::step(render::commit_message(&message))?;
             ui::run_timed(
@@ -599,7 +670,7 @@ pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
             );
         }
         if git::head_commit(&repository.current().path)? != refreshed {
-            return merge(no_rebase, no_remove, no_squash);
+            return merge_inner(no_rebase, no_remove, no_squash, intent);
         }
         state.validated_source = Some(refreshed.clone());
         state.validated_target = Some(target_commit);

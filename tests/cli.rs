@@ -1671,7 +1671,7 @@ fn merge_from_the_primary_worktree_refuses_on_the_target_branch() {
 }
 
 #[test]
-fn merge_yolo_stages_commits_and_merges_all_changes() {
+fn merge_yolo_uses_only_the_squash_generator_for_all_changes() {
     let repo = Repository::new();
     fs::write(
         repo.linked.join(".pando.yaml"),
@@ -1681,11 +1681,18 @@ fn merge_yolo_stages_commits_and_merges_all_changes() {
     git(&repo.linked, ["add", ".pando.yaml"]);
     git(&repo.linked, ["commit", "-m", "configure merge target"]);
     fs::write(repo.linked.join("yolo.txt"), "ship it\n").unwrap();
+    let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
     let xdg = tempfile::tempdir().unwrap();
+    let commit_generator_log = xdg.path().join("commit-generator-ran");
+    let squash_prompt_log = xdg.path().join("squash-prompt.txt");
     fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(
         xdg.path().join("pando/config.yaml"),
-        "commit:\n  generation:\n    command: 'printf \"feat: yolo merge\\n\"'\n",
+        format!(
+            "commit:\n  generation:\n    command: 'touch {} && printf \"feat: intermediate commit\\n\"'\nmerge:\n  generation:\n    command: \"cat > {} && printf 'feat: yolo merge\\\\n'\"\n",
+            commit_generator_log.display(),
+            squash_prompt_log.display(),
+        ),
     )
     .unwrap();
 
@@ -1708,6 +1715,113 @@ fn merge_yolo_stages_commits_and_merges_all_changes() {
         "feat: yolo merge"
     );
     assert_eq!(git_output(&repo.main, ["show", "HEAD:yolo.txt"]), "ship it");
+    assert_eq!(
+        git_output(
+            &repo.main,
+            ["rev-list", "--count", &format!("{main_before}..main")],
+        ),
+        "1"
+    );
+    assert!(
+        !commit_generator_log.exists(),
+        "the intermediate commit generator ran"
+    );
+    let prompt = fs::read_to_string(&squash_prompt_log).unwrap();
+    assert!(
+        prompt.contains("diff --git a/yolo.txt b/yolo.txt"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn merge_yolo_rebases_staged_changes_into_the_generated_squash() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let prompt_log = xdg.path().join("prompt.txt");
+    squash_generator_config(xdg.path(), &prompt_log);
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        "worktrees:\n  target-branch: main\n",
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(&repo.linked, ["commit", "-m", "configure merge target"]);
+    fs::write(repo.main.join("target.txt"), "target only\n").unwrap();
+    git(&repo.main, ["add", "target.txt"]);
+    git(&repo.main, ["commit", "-m", "advance target"]);
+    let target = git_output(&repo.main, ["rev-parse", "HEAD"]);
+    fs::write(repo.linked.join("yolo.txt"), "ship it\n").unwrap();
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--yolo", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(git_output(&repo.main, ["show", "HEAD:yolo.txt"]), "ship it");
+    assert_eq!(
+        git_output(
+            &repo.main,
+            ["rev-list", "--count", &format!("{target}..main")]
+        ),
+        "1"
+    );
+    let prompt = fs::read_to_string(&prompt_log).unwrap();
+    assert!(
+        prompt.contains("diff --git a/yolo.txt b/yolo.txt"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("target only"), "{prompt}");
+}
+
+#[test]
+fn merge_yolo_no_squash_uses_the_commit_generator() {
+    let repo = Repository::new();
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        "worktrees:\n  target-branch: main\n",
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(&repo.linked, ["commit", "-m", "configure merge target"]);
+    fs::write(repo.linked.join("yolo.txt"), "ship it\n").unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let generator_log = xdg.path().join("commit-generator-ran");
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        format!(
+            "commit:\n  generation:\n    command: 'touch {} && printf \"feat: yolo commit\\n\"'\n",
+            generator_log.display(),
+        ),
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--yolo", "--no-squash", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(generator_log.exists(), "the commit generator did not run");
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s"]),
+        "feat: yolo commit"
+    );
 }
 
 /// Writes a global config whose squash generator echoes a fixed message and

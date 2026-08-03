@@ -986,6 +986,15 @@ pub fn rebase_onto(cwd: &Path, target: &str, inherit: bool) -> Result<String> {
     run_lifecycle_git(cwd, &["rebase", target], "rebase", inherit)
 }
 
+/// Rebases the current branch onto `target`, restoring staged changes afterwards.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot execute the rebase or restore its autostash.
+pub fn rebase_onto_autostash(cwd: &Path, target: &str, inherit: bool) -> Result<String> {
+    run_lifecycle_git(cwd, &["rebase", "--autostash", target], "rebase", inherit)
+}
+
 /// Continues an already active rebase, returning Git's captured output.
 ///
 /// # Errors
@@ -1190,6 +1199,45 @@ pub fn staged_diff_stat(cwd: &Path) -> Result<String> {
             "--no-textconv",
             "--cached",
             "--stat",
+        ],
+    )
+}
+
+/// Returns a stable staged patch against `target`.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot produce the staged diff.
+pub fn staged_diff_against(cwd: &Path, target: &str) -> Result<String> {
+    git_stdout(
+        cwd,
+        [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--cached",
+            target,
+        ],
+    )
+}
+
+/// Returns stable staged diff statistics against `target`.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot produce the staged diff statistics.
+pub fn staged_diff_stat_against(cwd: &Path, target: &str) -> Result<String> {
+    git_stdout(
+        cwd,
+        [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--cached",
+            "--stat",
+            target,
         ],
     )
 }
