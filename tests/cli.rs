@@ -4761,8 +4761,31 @@ fn trust_status_reset_and_reapproval_follow_the_current_command_hash() {
 }
 
 #[test]
-fn trust_status_rejects_malformed_storage_even_without_commands() {
+fn empty_hook_phases_do_not_read_malformed_trust_storage() {
     let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(xdg.path().join("pando/trust.json"), "not-json").unwrap();
+
+    Command::cargo_bin("pando")
+        .unwrap()
+        .args(["trust", "status"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("No post-create are configured"));
+}
+
+#[test]
+fn configured_hook_phase_rejects_malformed_trust_storage() {
+    let repo = Repository::new();
+    fs::write(
+        repo.main.join(".pando.yaml"),
+        "hooks:\n  post-create:\n    - command: true\n",
+    )
+    .unwrap();
     let xdg = tempfile::tempdir().unwrap();
     fs::create_dir_all(xdg.path().join("pando")).unwrap();
     fs::write(xdg.path().join("pando/trust.json"), "not-json").unwrap();

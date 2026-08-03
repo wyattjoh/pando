@@ -16,9 +16,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     BaseMode, Row, SortMode, Worktree, WorktreeKind,
-    config::{EffectiveConfig, HookPhase, HookStep},
+    config::{EffectiveConfig, HookPhase},
     git::{self, Repository},
-    render,
+    hook_approval, render,
     setup::{self, HookOutcome},
     sorted_row_indices, trust, ui,
 };
@@ -1413,7 +1413,7 @@ fn create_worktree(
             Intent::Create => announce_new_branch(repository, branch, base, &destination)?,
         }
     }
-    approve_hooks(repository, HookPhase::PostCreate, &config.post_create)?;
+    hook_approval::approve_interactively(repository, HookPhase::PostCreate, &config.post_create)?;
 
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
@@ -1563,38 +1563,6 @@ fn warn_dirty_source(repository: &Repository) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn approve_hooks(
-    repository: &Repository,
-    phase: HookPhase,
-    steps: &[HookStep],
-) -> Result<()> {
-    if steps.is_empty() || trust::is_trusted(repository, phase, steps)? {
-        return Ok(());
-    }
-    ui::ensure_interactive(&format!("{} require approval", phase.plural_name()))?;
-    ui::info(format!(
-        "The repository requests these {}:",
-        phase.plural_name()
-    ))?;
-    for (index, step) in steps.iter().enumerate() {
-        ui::step(format!("{}: {}", step.label(index), step.command))?;
-    }
-    let confirmed = ui::prompt_result(
-        confirm("Trust and run these commands for this repository?")
-            .initial_value(false)
-            .interact(),
-        &format!("{} approval cancelled", phase.plural_name()),
-        "failed to read hook approval",
-    )?;
-    if !confirmed {
-        return Err(ui::declined(format!(
-            "{} approval declined; no commands were run",
-            phase.plural_name()
-        )));
-    }
-    trust::approve(repository, phase, steps)
-}
-
 fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&str>) -> Result<()> {
     let destination = resolved_path(destination)?;
     let worktree_identity = git::worktree_identity(&destination)?;
@@ -1619,7 +1587,11 @@ fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&s
     )?;
     match choice {
         0 => {
-            approve_hooks(repository, HookPhase::PostCreate, &config.post_create)?;
+            hook_approval::approve_interactively(
+                repository,
+                HookPhase::PostCreate,
+                &config.post_create,
+            )?;
             finish_setup(
                 repository,
                 &config,

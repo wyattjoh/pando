@@ -98,11 +98,11 @@ fn legacy_post_create_hash(steps: &[HookStep]) -> String {
 ///
 /// Returns an error when repository identity or trust storage cannot be resolved.
 pub fn is_trusted(repository: &Repository, phase: HookPhase, steps: &[HookStep]) -> Result<bool> {
-    let identity = repository_key(repository)?;
-    let trust = read_trust()?;
     if steps.is_empty() {
         return Ok(true);
     }
+    let identity = repository_key(repository)?;
+    let trust = read_trust()?;
     let approved = match trust.repositories.get(&identity) {
         Some(TrustRecord::Legacy(hash)) if phase == HookPhase::PostCreate => {
             hash == &legacy_post_create_hash(steps)
@@ -120,7 +120,7 @@ pub fn is_trusted(repository: &Repository, phase: HookPhase, steps: &[HookStep])
 /// # Errors
 ///
 /// Returns an error when repository identity or trust storage cannot be updated.
-pub fn approve(repository: &Repository, phase: HookPhase, steps: &[HookStep]) -> Result<()> {
+pub(crate) fn approve(repository: &Repository, phase: HookPhase, steps: &[HookStep]) -> Result<()> {
     let identity = repository_key(repository)?;
     let mut trust = read_trust()?;
     let approvals = match trust.repositories.remove(&identity) {
@@ -355,7 +355,7 @@ pub fn reset(repository: &Repository) -> Result<bool> {
     Ok(removed)
 }
 
-fn repository_key(repository: &Repository) -> Result<String> {
+pub(crate) fn repository_key(repository: &Repository) -> Result<String> {
     let path = repository.identity()?;
     let mut key = String::with_capacity(4 + path.as_os_str().as_bytes().len() * 2);
     key.push_str("hex:");

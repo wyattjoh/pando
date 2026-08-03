@@ -14,11 +14,10 @@ use crate::{
     Condition, Worktree, WorktreeKind,
     config::{EffectiveConfig, HookPhase},
     git::{self, Repository},
-    hash,
+    hash, hook_approval,
     protocol::BytePath,
     render,
     setup::{self, HookOutcome},
-    smart::approve_hooks,
     squash, trust, ui,
 };
 
@@ -350,7 +349,7 @@ enum MergeIntent {
 pub fn remove(branches: &[String], force: bool) -> Result<()> {
     let plan = plan_remove(branches, force)?;
     for target in &plan.targets {
-        approve_hooks(
+        hook_approval::approve_interactively(
             &plan.repository,
             HookPhase::PreRemove,
             &target.config.pre_remove,
@@ -658,7 +657,7 @@ fn merge_inner(
         || state.validated_target.as_deref() != Some(&target_commit)
     {
         let config = EffectiveConfig::load(&repository)?;
-        approve_hooks(&repository, HookPhase::PreMerge, &config.pre_merge)?;
+        hook_approval::approve_interactively(&repository, HookPhase::PreMerge, &config.pre_merge)?;
         run_hooks(
             HookPhase::PreMerge,
             &config.pre_merge,
@@ -723,7 +722,7 @@ fn report(transcript: &str) -> Result<()> {
 
 fn cleanup_merge(repository: &Repository, state: &MergeJournal) -> Result<()> {
     let config = EffectiveConfig::load_for_worktree(repository, &state.topic_path)?;
-    approve_hooks(repository, HookPhase::PreRemove, &config.pre_remove)?;
+    hook_approval::approve_interactively(repository, HookPhase::PreRemove, &config.pre_remove)?;
     run_hooks(HookPhase::PreRemove, &config.pre_remove, &state.topic_path)?;
     let worktree = repository
         .worktrees
