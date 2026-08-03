@@ -4,16 +4,31 @@ All three files are strict YAML (`deny_unknown_fields` on every struct):
 malformed files, duplicate/unknown keys, wrong types, empty `command`
 strings, and empty `name` strings are all hard errors with file context.
 
-| Layer | Path | Can set placement (`worktrees.root`) | Can set `worktrees.default-sort` | Can set `worktrees.base` | Can set hooks | Can set `commit.generation.*` | Can set `merge.*` | Can set `pr.*` |
-|---|---|---|---|---|---|---|---|---|
-| Global | `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml` | yes | yes | yes | **no** | yes | yes | yes |
-| Shared | `.pando.yaml` in the **invoking** worktree | **no** (only `target-branch` and `base`) | **no** | yes | yes | yes (untrusted, needs `pando trust commit-approve`) | yes (untrusted, needs `pando trust merge-approve`) | yes |
-| Local | `.pando.local.yaml` in the **primary** worktree | yes | yes | yes | yes | yes | yes | yes |
+| Layer | Path | Can set placement (`worktrees.root`) | Can set `worktrees.default-sort` | Can set `worktrees.base` | Can set `install.command` | Can set hooks | Can set `commit.generation.*` | Can set `merge.*` | Can set `pr.*` |
+|---|---|---|---|---|---|---|---|---|---|
+| Global | `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml` | yes | yes | yes | yes | **no** | yes | yes | yes |
+| Shared | `.pando.yaml` in the **invoking** worktree | **no** (only `target-branch` and `base`) | **no** | yes | **no** | yes | yes (untrusted, needs `pando trust commit-approve`) | yes (untrusted, needs `pando trust merge-approve`) | yes |
+| Local | `.pando.local.yaml` in the **primary** worktree | yes | yes | yes | **no** | yes | yes | yes | yes |
 
 `pando install` adds a commented scaffold to the global YAML file. It
 never enables a setting or edits existing user configuration. The scaffold is
 idempotent and documents the required placement root, the optional target
-branch fallback, and the optional PR metadata generator.
+branch fallback, and the optional PR metadata generator. Guided installation
+also saves the selected interactive agent command in its own managed block:
+
+```yaml
+# >>> pando guided installer >>>
+install:
+  command: pi
+# <<< pando guided installer <<<
+```
+
+`install.command` is global-only, must not be empty, and is offered as the
+first choice on the next `pando install`. Pando invokes it through `/bin/sh -c`
+and appends the guided configuration prompt as one quoted positional argument,
+so the value may include ordinary agent flags. Commands with shell operators
+must include one `{prompt}` placeholder at the intended argument position.
+Preserve the marker block.
 
 ## 1. Global placement
 

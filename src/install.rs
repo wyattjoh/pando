@@ -3,19 +3,23 @@ use std::{
     ffi::OsStr,
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::ffi::OsStrExt,
+    os::unix::{ffi::OsStrExt, fs::PermissionsExt, process::ExitStatusExt},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 use anyhow::{Context, Result, bail};
-use cliclack::confirm;
+use cliclack::{confirm, input, select};
+use serde::Serialize;
 
-use crate::ui;
+use crate::{config, ui};
 
 const START_MARKER: &[u8] = b"# >>> pando shell integration >>>";
 const END_MARKER: &[u8] = b"# <<< pando shell integration <<<";
 const CONFIG_START_MARKER: &[u8] = b"# >>> pando configuration scaffold >>>";
 const CONFIG_END_MARKER: &[u8] = b"# <<< pando configuration scaffold <<<";
+const INSTALL_START_MARKER: &[u8] = b"# >>> pando guided installer >>>";
+const INSTALL_END_MARKER: &[u8] = b"# <<< pando guided installer <<<";
 
 const CONFIG_SCAFFOLD: &[u8] = br"# >>> pando configuration scaffold >>>
 # Uncomment and customize these settings as needed.
@@ -163,11 +167,15 @@ pub fn preview() -> Result<()> {
 
 /// Installs or updates the managed zsh integration after confirmation.
 ///
+/// When `guided` is true, the deterministic shell installation is followed by
+/// an interactive agent selector and an LLM-guided configuration session.
+///
 /// # Errors
 ///
 /// Returns an error when environment paths cannot be resolved, existing files
-/// cannot be inspected, confirmation cannot be read, or a planned write fails.
-pub fn run() -> Result<()> {
+/// cannot be inspected, confirmation cannot be read, a planned write fails, or
+/// the selected agent cannot complete its session.
+pub fn run(guided: bool) -> Result<()> {
     let config_path = config_home()?.join("pando/config.yaml");
     let integration_path = config_home()?.join("pando/pando.zsh");
     let zshrc_path = zshrc_path()?;
@@ -181,66 +189,389 @@ pub fn run() -> Result<()> {
     let config_changed = existing_config != desired_config;
     let integration_changed = existing_integration != INTEGRATION;
     let zshrc_changed = existing_zshrc != desired_zshrc;
+    let shell_changed = config_changed || integration_changed || zshrc_changed;
 
-    if !config_changed && !integration_changed && !zshrc_changed {
-        ui::info("The Pando installation is already current; no changes are required.")?;
-        return ui::finish(ui::success_style().apply_to("Pando installation is already current."));
-    }
+    if shell_changed {
+        ui::ensure_interactive("Pando installation requires confirmation")?;
+        ui::info(ui::heading_style().apply_to("Planned Pando installation changes:"))?;
+        if config_changed {
+            ui::step(format!(
+                "write {}",
+                ui::worktree_data_style().apply_to(config_path.display())
+            ))?;
+        }
+        if integration_changed {
+            ui::step(format!(
+                "write {}",
+                ui::worktree_data_style().apply_to(integration_path.display())
+            ))?;
+        }
+        if zshrc_changed {
+            ui::step(format!(
+                "update {}",
+                ui::worktree_data_style().apply_to(zshrc_path.display())
+            ))?;
+        }
 
-    ui::ensure_interactive("Pando installation requires confirmation")?;
-    ui::info(ui::heading_style().apply_to("Planned Pando installation changes:"))?;
-    if config_changed {
-        ui::step(format!(
-            "write {}",
-            ui::worktree_data_style().apply_to(config_path.display())
-        ))?;
-    }
-    if integration_changed {
-        ui::step(format!(
-            "write {}",
-            ui::worktree_data_style().apply_to(integration_path.display())
-        ))?;
-    }
-    if zshrc_changed {
-        ui::step(format!(
-            "update {}",
+        let confirmed = ui::prompt_result(
+            confirm("Apply these changes?")
+                .initial_value(false)
+                .interact(),
+            "installation cancelled",
+            "failed to read installation confirmation",
+        )?;
+        if !confirmed {
+            return Err(ui::declined_noop(
+                "Installation declined; no files were changed.",
+                "Zsh integration was not installed.",
+            ));
+        }
+
+        if config_changed {
+            write_atomic(&config_path, &desired_config)
+                .with_context(|| format!("failed to update {}", config_path.display()))?;
+        }
+        if integration_changed {
+            write_atomic(&integration_path, INTEGRATION)
+                .with_context(|| format!("failed to write {}", integration_path.display()))?;
+        }
+        if zshrc_changed {
+            write_atomic(&zshrc_path, &desired_zshrc)
+                .with_context(|| format!("failed to update {}", zshrc_path.display()))?;
+        }
+
+        ui::success("Installed zsh integration.")?;
+        ui::info(format!(
+            "Restart zsh or run: source {}",
             ui::worktree_data_style().apply_to(zshrc_path.display())
         ))?;
+    } else {
+        ui::info("The Pando shell integration is already current.")?;
     }
 
+    if guided {
+        return run_guided_configuration(&config_path);
+    }
+
+    let completion = if shell_changed {
+        "Zsh integration installed."
+    } else {
+        "Pando installation is already current."
+    };
+    ui::finish(ui::success_style().apply_to(completion))
+}
+
+#[derive(Clone, Copy)]
+struct KnownAgent {
+    executable: &'static str,
+    label: &'static str,
+    command: &'static str,
+}
+
+const KNOWN_AGENTS: [KnownAgent; 4] = [
+    KnownAgent {
+        executable: "pi",
+        label: "Pi",
+        command: "pi",
+    },
+    KnownAgent {
+        executable: "claude",
+        label: "Claude Code",
+        command: "claude",
+    },
+    KnownAgent {
+        executable: "codex",
+        label: "Codex",
+        command: "codex",
+    },
+    KnownAgent {
+        executable: "gemini",
+        label: "Gemini CLI",
+        command: "gemini",
+    },
+];
+
+struct AgentChoice {
+    label: String,
+    hint: &'static str,
+    command: String,
+}
+
+fn run_guided_configuration(config_path: &Path) -> Result<()> {
+    ui::ensure_interactive("guided Pando configuration requires an interactive terminal")?;
+    let saved_command = config::load_install_command(config_path)?;
+    let choices = agent_choices(saved_command.as_deref());
+    let mut selector = select("Choose your connected LLM agent")
+        .initial_value(0)
+        .max_rows(6);
+    for (index, choice) in choices.iter().enumerate() {
+        selector = selector.item(index, &choice.label, choice.hint);
+    }
+    let selected = ui::prompt_result(
+        selector.interact(),
+        "agent selection cancelled",
+        "failed to read the agent selection",
+    )?;
+    let default_command = &choices[selected].command;
+    let mut command_prompt = input("Command to launch the agent").validate(|value: &String| {
+        validate_agent_command(value).map_err(|error| error.to_string())
+    });
+    if !default_command.is_empty() {
+        command_prompt = command_prompt.default_input(default_command);
+    }
+    let command: String = ui::prompt_result(
+        command_prompt.interact(),
+        "agent command entry cancelled",
+        "failed to read the agent command",
+    )?;
+    let command = command.trim().to_owned();
+
     let confirmed = ui::prompt_result(
-        confirm("Apply these changes?")
-            .initial_value(false)
+        confirm("Save this command and start guided configuration?")
+            .initial_value(true)
             .interact(),
-        "installation cancelled",
-        "failed to read installation confirmation",
+        "guided configuration cancelled",
+        "failed to read guided configuration confirmation",
     )?;
     if !confirmed {
         return Err(ui::declined_noop(
-            "Installation declined; no files were changed.",
-            "Zsh integration was not installed.",
+            "Guided configuration declined; the agent command was not saved.",
+            "Zsh integration installed without guided configuration.",
         ));
     }
 
-    if config_changed {
-        write_atomic(&config_path, &desired_config)
+    let existing = read_optional(config_path)?;
+    let desired = persist_install_command(&existing, saved_command.as_deref(), &command)?;
+    if existing != desired {
+        write_atomic(config_path, &desired)
             .with_context(|| format!("failed to update {}", config_path.display()))?;
     }
-    if integration_changed {
-        write_atomic(&integration_path, INTEGRATION)
-            .with_context(|| format!("failed to write {}", integration_path.display()))?;
+    ui::step(format!(
+        "saved guided installer command in {}",
+        ui::worktree_data_style().apply_to(config_path.display())
+    ))?;
+
+    let cwd = env::current_dir().context("failed to resolve the guided session directory")?;
+    let prompt = guided_prompt(config_path, &cwd, &command);
+    ui::info(format!(
+        "Launching {} for guided configuration...",
+        ui::worktree_data_style().apply_to(&command)
+    ))?;
+    run_agent(&command, &prompt, &cwd)?;
+    ui::success("Guided configuration session completed.")?;
+    ui::finish(ui::success_style().apply_to("Pando installation and configuration complete."))
+}
+
+fn agent_choices(saved_command: Option<&str>) -> Vec<AgentChoice> {
+    let mut choices = Vec::new();
+    if let Some(saved) = saved_command {
+        let label = KNOWN_AGENTS
+            .iter()
+            .find(|agent| agent.command == saved)
+            .map_or_else(
+                || "Saved command".to_owned(),
+                |agent| format!("{} (saved)", agent.label),
+            );
+        choices.push(AgentChoice {
+            label,
+            hint: "from global config",
+            command: saved.to_owned(),
+        });
     }
-    if zshrc_changed {
-        write_atomic(&zshrc_path, &desired_zshrc)
-            .with_context(|| format!("failed to update {}", zshrc_path.display()))?;
+    for agent in KNOWN_AGENTS {
+        if saved_command == Some(agent.command) || !executable_on_path(agent.executable) {
+            continue;
+        }
+        choices.push(AgentChoice {
+            label: agent.label.to_owned(),
+            hint: "detected on PATH",
+            command: agent.command.to_owned(),
+        });
+    }
+    choices.push(AgentChoice {
+        label: "Custom command".to_owned(),
+        hint: "enter another agent CLI",
+        command: String::new(),
+    });
+    choices
+}
+
+fn executable_on_path(name: &str) -> bool {
+    env::var_os("PATH").is_some_and(|path| {
+        env::split_paths(&path).any(|directory| {
+            fs::metadata(directory.join(name)).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+    })
+}
+
+fn guided_prompt(config_path: &Path, cwd: &Path, command: &str) -> String {
+    format!(
+        "You are guiding the user through a complete Pando installation and configuration. \
+The deterministic zsh integration is already installed. Continue as an interactive conversation: \
+inspect the local environment, explain each relevant choice, ask the user for preferences, and use \
+your file tools to update the global YAML config at {config_path}. Preserve both Pando-managed marker \
+blocks exactly, including install.command, which must remain {command:?}. Configure the full useful \
+global surface as appropriate: worktrees.root, worktrees.default-sort, worktrees.base, \
+worktrees.target-branch, commit.generation, merge.squash and merge.generation, pr.provider, \
+pr.generation, and pr.pull-request-template. Values are strict YAML. default-sort accepts git, branch, \
+last-commit-at, or path; base accepts head or fresh; pr.provider accepts auto, github, or tea. Global \
+configuration cannot define hooks. If the current directory {cwd} is in a Git repository, you may \
+also explain the committed .pando.yaml and ignored .pando.local.yaml layers, but edit them only after \
+explicit user approval. Never overwrite unrelated settings or comments. Validate the resulting YAML \
+and finish by summarizing what you changed and any commands the user still needs to run.",
+        config_path = config_path.display(),
+        cwd = cwd.display(),
+    )
+}
+
+fn run_agent(command: &str, prompt: &str, cwd: &Path) -> Result<()> {
+    let agent_stdout = OpenOptions::new()
+        .write(true)
+        .open("/dev/stderr")
+        .context("failed to open stderr for the guided agent")?;
+    let invocation = agent_invocation(command, prompt)?;
+    let status = Command::new("/bin/sh")
+        .args(["-c", &invocation])
+        .current_dir(cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::from(agent_stdout))
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to start the guided configuration agent")?;
+    if status.success() {
+        return Ok(());
+    }
+    if status
+        .signal()
+        .is_some_and(|signal| matches!(signal, 2 | 3 | 15))
+    {
+        bail!("guided configuration agent was interrupted");
+    }
+    bail!("guided configuration agent failed with {status}")
+}
+
+fn validate_agent_command(command: &str) -> Result<()> {
+    let command = command.trim();
+    if command.is_empty() {
+        bail!("agent command cannot be empty");
+    }
+    let placeholders = command.matches("{prompt}").count();
+    if placeholders > 1 {
+        bail!("agent command may contain at most one {{prompt}} placeholder");
+    }
+    if placeholders == 0 && command.chars().any(|value| "|&;<>\n\r".contains(value)) {
+        bail!(
+            "commands with shell operators must place {{prompt}} where the agent should receive it"
+        );
+    }
+    Ok(())
+}
+
+fn agent_invocation(command: &str, prompt: &str) -> Result<String> {
+    validate_agent_command(command)?;
+    let prompt = shell_quote(prompt);
+    if command.contains("{prompt}") {
+        return Ok(format!("exec {}", command.replace("{prompt}", &prompt)));
+    }
+    Ok(format!("exec {command} {prompt}"))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[derive(Serialize)]
+struct ManagedInstallConfig<'a> {
+    install: ManagedInstallCommand<'a>,
+}
+
+#[derive(Serialize)]
+struct ManagedInstallCommand<'a> {
+    command: &'a str,
+}
+
+fn install_command_block(command: &str) -> Result<Vec<u8>> {
+    let yaml = serde_yaml::to_string(&ManagedInstallConfig {
+        install: ManagedInstallCommand { command },
+    })?;
+    Ok([
+        INSTALL_START_MARKER,
+        b"\n",
+        yaml.as_bytes(),
+        INSTALL_END_MARKER,
+        b"\n",
+    ]
+    .concat())
+}
+
+fn persist_install_command(
+    existing: &[u8],
+    saved_command: Option<&str>,
+    command: &str,
+) -> Result<Vec<u8>> {
+    let has_managed_block = find_bytes(existing, INSTALL_START_MARKER).is_some();
+    if !has_managed_block && has_top_level_install(existing)? {
+        if saved_command == Some(command) {
+            return Ok(existing.to_vec());
+        }
+        bail!(
+            "install.command already exists outside Pando's managed block; update it manually or move it between the guided installer markers"
+        );
+    }
+    update_install_command(existing, command)
+}
+
+fn has_top_level_install(existing: &[u8]) -> Result<bool> {
+    if existing.is_empty() {
+        return Ok(false);
+    }
+    let document: serde_yaml::Value = serde_yaml::from_slice(existing)
+        .context("failed to inspect install.command in the global configuration")?;
+    let Some(mapping) = document.as_mapping() else {
+        return Ok(false);
+    };
+    Ok(mapping.contains_key(serde_yaml::Value::String("install".to_owned())))
+}
+
+fn update_install_command(existing: &[u8], command: &str) -> Result<Vec<u8>> {
+    let has_start = find_bytes(existing, INSTALL_START_MARKER).is_some();
+    let has_end = find_bytes(existing, INSTALL_END_MARKER).is_some();
+    if has_start != has_end {
+        bail!("config.yaml contains an incomplete pando guided installer block");
     }
 
-    ui::success("Installed zsh integration.")?;
-    ui::info(format!(
-        "Restart zsh or run: source {}",
-        ui::worktree_data_style().apply_to(zshrc_path.display())
-    ))?;
-    ui::finish(ui::success_style().apply_to("Zsh integration installed."))
+    let block = install_command_block(command)?;
+    let mut output = Vec::with_capacity(existing.len() + block.len() + 1);
+    let mut remaining = existing;
+    let mut inserted = false;
+    while let Some(start) = find_bytes(remaining, INSTALL_START_MARKER) {
+        output.extend_from_slice(&remaining[..start]);
+        let managed = &remaining[start..];
+        let Some(relative_end) = find_bytes(managed, INSTALL_END_MARKER) else {
+            bail!("config.yaml contains an unterminated pando guided installer block");
+        };
+        let mut after = relative_end + INSTALL_END_MARKER.len();
+        if managed.get(after..after + 2) == Some(b"\r\n") {
+            after += 2;
+        } else if managed.get(after) == Some(&b'\n') {
+            after += 1;
+        }
+        if !inserted {
+            output.extend_from_slice(&block);
+            inserted = true;
+        }
+        remaining = &managed[after..];
+    }
+    output.extend_from_slice(remaining);
+    if !inserted {
+        if !output.is_empty() && !output.ends_with(b"\n") {
+            output.push(b'\n');
+        }
+        output.extend_from_slice(&block);
+    }
+    Ok(output)
 }
 
 fn config_home() -> Result<PathBuf> {
@@ -433,8 +764,9 @@ fn write_atomic_file(path: &Path, content: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFIG_END_MARKER, CONFIG_START_MARKER, END_MARKER, START_MARKER, update_config_scaffold,
-        update_source_block,
+        CONFIG_END_MARKER, CONFIG_START_MARKER, END_MARKER, INSTALL_END_MARKER,
+        INSTALL_START_MARKER, START_MARKER, agent_invocation, persist_install_command,
+        update_config_scaffold, update_install_command, update_source_block,
     };
 
     #[test]
@@ -445,6 +777,67 @@ mod tests {
         assert_eq!(update_config_scaffold(&updated).unwrap(), updated);
         assert_eq!(count_marker(&updated, CONFIG_START_MARKER), 1);
         assert_eq!(count_marker(&updated, CONFIG_END_MARKER), 1);
+    }
+
+    #[test]
+    fn guided_installer_command_is_added_updated_and_idempotent() {
+        let existing = b"worktrees:\n  root: ../worktrees\n";
+        let installed = update_install_command(existing, "pi").unwrap();
+        assert!(installed.starts_with(existing));
+        assert!(
+            installed
+                .windows(b"command: pi".len())
+                .any(|value| value == b"command: pi")
+        );
+        assert_eq!(update_install_command(&installed, "pi").unwrap(), installed);
+
+        let updated = update_install_command(&installed, "claude --model opus").unwrap();
+        assert!(
+            updated
+                .windows(b"command: claude --model opus".len())
+                .any(|value| value == b"command: claude --model opus")
+        );
+        assert_eq!(count_marker(&updated, INSTALL_START_MARKER), 1);
+        assert_eq!(count_marker(&updated, INSTALL_END_MARKER), 1);
+    }
+
+    #[test]
+    fn unmarked_install_command_is_preserved_without_creating_duplicate_yaml() {
+        let existing = b"install:\n  command: claude\nworktrees:\n  root: ../worktrees\n";
+        assert_eq!(
+            persist_install_command(existing, Some("claude"), "claude").unwrap(),
+            existing
+        );
+        assert!(
+            persist_install_command(existing, Some("claude"), "pi")
+                .unwrap_err()
+                .to_string()
+                .contains("outside Pando's managed block")
+        );
+    }
+
+    #[test]
+    fn guided_installer_rejects_an_orphaned_end_marker() {
+        let existing = [INSTALL_END_MARKER, b"\n"].concat();
+        assert!(
+            update_install_command(&existing, "pi")
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete pando guided installer block")
+        );
+    }
+
+    #[test]
+    fn shell_operators_require_an_explicit_prompt_placeholder() {
+        assert!(agent_invocation("claude | tee transcript", "configure").is_err());
+        assert_eq!(
+            agent_invocation("claude {prompt} | tee transcript", "configure").unwrap(),
+            "exec claude 'configure' | tee transcript"
+        );
+        assert_eq!(
+            agent_invocation("claude --model opus", "configure").unwrap(),
+            "exec claude --model opus 'configure'"
+        );
     }
 
     #[test]

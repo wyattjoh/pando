@@ -4,10 +4,10 @@
 Usage: pando install [OPTIONS]
 ```
 
-No flags beyond the globals. Installs the managed zsh integration and global
-configuration scaffold:
+Installs the managed zsh integration and then starts LLM-guided configuration:
 
-- Previews every mutation and asks for confirmation before writing anything.
+- Previews every deterministic shell mutation and asks for confirmation before
+  writing anything.
 - Adds a commented scaffold to `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml`.
   It leaves `worktrees.root` commented for required placement configuration,
   documents the optional target-branch fallback, and documents the optional PR
@@ -16,6 +16,16 @@ configuration scaffold:
 - Adds one marked source block to `${ZDOTDIR:-$HOME}/.zshrc`.
 - Preserves existing configuration and shell content. Rerunning it safely
   updates only managed content and is idempotent.
+- Detects installed Pi, Claude Code, Codex, and Gemini CLI commands, then shows
+  a selector whose first choice is a previously saved command when present.
+- Offers the selected command as editable input, saves it in a managed global
+  `install.command` block, and launches it with an initial configuration prompt.
+- Keeps the child agent's stdin and terminal output interactive while routing
+  its stdout to Pando's stderr stream, preserving empty Pando stdout.
+
+`--no-guide` skips agent selection and performs only the deterministic shell
+installation. `--dry-run` previews that shell installation without prompting,
+writing, saving a command, or launching an agent.
 
 After installing, restart zsh or:
 
@@ -63,6 +73,20 @@ Two limitations: `remove` re-offers branches already typed on the command line,
 and only zsh is supported. Existing installations pick up completion by
 re-running `pando install` and starting a new shell.
 
+## Guided agent contract
+
+Pando invokes the editable command through `/bin/sh -c` and appends one quoted
+initial prompt as a positional argument. Pi, Claude Code, Codex, and Gemini CLI
+all retain their interactive session in this form. The user-entered command is
+therefore an explicitly authorized shell command and may include agent flags.
+A command containing shell operators must include one `{prompt}` placeholder
+where that argument belongs, for example `claude {prompt} | tee transcript.log`.
+The prompt tells the agent to preserve Pando's managed marker blocks, keep the
+saved `install.command`, ask before edits, validate strict YAML, and cover the
+full global configuration surface. Project `.pando.yaml` or
+`.pando.local.yaml` edits require separate explicit approval inside the agent
+session.
+
 ## Structured JSON contract
 
-`install --input-output json` accepts `input.dry_run`. Dry run performs path/content preflight, prompts for nothing, writes nothing, and returns planned `file.write` effects with byte-safe targets. An already-current installation has its own successful outcome. A non-dry JSON request requiring writes returns `install.approval_required`, planned effects, and a manual `pando install` next step. Human `--dry-run` renders the same plan without JSON or mutation. The zsh function detects JSON flags by argv element (including `--flag=json`) and bypasses destination capture in JSON or noninteractive shells.
+`install --input-output json` accepts `input.dry_run`. Dry run performs path/content preflight, prompts for nothing, writes nothing, launches no agent, and returns planned `file.write` effects with byte-safe targets. An already-current deterministic installation has its own successful outcome. A non-dry JSON request requiring writes returns `install.approval_required`, planned effects, and a manual `pando install` next step, which uses guided mode by default. Human `--dry-run` renders the same deterministic plan without JSON or mutation. `--no-guide` is an argv-only human option and is rejected when mixed with `--input-output json`. The zsh function detects JSON flags by argv element (including `--flag=json`) and bypasses destination capture in JSON or noninteractive shells.

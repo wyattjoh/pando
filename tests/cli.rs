@@ -2579,6 +2579,121 @@ fn install_rejects_a_noninteractive_confirmation_before_rendering_a_prompt() {
 }
 
 #[test]
+fn install_guided_prompts_can_be_cancelled_after_shell_installation() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+    let empty_path = tempfile::tempdir().unwrap();
+    let mut command = guided_install_command(home.path(), xdg.path(), Some(zdot.path()));
+    command.env("PATH", empty_path.path());
+    let output = run_pty_command(command, b"y\r\x1b");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.contains("agent command entry cancelled"),
+        "{}",
+        output.stderr
+    );
+    assert!(xdg.path().join("pando/pando.zsh").is_file());
+    let config = fs::read_to_string(xdg.path().join("pando/config.yaml")).unwrap();
+    assert!(!config.contains("# >>> pando guided installer >>>"));
+}
+
+#[test]
+fn install_guides_configuration_with_a_detected_agent_and_persists_its_command() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let captured_prompt = home.path().join("guided-prompt");
+    let agent = bin.path().join("pi");
+    fs::write(
+        &agent,
+        "#!/bin/sh\nprintf 'agent stdout\\n'\nprintf '%s' \"$1\" > \"$PANDO_CAPTURED_PROMPT\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut command = guided_install_command(home.path(), xdg.path(), Some(zdot.path()));
+    command
+        .env("PATH", bin.path())
+        .env("PANDO_CAPTURED_PROMPT", &captured_prompt)
+        .env("CLICOLOR_FORCE", "1");
+    let installed = run_pty_command(command, b"y\r\r\r\r");
+
+    assert!(installed.status.success(), "{}", installed.stderr);
+    assert!(installed.stdout.is_empty(), "{}", installed.stdout);
+    let stderr = console::strip_ansi_codes(&installed.stderr);
+    assert!(
+        stderr.contains("Choose your connected LLM agent"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Command to launch the agent"), "{stderr}");
+    assert!(stderr.contains("agent stdout"), "{stderr}");
+    assert!(
+        stderr.contains("Pando installation and configuration complete."),
+        "{stderr}"
+    );
+
+    let config = fs::read_to_string(xdg.path().join("pando/config.yaml")).unwrap();
+    assert!(config.contains("# >>> pando guided installer >>>"));
+    assert!(config.contains("install:\n  command: pi"));
+    let prompt = fs::read_to_string(&captured_prompt).unwrap();
+    assert!(prompt.contains("complete Pando installation and configuration"));
+    assert!(prompt.contains("install.command, which must remain \"pi\""));
+    assert!(prompt.contains(&xdg.path().join("pando/config.yaml").display().to_string()));
+}
+
+#[test]
+fn install_preserves_an_existing_unmarked_agent_command_without_duplicate_yaml() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        "install:\n  command: pi\n",
+    )
+    .unwrap();
+    let agent = bin.path().join("pi");
+    fs::write(&agent, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut command = guided_install_command(home.path(), xdg.path(), Some(zdot.path()));
+    command.env("PATH", bin.path());
+    let output = run_pty_command(command, b"y\r\r\r\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    let config = fs::read_to_string(xdg.path().join("pando/config.yaml")).unwrap();
+    assert_eq!(config.matches("install:").count(), 1, "{config}");
+    assert!(config.contains("install:\n  command: pi"), "{config}");
+    assert!(!config.contains("# >>> pando guided installer >>>"));
+}
+
+#[test]
+fn install_request_mode_rejects_the_human_no_guide_flag() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+    let mut command = guided_install_command(home.path(), xdg.path(), Some(zdot.path()));
+    command
+        .args(["--input-output", "json", "--no-guide"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let request = serde_json::json!({"schema_version":1,"input":{"dry_run":true}});
+    let output = run_json_command(command, Some(&request));
+
+    assert!(!output.status.success());
+    assert_eq!(
+        assert_json_pure(&output)["error"]["code"],
+        "json.invalid_request"
+    );
+}
+
+#[test]
 fn install_preserves_zshrc_and_is_idempotent() {
     let home = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
@@ -2860,7 +2975,7 @@ fn install_falls_back_to_home_configuration_paths() {
     let home = tempfile::tempdir().unwrap();
     let mut command = Command::cargo_bin("pando").unwrap();
     command
-        .arg("install")
+        .args(["install", "--no-guide"])
         .env("HOME", home.path())
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("ZDOTDIR");
@@ -4588,6 +4703,12 @@ fn run_install(home: &Path, xdg: &Path, zdotdir: Option<&Path>, input: &[u8]) ->
 }
 
 fn install_command(home: &Path, xdg: &Path, zdotdir: Option<&Path>) -> Command {
+    let mut command = guided_install_command(home, xdg, zdotdir);
+    command.arg("--no-guide");
+    command
+}
+
+fn guided_install_command(home: &Path, xdg: &Path, zdotdir: Option<&Path>) -> Command {
     let mut command = Command::cargo_bin("pando").unwrap();
     command
         .arg("install")

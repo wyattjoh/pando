@@ -91,7 +91,7 @@ for leaf contracts and approval rules.
 | `merge [--no-rebase] [--no-remove] [--no-squash] [--yolo] [--dry-run]` | Integrate the current topic into the configured target branch, squashing it into one commit by default | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `commit [-m MSG] [--stage-all] [--dry-run]` | Commit the existing index, optionally staging every change first | [`references/commands/commit.md`](references/commands/commit.md) |
 | `trust [--dry-run] <subcommand>` | Inspect, approve, or revoke hook-phase, commit-generation, squash-message-generation, or PR-generation trust. Subcommands: `status`, `reset`, `commit-status`, `commit-reset`, `commit-approve`, `merge-status`, `merge-reset`, `merge-approve`, `pr-status`, `pr-reset`, `pr-approve` | [`references/commands/trust.md`](references/commands/trust.md) |
-| `install [--dry-run]` | Install or preview the managed zsh integration (including dynamic tab completion) and global config scaffold | [`references/commands/install.md`](references/commands/install.md) |
+| `install [--dry-run] [--no-guide]` | Install the managed zsh integration, then configure Pando interactively with a connected agent | [`references/commands/install.md`](references/commands/install.md) |
 | `pr create` | Create a draft or ready pull request from a published topic branch | [`references/commands/pr.md`](references/commands/pr.md) |
 
 ## Common workflows
@@ -102,7 +102,7 @@ brew install wyattjoh/stable/pando
 pando install
 source ${ZDOTDIR:-$HOME}/.zshrc
 ```
-To build from source, run `just install` before `pando install` instead. Homebrew and `just install` both provide `pando` plus its `pd` symlink. `pando install` adds an idempotent commented scaffold to the global config without enabling or overwriting user settings.
+To build from source, run `just install` before `pando install` instead. Homebrew and `just install` both provide `pando` plus its `pd` symlink. After the deterministic shell changes, `pando install` detects Pi, Claude Code, Codex, and Gemini CLI, asks which connected agent to use, offers its launch command for editing, saves the choice as global `install.command`, and launches an interactive full-configuration session. Use `--no-guide` for only the shell integration or `--dry-run` for a noninteractive preview. The scaffold remains idempotent and does not enable or overwrite the other user settings.
 Source: README.md ("Install")
 
 ### Configure a root before creating any worktrees

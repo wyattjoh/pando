@@ -13,6 +13,7 @@
 - macOS or Linux
 - Git
 - zsh for parent-shell directory switching
+- Pi, Claude Code, Codex, Gemini CLI, or another interactive agent command for guided configuration
 - Rust 1.85 or newer when building from source
 
 ## Install
@@ -31,7 +32,11 @@ just install
 pando install
 ```
 
-`just install` installs `pando` with Cargo and creates `pd` as a relative symlink beside it. The installer previews every mutation and asks for confirmation. It writes a commented configuration scaffold to `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml`, writes `${XDG_CONFIG_HOME:-$HOME/.config}/pando/pando.zsh`, and adds one marked source block to `${ZDOTDIR:-$HOME}/.zshrc`. Existing configuration and shell settings are preserved, and rerunning it safely updates only the managed blocks.
+`just install` installs `pando` with Cargo and creates `pd` as a relative symlink beside it. The installer previews every deterministic shell mutation and asks for confirmation. It writes a commented configuration scaffold to `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml`, writes `${XDG_CONFIG_HOME:-$HOME/.config}/pando/pando.zsh`, and adds one marked source block to `${ZDOTDIR:-$HOME}/.zshrc`. Existing configuration and shell settings are preserved, and rerunning it safely updates only the managed blocks.
+
+After the shell integration is current, `pando install` detects Pi, Claude Code, Codex, and Gemini CLI on `PATH`. It first asks which connected agent to use, then offers an editable command such as `pi` or `claude`. Pando saves that command as `install.command` in a managed block of the global config and launches the agent with a purpose-built initial prompt. The agent continues as an interactive session, inspects the environment, asks about the full Pando configuration surface, and edits the strict YAML only with the user's approval. Agent stdout is routed to the terminal UI stream so Pando's stdout remains empty.
+
+Use `pando install --no-guide` to install only the deterministic shell integration, or `pando install --dry-run` to preview it without prompting, writing, or launching an agent. Commands with shell operators must include `{prompt}` where the generated initial prompt belongs, for example `claude {prompt} | tee transcript.log`.
 
 Restart zsh or run:
 
@@ -170,7 +175,16 @@ If a configured root is inside the primary checkout, that destination must also 
 /.worktrees/
 ```
 
-No configured root is an error with a copyable global configuration example. `pando install` adds a commented scaffold for `worktrees.root`, the optional target branch fallback, and the optional PR metadata generator to the global YAML file. The scaffold never enables a setting, preserves existing configuration, and is idempotent.
+No configured root is an error with a copyable global configuration example. `pando install` adds a commented scaffold for `worktrees.root`, the optional target branch fallback, and the optional PR metadata generator to the global YAML file. The scaffold never enables those settings, preserves existing configuration, and is idempotent. Guided installation separately maintains the selected interactive agent command:
+
+```yaml
+# >>> pando guided installer >>>
+install:
+  command: pi
+# <<< pando guided installer <<<
+```
+
+Preserve this managed block when editing the global config. On a later run, the saved command is the first agent choice and remains editable before launch.
 
 ## Setup trust and recovery
 

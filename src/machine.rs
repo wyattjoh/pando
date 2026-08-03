@@ -1787,9 +1787,9 @@ pub fn merge(
 ///
 /// # Errors
 /// Returns an error when installation paths cannot be inspected or stdout cannot be written.
-pub fn install(request_mode: bool, dry_flag: bool) -> Result<()> {
+pub fn install(request_mode: bool, dry_flag: bool, no_guide: bool) -> Result<()> {
     let (id, dry) = if request_mode {
-        if dry_flag {
+        if dry_flag || no_guide {
             return emit_err(
                 "install",
                 None,

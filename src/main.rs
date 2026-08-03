@@ -125,11 +125,14 @@ enum Commands {
         #[command(subcommand)]
         command: PrCommand,
     },
-    /// Install the managed zsh integration.
+    /// Install the managed zsh integration and configure Pando with an LLM.
     Install {
-        /// Preview installation without writing or prompting.
+        /// Preview installation without writing, prompting, or launching an agent.
         #[arg(long)]
         dry_run: bool,
+        /// Install the shell integration without launching guided configuration.
+        #[arg(long)]
+        no_guide: bool,
     },
 }
 
@@ -428,9 +431,14 @@ fn run(cli: Cli) -> Result<()> {
             };
             ui::finish(ui::muted_style().apply_to(summary))
         }
-        Commands::Install { dry_run } if json => machine::install(request_mode, dry_run),
-        Commands::Install { dry_run: false } => install::run(),
-        Commands::Install { dry_run: true } => install::preview(),
+        Commands::Install { dry_run, no_guide } if json => {
+            machine::install(request_mode, dry_run, no_guide)
+        }
+        Commands::Install {
+            dry_run: false,
+            no_guide,
+        } => install::run(!no_guide),
+        Commands::Install { dry_run: true, .. } => install::preview(),
         Commands::Pr {
             command:
                 PrCommand::Create {

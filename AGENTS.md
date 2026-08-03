@@ -38,14 +38,14 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 | `squash.rs` | Merge-time branch collapse: squash planning, prompt rendering, generator subprocess, `reset --soft` plus commit |
 | `trust.rs` | Post-create hook approval: command hashing, XDG `trust.json`, atomic writes |
 | `setup.rs` | Post-create hook execution and the incomplete-setup journal |
-| `install.rs` | Managed zsh integration; marker-block rewriting of `.zshrc` |
+| `install.rs` | Managed zsh integration, marker-block rewriting, connected-agent detection, and LLM-guided global configuration |
 | `completion.rs` | Best-effort candidate producers for dynamic zsh completion of branch arguments |
 | `render.rs` | Column alignment shared by `list` output and the picker's menu labels, plus the shared styling for captured Git output and commit messages |
 | `hash.rs` | Hex encoding shared by `trust.rs` and `setup.rs` |
 
 ### Load-bearing invariants
 
-**stdout purity.** The binary writes *only* a successful destination path (`switch`) or a single property value (`get`) to stdout, always with a trailing newline. Prompts, warnings, and hook output go to stderr. The installed zsh function captures stdout and `cd`s to it, so any stray `println!` in a `switch` path silently breaks directory switching. Note the asymmetry: `finish_setup` writes the destination *before* returning an error on hook failure, so the shell still enters a half-configured worktree while preserving the nonzero status.
+**stdout purity.** The binary writes *only* a successful destination path (`switch`) or a single property value (`get`) to stdout, always with a trailing newline. Prompts, warnings, hook output, and guided installer agent output go to stderr. The installed zsh function captures stdout and `cd`s to it, so any stray `println!` in a `switch` path silently breaks directory switching. Note the asymmetry: `finish_setup` writes the destination *before* returning an error on hook failure, so the shell still enters a half-configured worktree while preserving the nonzero status.
 
 **Paths are bytes, not strings.** Destinations are written with `write_all(path.as_os_str().as_bytes())` rather than `Display`, and porcelain parsing goes through `OsString::from_vec`. Non-UTF-8 and space-containing paths are covered by tests — don't introduce `to_string_lossy` on a path that reaches stdout.
 
@@ -55,7 +55,7 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 - `.pando.yaml` read from the **invoking** worktree controls shared hooks, the target branch, and the new-branch base, never placement or personal sort, so setup follows the branch you create from;
 - `.pando.local.yaml` read from the **primary** worktree controls personal placement, hooks, default sort, and the new-branch base, and must be Git-ignored or loading is a hard error.
 
-`worktrees.base`, `pr.provider`, `merge.squash`, and `merge.generation` are legal in all three layers, resolving local over shared over global. `worktrees.base` defaults to `head`; `head` starts a genuinely new branch at the invoking worktree's `HEAD`, while `fresh` starts it at the remote-tracking ref of the configured `target-branch`, or of the branch named by the remote's `origin/HEAD`. `fresh` reads local refs only. An unresolvable or never-fetched base is a hard error naming the fix, and `--fetch` on `switch`/`create` is the only way to refresh it, fetching exactly that one ref. `pr.provider` defaults to `auto`, selecting `gh` for github.com and `tea` for other forge hosts with a matching configured tea login.
+`worktrees.base`, `pr.provider`, `merge.squash`, and `merge.generation` are legal in all three layers, resolving local over shared over global. `install.command` is global-only and lives in a marker block managed by guided `pando install`; it records the editable connected-agent command, not a generator. `worktrees.base` defaults to `head`; `head` starts a genuinely new branch at the invoking worktree's `HEAD`, while `fresh` starts it at the remote-tracking ref of the configured `target-branch`, or of the branch named by the remote's `origin/HEAD`. `fresh` reads local refs only. An unresolvable or never-fetched base is a hard error naming the fix, and `--fetch` on `switch`/`create` is the only way to refresh it, fetching exactly that one ref. `pr.provider` defaults to `auto`, selecting `gh` for github.com and `tea` for other forge hosts with a matching configured tea login.
 
 Shared hooks run before local hooks; the local root and default sort override their global values. Human list and picker rendering use the effective sort, while structured JSON always retains Git discovery order. All structs use `deny_unknown_fields`, so config mistakes fail loudly with file context.
 

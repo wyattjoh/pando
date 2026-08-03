@@ -112,11 +112,20 @@ struct GlobalConfig {
     #[serde(default)]
     worktrees: Option<WorktreesConfig>,
     #[serde(default)]
+    install: Option<InstallConfig>,
+    #[serde(default)]
     commit: Option<CommitConfig>,
     #[serde(default)]
     merge: Option<MergeConfig>,
     #[serde(default)]
     pr: Option<PrConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallConfig {
+    #[serde(default)]
+    command: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -276,6 +285,7 @@ impl EffectiveConfig {
     ) -> Result<Self> {
         let global_path = config_home()?.join("pando/config.yaml");
         let global: GlobalConfig = read_yaml_optional(&global_path)?;
+        validate_install_command(global.install.as_ref(), &global_path)?;
 
         let shared_path = worktree.join(".pando.yaml");
         let shared: SharedConfig = read_yaml_optional(&shared_path)?;
@@ -547,6 +557,19 @@ fn combine(shared: &HooksConfig, local: &HooksConfig, phase: HookPhase) -> Vec<H
     steps
 }
 
+fn validate_install_command(install: Option<&InstallConfig>, source_hint: &Path) -> Result<()> {
+    if install
+        .and_then(|value| value.command.as_deref())
+        .is_some_and(|command| command.trim().is_empty())
+    {
+        bail!(
+            "install.command cannot be empty while loading configuration near {}",
+            source_hint.display()
+        );
+    }
+    Ok(())
+}
+
 fn validate_generation(
     section: &str,
     generation: Option<&GenerationConfig>,
@@ -653,6 +676,18 @@ fn resolve_root(repository: &Repository, configured: &Path) -> Result<PathBuf> {
         .context("failed to resolve the configured worktree root")
 }
 
+/// Loads the command saved for LLM-guided installation.
+///
+/// # Errors
+///
+/// Returns an error when the global configuration is inaccessible, invalid, or
+/// contains an empty installer command.
+pub fn load_install_command(path: &Path) -> Result<Option<String>> {
+    let global: GlobalConfig = read_yaml_optional(path)?;
+    validate_install_command(global.install.as_ref(), path)?;
+    Ok(global.install.and_then(|install| install.command))
+}
+
 fn read_yaml_optional<T>(path: &Path) -> Result<T>
 where
     T: for<'de> Deserialize<'de> + Default,
@@ -686,6 +721,25 @@ pub fn config_home() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_install_command_is_loaded_and_must_not_be_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.yaml");
+        fs::write(&path, "install:\n  command: claude --model opus\n").unwrap();
+        assert_eq!(
+            load_install_command(&path).unwrap().as_deref(),
+            Some("claude --model opus")
+        );
+
+        fs::write(&path, "install:\n  command: '  '\n").unwrap();
+        assert!(
+            load_install_command(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("install.command cannot be empty")
+        );
+    }
 
     #[test]
     fn pr_provider_defaults_to_auto() {
