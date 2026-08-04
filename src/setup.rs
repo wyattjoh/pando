@@ -166,8 +166,6 @@ fn remove_record(path: &Path) -> Result<()> {
     }
 }
 
-pub type CapturedHookOutput = Vec<(Vec<u8>, Vec<u8>)>;
-
 pub(crate) const CAPTURE_LIMIT: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -318,40 +316,6 @@ fn output_for(policy: OutputPolicy, captured: Vec<CapturedStep>) -> HookOutput {
         OutputPolicy::Streamed => HookOutput::Streamed,
         OutputPolicy::Captured => HookOutput::Captured(captured),
     }
-}
-
-/// Runs hooks with output captured for a machine response.
-///
-/// # Errors
-/// Returns an error when a command cannot be started.
-pub fn run_steps_captured(
-    steps: &[HookStep],
-    destination: &Path,
-) -> Result<(HookOutcome, CapturedHookOutput)> {
-    let execution = execute(
-        HookPhase::PostCreate,
-        steps,
-        destination,
-        OutputPolicy::Captured,
-    )?;
-    let HookOutput::Captured(output) = execution.output else {
-        unreachable!("captured policy always returns captured output");
-    };
-    Ok((
-        execution.outcome,
-        output
-            .into_iter()
-            .map(|step| (step.stdout.content, step.stderr.content))
-            .collect(),
-    ))
-}
-
-/// Runs phase steps sequentially from the destination.
-///
-/// # Errors
-/// Returns an error when a command cannot start, stream output, or be awaited.
-pub fn run_steps(phase: HookPhase, steps: &[HookStep], destination: &Path) -> Result<HookOutcome> {
-    execute(phase, steps, destination, OutputPolicy::Streamed).map(|execution| execution.outcome)
 }
 
 #[cfg(test)]

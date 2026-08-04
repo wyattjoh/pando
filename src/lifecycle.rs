@@ -389,20 +389,15 @@ fn merge_failure_code(kind: MergeExecutionFailureKind) -> &'static str {
 }
 
 fn merge_diagnostics(diagnostics: Vec<MergeDiagnostic>) -> Vec<Diagnostic> {
-    const LIMIT: usize = 16 * 1024;
     diagnostics
         .into_iter()
         .filter(|diagnostic| !diagnostic.content.is_empty())
-        .map(|diagnostic| {
-            let original_size = diagnostic.content.len();
-            let kept = &diagnostic.content[..original_size.min(LIMIT)];
-            Diagnostic {
-                source: diagnostic.phase.into(),
-                stream: diagnostic.stream.into(),
-                content: String::from_utf8_lossy(kept).into_owned(),
-                original_size,
-                truncated: original_size > LIMIT,
-            }
+        .map(|diagnostic| Diagnostic {
+            source: diagnostic.phase.into(),
+            stream: diagnostic.stream.into(),
+            content: String::from_utf8_lossy(&diagnostic.content).into_owned(),
+            original_size: diagnostic.original_size,
+            truncated: diagnostic.truncated,
         })
         .collect()
 }
@@ -2571,10 +2566,13 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     {
         let config = EffectiveConfig::load(&repository)?;
         hook_approval::approve_interactively(&repository, HookPhase::PreMerge, &config.pre_merge)?;
-        run_hooks(
+        execute_merge_hooks(
             HookPhase::PreMerge,
+            "pre_merge",
             &config.pre_merge,
             &repository.current().path,
+            MergeExecutionMode::Human,
+            &mut Vec::new(),
         )?;
         if git::is_dirty(&repository.current().path)? {
             bail!(
@@ -2636,7 +2634,14 @@ fn report(transcript: &str) -> Result<()> {
 fn cleanup_merge(repository: &Repository, state: &MergeJournal) -> Result<()> {
     let config = EffectiveConfig::load_for_worktree(repository, &state.topic_path)?;
     hook_approval::approve_interactively(repository, HookPhase::PreRemove, &config.pre_remove)?;
-    run_hooks(HookPhase::PreRemove, &config.pre_remove, &state.topic_path)?;
+    execute_merge_hooks(
+        HookPhase::PreRemove,
+        "pre_remove",
+        &config.pre_remove,
+        &state.topic_path,
+        MergeExecutionMode::Human,
+        &mut Vec::new(),
+    )?;
     let worktree = repository
         .worktrees
         .iter()
@@ -2877,14 +2882,6 @@ fn check_removable(target: &Worktree, force: bool) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn run_hooks(phase: HookPhase, steps: &[crate::config::HookStep], path: &Path) -> Result<()> {
-    match setup::run_steps(phase, steps, path)? {
-        HookOutcome::Success => Ok(()),
-        HookOutcome::Failed(status) => bail!("{} hook failed with status {status}", phase.key()),
-        HookOutcome::Interrupted => bail!("{} hook was interrupted", phase.key()),
-    }
 }
 
 fn primary_branch(repository: &Repository) -> Result<String> {
