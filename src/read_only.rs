@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use crate::{
     Condition, Row, Worktree, WorktreeKind,
     config::EffectiveConfig,
-    git,
+    git::{self, RepositoryObservation},
     protocol::{BytePath, Diagnostic, ErrorBody},
     smart::port_for_branch,
 };
@@ -188,8 +188,9 @@ pub fn list_worktrees() -> Result<WorktreeListOutcome, QueryFailure> {
     let cwd = env::current_dir()
         .context("failed to read current directory")
         .map_err(|error| QueryFailure::repository(&error))?;
-    let repository =
-        git::repository_with_metadata(&cwd).map_err(|error| QueryFailure::repository(&error))?;
+    let repository = RepositoryObservation::new(&cwd)
+        .repository_with_metadata()
+        .map_err(|error| QueryFailure::repository(&error))?;
     let count = |wanted| {
         repository
             .worktrees
@@ -238,7 +239,7 @@ pub fn list_worktrees() -> Result<WorktreeListOutcome, QueryFailure> {
 }
 
 fn branch_record(record: &git::BranchRecord, worktrees: &[Worktree]) -> BranchRecord {
-    let row = Row::from_branch(record, worktrees);
+    let row = Row::from_branch(&record.branch, record.last_commit_at, worktrees);
     BranchRecord {
         branch: record.branch.clone(),
         head: record.head.clone(),
@@ -257,13 +258,16 @@ pub fn list_branches() -> Result<BranchListOutcome, QueryFailure> {
     let cwd = env::current_dir()
         .context("failed to read current directory")
         .map_err(|error| QueryFailure::repository(&error))?;
-    let branches =
-        git::repository_with_branches(&cwd).map_err(|error| QueryFailure::repository(&error))?;
+    let branches = RepositoryObservation::new(&cwd)
+        .repository_with_branches()
+        .map_err(|error| QueryFailure::repository(&error))?;
     let repository = branches.repository;
     let rows: Vec<_> = branches
         .branches
         .iter()
-        .map(|branch| Row::from_branch(branch, &repository.worktrees))
+        .map(|branch| {
+            Row::from_branch(&branch.branch, branch.last_commit_at, &repository.worktrees)
+        })
         .collect();
     let records: Vec<_> = branches
         .branches
@@ -371,7 +375,9 @@ pub fn get(property: GetProperty) -> Result<GetResult, QueryFailure> {
     let cwd = env::current_dir()
         .context("failed to read current directory")
         .map_err(|error| QueryFailure::repository(&error))?;
-    let repository = git::repository(&cwd).map_err(|error| QueryFailure::repository(&error))?;
+    let repository = RepositoryObservation::new(&cwd)
+        .repository()
+        .map_err(|error| QueryFailure::repository(&error))?;
     let (property, value) = match property {
         GetProperty::Branch => match &repository.current().kind {
             WorktreeKind::Branch(branch) => ("branch", PropertyValue::Text(branch.clone())),

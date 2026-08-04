@@ -231,15 +231,19 @@ impl Row {
         self.condition == Some(Condition::Dirty)
     }
 
-    /// Builds a branch-view row, left-joining `record` against `worktrees` by branch name.
+    /// Builds a branch-view row, left-joining branch facts against `worktrees` by name.
     #[must_use]
-    pub fn from_branch(record: &git::BranchRecord, worktrees: &[Worktree]) -> Self {
-        let worktree = worktree_for_branch(worktrees, &record.branch);
+    pub fn from_branch(
+        branch: &str,
+        last_commit_at: Option<DateTime<FixedOffset>>,
+        worktrees: &[Worktree],
+    ) -> Self {
+        let worktree = worktree_for_branch(worktrees, branch);
         Self {
-            label: record.branch.clone(),
-            branch: Some(record.branch.clone()),
+            label: branch.to_owned(),
+            branch: Some(branch.to_owned()),
             path: worktree.map(|worktree| worktree.path.clone()),
-            last_commit_at: record.last_commit_at,
+            last_commit_at,
             condition: worktree.map(|worktree| worktree.condition),
             current: worktree.is_some_and(|worktree| worktree.current),
         }
@@ -326,7 +330,6 @@ mod row_sort_tests {
 #[cfg(test)]
 mod branch_row_tests {
     use super::{Condition, Row, Worktree, WorktreeKind};
-    use crate::git::BranchRecord;
 
     fn worktree(branch: &str, current: bool, condition: Condition) -> Worktree {
         Worktree {
@@ -341,19 +344,11 @@ mod branch_row_tests {
         }
     }
 
-    fn record(branch: &str) -> BranchRecord {
-        BranchRecord {
-            branch: branch.to_owned(),
-            head: "deadbeef".to_owned(),
-            last_commit_at: None,
-        }
-    }
-
     #[test]
     fn unattached_branch_has_no_path_or_condition() {
         let worktrees = [worktree("main", true, Condition::Clean)];
 
-        let row = Row::from_branch(&record("feature"), &worktrees);
+        let row = Row::from_branch("feature", None, &worktrees);
 
         assert_eq!(row.path, None);
         assert_eq!(row.condition, None);
@@ -364,7 +359,7 @@ mod branch_row_tests {
     fn attached_branch_carries_the_worktrees_path_and_condition() {
         let worktrees = [worktree("feature", false, Condition::Dirty)];
 
-        let row = Row::from_branch(&record("feature"), &worktrees);
+        let row = Row::from_branch("feature", None, &worktrees);
 
         assert_eq!(row.path, Some("/repo/feature".into()));
         assert_eq!(row.condition, Some(Condition::Dirty));

@@ -17,7 +17,7 @@ use crate::{
     Row, SortMode, Worktree, WorktreeKind,
     branch::{self, FETCH_REGISTERED_WORKTREE, Resolver},
     config::{EffectiveConfig, HookPhase},
-    git::{self, Repository},
+    git::{self, Repository, RepositoryObservation},
     hook_approval,
     read_only::{self, PropertyValue},
     render,
@@ -65,9 +65,18 @@ pub fn switch(branch: Option<String>, branches: bool, fetch: bool) -> Result<()>
         } else {
             PickerView::Worktree
         };
-        return pick_and_switch(&git::repository_with_branches(&cwd)?, initial_view, fetch);
+        return pick_and_switch(
+            &RepositoryObservation::new(&cwd).repository_with_branches()?,
+            initial_view,
+            fetch,
+        );
     };
-    resolve_and_switch(&git::repository(&cwd)?, &branch, Intent::Switch, fetch)
+    resolve_and_switch(
+        &RepositoryObservation::new(&cwd).repository()?,
+        &branch,
+        Intent::Switch,
+        fetch,
+    )
 }
 
 /// Creates a worktree for `branch` and emits its destination.
@@ -82,7 +91,7 @@ pub fn switch(branch: Option<String>, branches: bool, fetch: bool) -> Result<()>
 pub fn create(branch: &str, fetch: bool) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     resolve_and_switch(
-        &git::repository(&cwd)?,
+        &RepositoryObservation::new(&cwd).repository()?,
         branch,
         Intent::Create,
         FetchIntent::new(fetch, false),
@@ -127,8 +136,8 @@ pub fn create_dry_run(branch: &str, fetch: bool) -> Result<()> {
 }
 
 fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> {
-    let repository =
-        git::repository(&env::current_dir().context("failed to read the current directory")?)?;
+    let cwd = env::current_dir().context("failed to read the current directory")?;
+    let repository = RepositoryObservation::new(&cwd).repository()?;
     Resolver::new(&repository).validate(branch)?;
     let plan = match worktree_plan::plan(&repository, intent, branch, None, fetch, None, true)? {
         Ok(plan) => plan,
@@ -173,7 +182,7 @@ fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> 
 /// Returns an error when repository or configuration inspection fails.
 pub fn trust_dry_run(command: TrustCommand) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = git::repository(&cwd)?;
+    let repository = RepositoryObservation::new(&cwd).repository()?;
     let outcome = trust::execute(&repository, trust_leaf(command), true)?;
     match command {
         TrustCommand::Status | TrustCommand::CommitStatus | TrustCommand::MergeStatus => {
@@ -212,7 +221,7 @@ pub fn trust_dry_run(command: TrustCommand) -> Result<()> {
 #[allow(clippy::too_many_lines)] // One arm per trust subcommand; splitting hides the surface.
 pub fn trust_command(command: TrustCommand) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = git::repository(&cwd)?;
+    let repository = RepositoryObservation::new(&cwd).repository()?;
     if !matches!(
         command,
         TrustCommand::CommitApprove | TrustCommand::PrApprove | TrustCommand::MergeApprove
@@ -674,7 +683,9 @@ impl PickerViewState {
     ) -> Self {
         let rows: Vec<Row> = branches
             .iter()
-            .map(|record| Row::from_branch(record, &repository.worktrees))
+            .map(|record| {
+                Row::from_branch(&record.branch, record.last_commit_at, &repository.worktrees)
+            })
             .collect();
         let row_refs: Vec<&Row> = rows.iter().collect();
         let labels = render::menu_labels(&row_refs, sort);

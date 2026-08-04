@@ -530,16 +530,24 @@ impl<'cwd> RepositoryObservation<'cwd> {
         Ok(discovery)
     }
 
-    fn repository(self) -> Result<Repository> {
+    pub(crate) fn repository(self) -> Result<Repository> {
         repository_from_worktrees(self.cwd, self.discover()?)
     }
 
-    fn repository_with_metadata(self) -> Result<Repository> {
+    pub(crate) fn repository_with_metadata(self) -> Result<Repository> {
         repository_from_worktrees(self.cwd, self.discover_with_metadata()?)
     }
 
-    fn repository_with_branches(self) -> Result<RepositoryBranches> {
+    pub(crate) fn repository_with_branches(self) -> Result<RepositoryBranches> {
         repository_with_branches_observed(self.cwd)
+    }
+
+    pub(crate) fn is_ignored(self, path: &Path) -> Result<bool> {
+        is_ignored(self.cwd, path)
+    }
+
+    pub(crate) fn resolve_path(path: &Path) -> Result<PathBuf> {
+        canonical_or_normalized(path)
     }
 
     pub(crate) fn branches(self) -> Result<Vec<BranchRecord>> {

@@ -9,7 +9,7 @@ use std::{collections::HashSet, env, path::PathBuf};
 
 use clap_complete::CompletionCandidate;
 
-use crate::{WorktreeKind, branch::Facts, git};
+use crate::{WorktreeKind, branch::Facts, git::RepositoryObservation};
 
 /// Branches `switch` accepts: every local branch, plus remote-tracking refs that
 /// no local branch already shadows.
@@ -18,7 +18,7 @@ pub fn switch_candidates() -> Vec<CompletionCandidate> {
     let Some(cwd) = cwd() else {
         return Vec::new();
     };
-    let Ok(repository) = git::repository(&cwd) else {
+    let Ok(repository) = RepositoryObservation::new(&cwd).repository() else {
         return Vec::new();
     };
     let Ok(facts) = Facts::discover(&repository) else {
@@ -36,7 +36,7 @@ pub fn create_candidates() -> Vec<CompletionCandidate> {
     let Some(cwd) = cwd() else {
         return Vec::new();
     };
-    let Ok(repository) = git::repository(&cwd) else {
+    let Ok(repository) = RepositoryObservation::new(&cwd).repository() else {
         return Vec::new();
     };
     let Ok(facts) = Facts::discover(&repository) else {
@@ -66,7 +66,7 @@ pub fn remove_candidates() -> Vec<CompletionCandidate> {
     let Some(cwd) = cwd() else {
         return Vec::new();
     };
-    let Ok(repository) = git::repository(&cwd) else {
+    let Ok(repository) = RepositoryObservation::new(&cwd).repository() else {
         return Vec::new();
     };
     repository

@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::{
     BaseMode, SortMode,
-    git::{self, Repository},
+    git::{Repository, RepositoryObservation},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -310,7 +310,7 @@ impl EffectiveConfig {
             .map(|primary| primary.join(".pando.local.yaml"));
         let local = if let (Some(primary), Some(path)) = (&repository.primary, &local_path) {
             if path.exists() {
-                if !git::is_ignored(primary, path)? {
+                if !RepositoryObservation::new(primary).is_ignored(path)? {
                     bail!(
                         "{} must be Git-ignored before it can be loaded; add '/.pando.local.yaml' to {}",
                         path.display(),
@@ -672,7 +672,7 @@ fn resolve_root(repository: &Repository, configured: &Path) -> Result<PathBuf> {
             .context("relative worktree roots require a primary worktree")?
             .join(configured)
     };
-    git::canonical_or_normalized(&absolute)
+    RepositoryObservation::resolve_path(&absolute)
         .context("failed to resolve the configured worktree root")
 }
 
