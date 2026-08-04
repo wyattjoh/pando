@@ -66,7 +66,7 @@ mixed command flags. Dry-run mutating requests use `input.dry_run:true`.
 Git branch description as part of creation, so do not follow a successful
 request with a separate `git config branch.<name>.description` call.
 Force is argv-only authorization for removal. Pass `--force` only with explicit user approval; never put `force` in a remove request document. Structured removal evaluates every target's `pre-remove` hook trust before any hook or destructive work; `trust.approval_required` identifies the blocked target and includes the shared approval context plus an interactive recovery invocation. JSON cannot grant hook or generator trust or authorize installer
-writes. Structured worktree records expose nullable RFC 3339
+writes. Structured read-only command help derives result schemas and error catalogs from the runtime query contracts. Structured worktree records expose nullable RFC 3339
 `last_commit_at` values and always retain Git discovery order, regardless of
 the human `worktrees.default-sort` preference. `pando list --branches
 --output json` emits a distinct `result.branches` payload (branch, head,

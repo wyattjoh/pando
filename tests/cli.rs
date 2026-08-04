@@ -6376,6 +6376,54 @@ fn json_version_one_schema_help_matches_runtime_envelopes() {
     }
 }
 
+#[test]
+fn human_and_json_get_preserve_the_same_natural_values() {
+    let repo = Repository::new();
+    for (property, expected_type) in [
+        ("branch", "string"),
+        ("port", "number"),
+        ("worktree-path", "object"),
+    ] {
+        let human = Command::cargo_bin("pando")
+            .unwrap()
+            .args(["get", property])
+            .current_dir(&repo.main)
+            .output()
+            .unwrap();
+        assert!(human.status.success());
+        assert!(human.stderr.is_empty());
+
+        let json = json_command(&repo.main, &["get", property, "--output", "json"], None);
+        assert!(json.status.success());
+        let json = assert_json_pure(&json);
+        let value = &json["result"]["value"];
+        assert_eq!(
+            match value {
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::Object(_) => "object",
+                _ => "unexpected",
+            },
+            expected_type
+        );
+        match property {
+            "branch" => assert_eq!(
+                value.as_str().unwrap().as_bytes(),
+                &human.stdout[..human.stdout.len() - 1]
+            ),
+            "port" => assert_eq!(
+                value.as_u64().unwrap().to_string().as_bytes(),
+                &human.stdout[..human.stdout.len() - 1]
+            ),
+            "worktree-path" => assert_eq!(
+                value["value"].as_str().unwrap().as_bytes(),
+                &human.stdout[..human.stdout.len() - 1]
+            ),
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn json_version_one_byte_paths_effects_diagnostics_and_recovery_are_public() {

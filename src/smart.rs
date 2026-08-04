@@ -19,20 +19,15 @@ use crate::{
     branch::{self, Classification},
     config::{EffectiveConfig, HookPhase},
     git::{self, Repository},
-    hook_approval, render,
+    hook_approval,
+    read_only::{self, PropertyValue},
+    render,
     setup::{self, HookOutcome, HookOutput, OutputPolicy},
     sorted_row_indices, trust, ui,
     worktree_plan::{self, Blocker as PlanBlocker, FetchIntent, Intent, Source},
 };
 
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-pub enum GetProperty {
-    Branch,
-    Port,
-    WorktreePath,
-    PrimaryWorktreePath,
-    WorktreeRoot,
-}
+pub use crate::read_only::GetProperty;
 
 #[derive(Clone, Copy, Debug, clap::Subcommand)]
 pub enum TrustCommand {
@@ -95,46 +90,19 @@ pub fn create(branch: &str, fetch: bool) -> Result<()> {
     )
 }
 
-enum GetValue {
-    Text(String),
-    Path(PathBuf),
-}
-
 /// Prints one stable current-worktree property.
 ///
 /// # Errors
 ///
 /// Returns an error when repository context or the requested value is unavailable.
 pub fn get(property: GetProperty) -> Result<()> {
-    let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = git::repository(&cwd)?;
-    let value = match property {
-        GetProperty::Branch => GetValue::Text(git::current_branch(&repository)?.to_owned()),
-        GetProperty::Port => {
-            GetValue::Text(port_for_branch(git::current_branch(&repository)?).to_string())
-        }
-        GetProperty::WorktreePath => GetValue::Path(resolved_path(&repository.current().path)?),
-        GetProperty::PrimaryWorktreePath => GetValue::Path(resolved_path(
-            repository
-                .primary
-                .as_ref()
-                .context("the current repository has no primary worktree")?,
-        )?),
-        GetProperty::WorktreeRoot => {
-            repository.primary.as_ref().context(
-                "the current repository has no primary worktree; a creation root is unavailable",
-            )?;
-            GetValue::Path(
-                EffectiveConfig::load(&repository)?
-                    .require_root()?
-                    .to_path_buf(),
-            )
-        }
-    };
+    let result = read_only::get(property)
+        .map_err(|failure| anyhow::anyhow!(failure.human_message.unwrap_or(failure.message)))?;
     let mut stdout = io::stdout().lock();
-    match value {
-        GetValue::Text(value) => stdout.write_all(value.as_bytes()),
-        GetValue::Path(value) => stdout.write_all(value.as_os_str().as_bytes()),
+    match result.value() {
+        PropertyValue::Text(value) => stdout.write_all(value.as_bytes()),
+        PropertyValue::Port(value) => stdout.write_all(value.to_string().as_bytes()),
+        PropertyValue::Path(value) => stdout.write_all(value.as_os_str().as_bytes()),
     }
     .context("failed to write requested worktree property")?;
     stdout

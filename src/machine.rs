@@ -1,11 +1,12 @@
 use crate::{
-    Condition, Row, Worktree, WorktreeKind,
+    WorktreeKind,
     branch::{self, Classification},
     config::{EffectiveConfig, HookPhase},
     git, hook_approval, install,
     protocol::{self, BytePath, Effect, EmptyInput},
+    read_only::{self, GetProperty, GetRequest},
     setup::{self, HookOutput, OutputPolicy},
-    smart, trust,
+    trust,
     worktree_plan::Intent,
 };
 use anyhow::{Context, Result};
@@ -76,65 +77,6 @@ impl From<CreateInput> for ResolveInput {
             description: input.description,
         }
     }
-}
-
-#[derive(Debug, JsonSchema, Serialize)]
-struct WorktreeRecord {
-    kind: String,
-    branch: Option<String>,
-    path: BytePath,
-    head: Option<String>,
-    /// RFC 3339 committer timestamp for the worktree's HEAD commit.
-    last_commit_at: Option<String>,
-    condition: String,
-    current: bool,
-    navigable: bool,
-    lock_reason: Option<String>,
-    prune_reason: Option<String>,
-}
-
-#[derive(Debug, JsonSchema, Serialize)]
-struct ListSummary {
-    total: usize,
-    dirty: usize,
-    unknown: usize,
-    missing: usize,
-    inaccessible: usize,
-    bare: usize,
-    locked: usize,
-    prunable: usize,
-}
-
-#[derive(Debug, JsonSchema, Serialize)]
-struct ListResult {
-    outcome: &'static str,
-    worktrees: Vec<WorktreeRecord>,
-    summary: ListSummary,
-}
-
-#[derive(Debug, JsonSchema, Serialize)]
-struct BranchRecord {
-    branch: String,
-    head: String,
-    /// RFC 3339 committer timestamp for the branch tip commit.
-    last_commit_at: Option<String>,
-    path: Option<BytePath>,
-    condition: Option<String>,
-    current: bool,
-}
-
-#[derive(Debug, JsonSchema, Serialize)]
-struct BranchListSummary {
-    total: usize,
-    checked_out: usize,
-    dirty: usize,
-}
-
-#[derive(Debug, JsonSchema, Serialize)]
-struct BranchListResult {
-    outcome: &'static str,
-    branches: Vec<BranchRecord>,
-    summary: BranchListSummary,
 }
 
 #[derive(Debug, JsonSchema, Serialize)]
@@ -790,20 +732,6 @@ fn resolve(
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
-struct GetInput {
-    property: GetProperty,
-}
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum GetProperty {
-    Branch,
-    Port,
-    WorktreePath,
-    PrimaryWorktreePath,
-    WorktreeRoot,
-}
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields)]
 struct DryRunInput {
     #[serde(default)]
     dry_run: bool,
@@ -817,37 +745,25 @@ fn navigation_repository() -> Result<git::Repository> {
     git::repository_with_metadata(&env::current_dir().context("failed to read current directory")?)
 }
 
-fn navigation_branches() -> Result<git::RepositoryBranches> {
-    git::repository_with_branches(&env::current_dir().context("failed to read current directory")?)
-}
-
-fn condition(value: Condition) -> &'static str {
-    match value {
-        Condition::Clean => "clean",
-        Condition::Dirty => "dirty",
-        Condition::Unknown => "unknown",
-        Condition::Missing => "missing",
-        Condition::Inaccessible => "inaccessible",
+fn read_list_request(request_mode: bool) -> Result<Option<String>> {
+    if !request_mode {
+        return Ok(None);
     }
-}
-fn worktree_record(worktree: &Worktree) -> WorktreeRecord {
-    let (kind, branch) = match &worktree.kind {
-        WorktreeKind::Branch(branch) => ("branch", Some(branch.clone())),
-        WorktreeKind::Detached => ("detached", None),
-        WorktreeKind::Bare => ("bare", None),
-        WorktreeKind::Unknown => ("unknown", None),
-    };
-    WorktreeRecord {
-        kind: kind.to_owned(),
-        branch,
-        path: BytePath::path(&worktree.path),
-        head: worktree.head.clone(),
-        last_commit_at: worktree.machine_last_commit_at(),
-        condition: condition(worktree.condition).to_owned(),
-        current: worktree.current,
-        navigable: worktree.navigable(),
-        lock_reason: worktree.locked.clone(),
-        prune_reason: worktree.prunable.clone(),
+    match protocol::read_optional_request::<read_only::ListRequest>() {
+        Ok(request) if request.schema_version == protocol::SCHEMA_VERSION => Ok(request.request_id),
+        Ok(request) => {
+            emit_err(
+                "list",
+                request.request_id,
+                "json.unsupported_schema_version",
+                "unsupported schema version",
+            )?;
+            unreachable!()
+        }
+        Err(error) => {
+            emit_err("list", None, "json.invalid_request", error)?;
+            unreachable!()
+        }
     }
 }
 
@@ -856,72 +772,33 @@ fn worktree_record(worktree: &Worktree) -> WorktreeRecord {
 /// # Errors
 /// Returns an error when stdout cannot be written.
 pub fn list(request_mode: bool) -> Result<()> {
-    let id = if request_mode {
-        match protocol::read_optional_request::<EmptyInput>() {
-            Ok(r) => {
-                if r.schema_version != 1 {
-                    return emit_err(
-                        "list",
-                        r.request_id,
-                        "json.unsupported_schema_version",
-                        "unsupported schema version",
-                    );
-                }
-                r.request_id
-            }
-            Err(e) => return emit_err("list", None, "json.invalid_request", e),
-        }
-    } else {
-        None
-    };
-    let repo = match navigation_repository() {
-        Ok(v) => v,
-        Err(e) => return emit_err("list", id, "repository.invalid", format!("{e:#}")),
-    };
-    let records = repo.worktrees.iter().map(worktree_record).collect();
-    let count = |condition| {
-        repo.worktrees
-            .iter()
-            .filter(|worktree| worktree.condition == condition)
-            .count()
-    };
-    let result = ListResult {
-        outcome: "listed",
-        worktrees: records,
-        summary: ListSummary {
-            total: repo.worktrees.len(),
-            dirty: count(Condition::Dirty),
-            unknown: count(Condition::Unknown),
-            missing: count(Condition::Missing),
-            inaccessible: count(Condition::Inaccessible),
-            bare: repo
-                .worktrees
-                .iter()
-                .filter(|worktree| worktree.is_bare())
-                .count(),
-            locked: repo
-                .worktrees
-                .iter()
-                .filter(|worktree| worktree.locked.is_some())
-                .count(),
-            prunable: repo
-                .worktrees
-                .iter()
-                .filter(|worktree| worktree.prunable.is_some())
-                .count(),
-        },
-    };
-    let mut response =
-        protocol::success("list", id, serde_json::to_value(result)?, json!({}), vec![]);
-    if let Some(warning) = &repo.metadata_warning {
-        push_diagnostic(
-            &mut response,
-            "git.commit_metadata",
-            "metadata",
-            warning.as_bytes(),
-        );
+    let id = read_list_request(request_mode)?;
+    match read_only::list_worktrees() {
+        Ok(outcome) => emit(
+            protocol::adapt(
+                "list",
+                id,
+                Ok::<_, read_only::QueryFailure>(outcome.result),
+                read_only::QueryContext::default(),
+                vec![],
+                outcome.diagnostics,
+                Vec::<protocol::RecoveryAction<EmptyInput>>::new(),
+            )?,
+            false,
+        ),
+        Err(failure) => emit(
+            protocol::adapt(
+                "list",
+                id,
+                Err::<read_only::ListResult, _>(failure),
+                read_only::QueryContext::default(),
+                vec![],
+                vec![],
+                Vec::<protocol::RecoveryAction<EmptyInput>>::new(),
+            )?,
+            true,
+        ),
     }
-    emit(response, false)
 }
 
 /// Emits the structured branch list, in `for-each-ref` order.
@@ -929,70 +806,32 @@ pub fn list(request_mode: bool) -> Result<()> {
 /// # Errors
 /// Returns an error when stdout cannot be written.
 pub fn list_branches(request_mode: bool) -> Result<()> {
-    let id = if request_mode {
-        match protocol::read_optional_request::<EmptyInput>() {
-            Ok(r) => {
-                if r.schema_version != 1 {
-                    return emit_err(
-                        "list",
-                        r.request_id,
-                        "json.unsupported_schema_version",
-                        "unsupported schema version",
-                    );
-                }
-                r.request_id
-            }
-            Err(e) => return emit_err("list", None, "json.invalid_request", e),
-        }
-    } else {
-        None
-    };
-    let branches = match navigation_branches() {
-        Ok(v) => v,
-        Err(e) => return emit_err("list", id, "repository.invalid", format!("{e:#}")),
-    };
-    let repo = &branches.repository;
-    let records: Vec<_> = branches
-        .branches
-        .iter()
-        .map(|record| branch_record(record, &repo.worktrees))
-        .collect();
-    let checked_out = records.iter().filter(|r| r.path.is_some()).count();
-    let dirty = records
-        .iter()
-        .filter(|r| r.condition.as_deref() == Some(condition(Condition::Dirty)))
-        .count();
-    let result = BranchListResult {
-        outcome: "listed",
-        summary: BranchListSummary {
-            total: records.len(),
-            checked_out,
-            dirty,
-        },
-        branches: records,
-    };
-    let mut response =
-        protocol::success("list", id, serde_json::to_value(result)?, json!({}), vec![]);
-    if let Some(warning) = &repo.metadata_warning {
-        push_diagnostic(
-            &mut response,
-            "git.commit_metadata",
-            "metadata",
-            warning.as_bytes(),
-        );
-    }
-    emit(response, false)
-}
-
-fn branch_record(record: &git::BranchRecord, worktrees: &[Worktree]) -> BranchRecord {
-    let row = Row::from_branch(record, worktrees);
-    BranchRecord {
-        branch: record.branch.clone(),
-        head: record.head.clone(),
-        last_commit_at: row.machine_last_commit_at(),
-        path: row.path.as_deref().map(BytePath::path),
-        condition: row.condition.map(|value| condition(value).to_owned()),
-        current: row.current,
+    let id = read_list_request(request_mode)?;
+    match read_only::list_branches() {
+        Ok(outcome) => emit(
+            protocol::adapt(
+                "list",
+                id,
+                Ok::<_, read_only::QueryFailure>(outcome.result),
+                read_only::QueryContext::default(),
+                vec![],
+                outcome.diagnostics,
+                Vec::<protocol::RecoveryAction<EmptyInput>>::new(),
+            )?,
+            false,
+        ),
+        Err(failure) => emit(
+            protocol::adapt(
+                "list",
+                id,
+                Err::<read_only::BranchListResult, _>(failure),
+                read_only::QueryContext::default(),
+                vec![],
+                vec![],
+                Vec::<protocol::RecoveryAction<EmptyInput>>::new(),
+            )?,
+            true,
+        ),
     }
 }
 
@@ -1000,9 +839,8 @@ fn branch_record(record: &git::BranchRecord, worktrees: &[Worktree]) -> BranchRe
 ///
 /// # Errors
 /// Returns an error when stdout cannot be written or a path cannot be resolved.
-#[allow(clippy::too_many_lines)]
 pub fn get(request_mode: bool, argv: Option<&str>) -> Result<()> {
-    let (id, p) = if request_mode {
+    let (id, property) = if request_mode {
         if argv.is_some() {
             return emit_err(
                 "get",
@@ -1011,17 +849,19 @@ pub fn get(request_mode: bool, argv: Option<&str>) -> Result<()> {
                 "command arguments are forbidden with --input-output json",
             );
         }
-        match protocol::read_request::<GetInput>() {
-            Ok(r) if r.schema_version == 1 => (r.request_id, r.input.property),
-            Ok(r) => {
+        match protocol::read_request::<GetRequest>() {
+            Ok(request) if request.schema_version == protocol::SCHEMA_VERSION => {
+                (request.request_id, request.input.property)
+            }
+            Ok(request) => {
                 return emit_err(
                     "get",
-                    r.request_id,
+                    request.request_id,
                     "json.unsupported_schema_version",
                     "unsupported schema version",
                 );
             }
-            Err(e) => return emit_err("get", None, "json.invalid_request", e),
+            Err(error) => return emit_err("get", None, "json.invalid_request", error),
         }
     } else {
         (
@@ -1036,75 +876,19 @@ pub fn get(request_mode: bool, argv: Option<&str>) -> Result<()> {
             },
         )
     };
-    let repo = match repository() {
-        Ok(v) => v,
-        Err(e) => return emit_err("get", id, "repository.invalid", format!("{e:#}")),
-    };
-    let (name, value) = match p {
-        GetProperty::Branch => match &repo.current().kind {
-            WorktreeKind::Branch(v) => ("branch", json!(v)),
-            _ => {
-                return emit_err(
-                    "get",
-                    id,
-                    "repository.detached",
-                    "current worktree has no branch",
-                );
-            }
-        },
-        GetProperty::Port => match &repo.current().kind {
-            WorktreeKind::Branch(v) => ("port", json!(smart::port_for_branch(v))),
-            _ => {
-                return emit_err(
-                    "get",
-                    id,
-                    "repository.detached",
-                    "current worktree has no branch",
-                );
-            }
-        },
-        GetProperty::WorktreePath => (
-            "worktree_path",
-            serde_json::to_value(BytePath::path(&repo.current().path))?,
-        ),
-        GetProperty::PrimaryWorktreePath => match repo.primary.as_ref() {
-            Some(v) => (
-                "primary_worktree_path",
-                serde_json::to_value(BytePath::path(v))?,
-            ),
-            None => {
-                return emit_err(
-                    "get",
-                    id,
-                    "repository.primary_unavailable",
-                    "primary worktree unavailable",
-                );
-            }
-        },
-        GetProperty::WorktreeRoot => {
-            let c = EffectiveConfig::load(&repo)?;
-            match c.root {
-                Some(v) => ("worktree_root", serde_json::to_value(BytePath::path(&v))?),
-                None => {
-                    return emit_err(
-                        "get",
-                        id,
-                        "repository.root_unavailable",
-                        "worktree root unavailable",
-                    );
-                }
-            }
-        }
-    };
+    let result = read_only::get(property);
+    let failed = result.is_err();
     emit(
-        protocol::success(
+        protocol::adapt(
             "get",
             id,
-            json!({"outcome":"value","property":name,"value":value}),
-            json!({}),
+            result,
+            read_only::QueryContext::default(),
             vec![],
-        ),
-        false,
+            vec![],
+            Vec::<protocol::RecoveryAction<EmptyInput>>::new(),
+        )?,
+        failed,
     )
 }
 
@@ -2003,7 +1787,7 @@ pub fn help(command: &str) -> Value {
         }
         "switch" => json!(schemars::schema_for!(protocol::Request<SwitchInput>)),
         "create" => json!(schemars::schema_for!(protocol::Request<CreateInput>)),
-        "get" => json!(schemars::schema_for!(protocol::Request<GetInput>)),
+        "get" => json!(schemars::schema_for!(protocol::Request<GetRequest>)),
         "remove" => json!(schemars::schema_for!(protocol::Request<RemoveInput>)),
         "merge" => json!(schemars::schema_for!(protocol::Request<MergeInput>)),
         "trust.reset"
@@ -2017,7 +1801,8 @@ pub fn help(command: &str) -> Value {
         _ => Value::Null,
     };
     let (errors, actions): (&[&str], &[&str]) = match command {
-        "list" | "trust.status" | "trust.commit_status" | "trust.merge_status" => (
+        "list" => (read_only::LIST_ERRORS, read_only::ACTIONS),
+        "trust.status" | "trust.commit_status" | "trust.merge_status" => (
             &[
                 "json.invalid_request",
                 "json.unsupported_schema_version",
@@ -2025,18 +1810,7 @@ pub fn help(command: &str) -> Value {
             ],
             &[],
         ),
-        "get" => (
-            &[
-                "json.invalid_request",
-                "json.unsupported_schema_version",
-                "get.invalid_property",
-                "repository.invalid",
-                "repository.detached",
-                "repository.primary_unavailable",
-                "repository.root_unavailable",
-            ],
-            &[],
-        ),
+        "get" => (read_only::GET_ERRORS, read_only::ACTIONS),
         "switch" => (
             &[
                 "json.invalid_request",
@@ -2160,7 +1934,8 @@ pub fn help(command: &str) -> Value {
         _ => (&[], &[]),
     };
     let result_schema = match command {
-        "list" => json!(schemars::schema_for!(ListResult)),
+        "list" => json!(schemars::schema_for!(read_only::ListResult)),
+        "get" => json!(schemars::schema_for!(read_only::GetResult)),
         _ => Value::Null,
     };
     let selection_required_context_schema = if command == "switch" {

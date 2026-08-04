@@ -10,6 +10,7 @@ pub mod lifecycle;
 pub mod machine;
 pub mod pr;
 pub mod protocol;
+pub mod read_only;
 pub mod render;
 pub mod setup;
 pub mod smart;

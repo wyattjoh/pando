@@ -6,7 +6,7 @@ use clap_complete::engine::ArgValueCandidates;
 use pando::{
     Row, commit, completion,
     config::EffectiveConfig,
-    git, install, machine, pr, render,
+    install, machine, pr, read_only, render,
     smart::{self, GetProperty, TrustCommand},
     ui,
 };
@@ -474,44 +474,32 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn list() -> Result<()> {
-    let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = git::repository_with_metadata(&cwd)?;
-    let default_sort = EffectiveConfig::load_default_sort(&repository)?;
-    if let Some(warning) = &repository.metadata_warning {
-        ui::warning(warning)?;
+    let outcome =
+        read_only::list_worktrees().map_err(|failure| anyhow::anyhow!(failure.message))?;
+    let default_sort = EffectiveConfig::load_default_sort(&outcome.repository)?;
+    for warning in &outcome.diagnostics {
+        ui::warning(&warning.content)?;
     }
-    let rows: Vec<Row> = repository
-        .worktrees
-        .iter()
-        .map(Row::from_worktree)
-        .collect();
     ui::info(format!(
         "{}\n{}",
         ui::heading_style().apply_to(format!("Worktrees ({})", default_sort.label())),
-        render::table(&rows, default_sort)
+        render::table(&outcome.rows, default_sort)
     ))?;
-    ui::finish(list_summary(&repository.worktrees))
+    ui::finish(list_summary(&outcome.repository.worktrees))
 }
 
 fn list_branches() -> Result<()> {
-    let cwd = env::current_dir().context("failed to read the current directory")?;
-    let branches = git::repository_with_branches(&cwd)?;
-    let repository = &branches.repository;
-    let default_sort = EffectiveConfig::load_default_sort(repository)?;
-    if let Some(warning) = &repository.metadata_warning {
-        ui::warning(warning)?;
+    let outcome = read_only::list_branches().map_err(|failure| anyhow::anyhow!(failure.message))?;
+    let default_sort = EffectiveConfig::load_default_sort(&outcome.repository)?;
+    for warning in &outcome.diagnostics {
+        ui::warning(&warning.content)?;
     }
-    let rows: Vec<Row> = branches
-        .branches
-        .iter()
-        .map(|branch| Row::from_branch(branch, &repository.worktrees))
-        .collect();
     ui::info(format!(
         "{}\n{}",
         ui::heading_style().apply_to(format!("Branches ({})", default_sort.label())),
-        render::table(&rows, default_sort)
+        render::table(&outcome.rows, default_sort)
     ))?;
-    ui::finish(branch_summary(&rows))
+    ui::finish(branch_summary(&outcome.rows))
 }
 
 fn branch_summary(rows: &[Row]) -> String {
