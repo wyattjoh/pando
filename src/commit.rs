@@ -2,13 +2,12 @@ use std::{
     env,
     ffi::OsString,
     io::Write,
-    os::unix::ffi::{OsStrExt, OsStringExt},
+    os::unix::ffi::OsStringExt,
     path::Path,
     process::{Command, Output, Stdio},
 };
 
 use anyhow::{Context, Result, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cliclack::confirm;
 use minijinja::{Environment, context};
 use schemars::{JsonSchema, schema_for};
@@ -78,6 +77,69 @@ pub enum MessageSource {
     ConfiguredGenerator,
 }
 
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct ChangeEntry {
+    status: String,
+    path: protocol::BytePath,
+}
+
+#[derive(Clone, Debug, Default, JsonSchema, Serialize)]
+struct ChangesContext {
+    staged: Vec<ChangeEntry>,
+    unstaged: Vec<ChangeEntry>,
+    untracked: Vec<ChangeEntry>,
+    staged_diffstat: String,
+}
+
+#[derive(Clone, Debug, Default, JsonSchema, Serialize)]
+struct RepositoryContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<protocol::BytePath>,
+}
+
+#[derive(Clone, Debug, Default, JsonSchema, Serialize)]
+struct CommitContext {
+    repository: RepositoryContext,
+    changes: ChangesContext,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum CommitSuccess {
+    DryRun {
+        ready: bool,
+        selection: Selection,
+    },
+    Committed {
+        commit: String,
+        selection: Selection,
+    },
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+struct CommitError {
+    code: String,
+    message: String,
+}
+
+impl From<CommitError> for ErrorBody {
+    fn from(error: CommitError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+        }
+    }
+}
+
+struct CommitOutcome {
+    request_id: Option<String>,
+    result: std::result::Result<CommitSuccess, CommitError>,
+    context: CommitContext,
+    effects: Vec<Effect>,
+    diagnostics: Vec<Diagnostic>,
+    recovery: Vec<protocol::RecoveryAction<CommitRequestEnvelope>>,
+}
+
 #[derive(Debug)]
 struct CommandFailure {
     code: &'static str,
@@ -145,7 +207,7 @@ pub fn run(mut invocation: Invocation) -> Result<()> {
     };
 
     if invocation.json {
-        run_json(&invocation, &source, request_id)
+        render_json(execute_json(&invocation, &source, request_id))
     } else {
         run_human(&invocation, &source)
     }
@@ -228,195 +290,184 @@ fn run_human(invocation: &Invocation, source: &MessageSource) -> Result<()> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn run_json(
+fn execute_json(
     invocation: &Invocation,
     source: &MessageSource,
     request_id: Option<String>,
-) -> Result<()> {
-    let mut effects = Vec::new();
+) -> CommitOutcome {
+    let mut outcome = CommitOutcome {
+        request_id,
+        result: Err(commit_error(
+            "repository.invalid",
+            "repository was not inspected",
+        )),
+        context: CommitContext::default(),
+        effects: Vec::new(),
+        diagnostics: Vec::new(),
+        recovery: Vec::new(),
+    };
     let cwd = match env::current_dir() {
         Ok(path) => path,
         Err(error) => {
-            return emit_failure_with_id(
-                "repository.invalid",
-                &error.to_string(),
-                request_id,
-                effects,
-                Vec::new(),
-            );
+            outcome.result = Err(commit_error("repository.invalid", error));
+            return outcome;
         }
     };
     let repository = match git::repository(&cwd) {
         Ok(value) => value,
         Err(error) => {
-            return emit_failure_with_id(
-                "repository.invalid",
-                &format!("{error:#}"),
-                request_id,
-                effects,
-                Vec::new(),
-            );
+            outcome.result = Err(commit_error("repository.invalid", format!("{error:#}")));
+            return outcome;
         }
     };
+    outcome.context = context_for(&repository);
     if let Err(error) = ensure_worktree(&repository) {
-        return emit_failure_with_context(
-            "repository.bare",
-            &error.to_string(),
-            request_id,
-            &repository,
-            effects,
-            Vec::new(),
-        );
+        outcome.result = Err(commit_error("repository.bare", error));
+        return outcome;
     }
     let staged = git::has_staged_changes(&repository.current().path).unwrap_or(false);
     let dirty = has_any_changes(&repository.current().path).unwrap_or(false);
     if invocation.stage_all && !dirty {
-        return emit_failure_with_context(
+        outcome.result = Err(commit_error(
             "commit.nothing_to_commit",
             "nothing to commit",
-            request_id,
-            &repository,
-            effects,
-            Vec::new(),
-        );
+        ));
+        return outcome;
     }
     if !staged && !invocation.stage_all {
-        let code = if dirty {
-            "commit.nothing_staged"
-        } else {
-            "commit.nothing_to_commit"
-        };
-        return emit_failure_with_context(
-            code,
+        outcome.result = Err(commit_error(
+            if dirty {
+                "commit.nothing_staged"
+            } else {
+                "commit.nothing_to_commit"
+            },
             if dirty {
                 "nothing is staged"
             } else {
                 "nothing to commit"
             },
-            request_id.clone(),
-            &repository,
-            effects,
-            recovery_steps(invocation.request_mode, request_id.as_deref()),
-        );
+        ));
+        outcome.recovery = recovery_steps(invocation.request_mode, outcome.request_id.as_deref());
+        return outcome;
     }
     let config = match preflight(&repository, source) {
         Ok(value) => value,
         Err(error) => {
-            let text = format!("{error:#}");
-            let code = if text.contains("approval") {
+            let message = format!("{error:#}");
+            let code = if message.contains("approval") {
                 "trust.approval_required"
-            } else if text.contains("generator") {
+            } else if message.contains("generator") {
                 "commit.generator_unavailable"
             } else {
                 "commit.preflight_failed"
             };
-            return emit_failure_with_context(
-                code,
-                &text,
-                request_id,
-                &repository,
-                effects,
-                Vec::new(),
-            );
+            outcome.result = Err(commit_error(code, message));
+            return outcome;
         }
     };
+    let selection = if invocation.stage_all {
+        Selection::StageAll
+    } else {
+        Selection::Staged
+    };
     if invocation.dry_run {
-        return emit_success(
-            request_id,
-            &repository,
-            json!({"outcome":"dry_run","ready":true,"selection": if invocation.stage_all {"stage_all"} else {"staged"}}),
-            effects,
-            Vec::new(),
-        );
+        outcome.result = Ok(CommitSuccess::DryRun {
+            ready: true,
+            selection,
+        });
+        return outcome;
     }
     if invocation.stage_all {
-        effects.push(Effect {
-            action: "git.stage_all".into(),
-            attempted: true,
-            completed: false,
-            details: None,
-        });
+        outcome.effects.push(effect("git.stage_all", true));
         if let Err(error) = git::stage_all(&repository.current().path) {
-            return emit_failure_with_context(
-                "commit.staging_failed",
-                &format!("{error:#}"),
-                request_id,
-                &repository,
-                effects,
-                Vec::new(),
-            );
+            outcome.result = Err(commit_error("commit.staging_failed", format!("{error:#}")));
+            outcome.context = context_for(&repository);
+            return outcome;
         }
-        effects.last_mut().unwrap().completed = true;
+        outcome.effects.last_mut().expect("stage effect").completed = true;
+        outcome.context = context_for(&repository);
     }
-    effects.push(Effect {
-        action: "commit.create".into(),
-        attempted: false,
-        completed: false,
-        details: None,
-    });
-    let (message, mut diagnostics) =
-        match resolve_message_json(&repository, source, config.as_ref()) {
-            Ok(value) => value,
-            Err(failure) => {
-                return emit_failure_with_context_and_diagnostics(
-                    failure.code,
-                    &failure.message,
-                    request_id,
-                    &repository,
-                    effects,
-                    failure.diagnostics,
-                    Vec::new(),
-                );
-            }
-        };
-    effects.last_mut().unwrap().attempted = true;
+    if matches!(source, MessageSource::ConfiguredGenerator) {
+        outcome.effects.push(effect("commit.generate", true));
+    }
+    let (message, diagnostics) = match resolve_message_json(&repository, source, config.as_ref()) {
+        Ok(value) => value,
+        Err(failure) => {
+            outcome.result = Err(commit_error(failure.code, failure.message));
+            outcome.diagnostics = failure.diagnostics;
+            return outcome;
+        }
+    };
+    outcome.diagnostics = diagnostics;
+    if matches!(source, MessageSource::ConfiguredGenerator) {
+        outcome
+            .effects
+            .last_mut()
+            .expect("generation effect")
+            .completed = true;
+    }
+    outcome.effects.push(effect("commit.create", true));
     let output = match git_commit_captured(&repository.current().path, &message) {
         Ok(output) => output,
         Err(error) => {
-            return emit_failure_with_context(
-                "commit.git_failed",
-                &format!("{error:#}"),
-                request_id,
-                &repository,
-                effects,
-                Vec::new(),
-            );
+            outcome.result = Err(commit_error("commit.git_failed", format!("{error:#}")));
+            return outcome;
         }
     };
-    diagnostics.extend(diagnostics_for("git.commit", &output));
+    outcome
+        .diagnostics
+        .extend(diagnostics_for("git.commit", &output));
     if !output.status.success() {
-        return emit_failure_with_context_and_diagnostics(
-            "commit.git_failed",
-            "git commit failed",
-            request_id,
-            &repository,
-            effects,
-            diagnostics,
-            Vec::new(),
-        );
+        outcome.result = Err(commit_error("commit.git_failed", "git commit failed"));
+        return outcome;
     }
-    effects.last_mut().unwrap().completed = true;
-    let hash = match git::head_commit(&repository.current().path) {
-        Ok(hash) => hash,
+    outcome.effects.last_mut().expect("commit effect").completed = true;
+    outcome.context = context_for(&repository);
+    match git::head_commit(&repository.current().path) {
+        Ok(commit) => outcome.result = Ok(CommitSuccess::Committed { commit, selection }),
         Err(error) => {
-            return emit_failure_with_context_and_diagnostics(
+            outcome.result = Err(commit_error(
                 "commit.result_failed",
-                &format!("commit was created but its identity could not be read: {error:#}"),
-                request_id,
-                &repository,
-                effects,
-                diagnostics,
-                Vec::new(),
-            );
+                format!("commit was created but its identity could not be read: {error:#}"),
+            ));
         }
-    };
-    emit_success(
-        request_id,
-        &repository,
-        json!({"outcome":"committed","commit":hash,"selection": if invocation.stage_all {"stage_all"} else {"staged"}}),
-        effects,
-        diagnostics,
-    )
+    }
+    outcome
+}
+
+fn effect(action: &str, attempted: bool) -> Effect {
+    Effect {
+        action: action.into(),
+        attempted,
+        completed: false,
+        details: None,
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn commit_error(code: &str, message: impl ToString) -> CommitError {
+    CommitError {
+        code: code.into(),
+        message: message.to_string(),
+    }
+}
+
+fn render_json(outcome: CommitOutcome) -> Result<()> {
+    let response = protocol::adapt(
+        "commit",
+        outcome.request_id,
+        outcome.result,
+        outcome.context,
+        outcome.effects,
+        outcome.diagnostics,
+        outcome.recovery,
+    )?;
+    let failed = response.status == "error";
+    protocol::write(&response)?;
+    if failed {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn preflight(repository: &Repository, source: &MessageSource) -> Result<Option<EffectiveConfig>> {
@@ -697,39 +748,37 @@ fn render_prompt(repository: &Repository, template: &str) -> Result<String> {
     );
     environment.get_template("commit")?.render(context! { git_diff => git::staged_diff(&repository.current().path)?, git_diff_stat => git::staged_diff_stat(&repository.current().path)?, branch, repo, recent_commits => git::recent_subjects(&repository.current().path)? }).context("failed to render commit generation template")
 }
-fn context_json(repository: &Repository) -> Value {
+fn context_for(repository: &Repository) -> CommitContext {
     let path = &repository.current().path;
     let status = status_bytes(path).unwrap_or_default();
-    let mut staged = Vec::new();
-    let mut unstaged = Vec::new();
-    let mut untracked = Vec::new();
+    let mut changes = ChangesContext {
+        staged_diffstat: git::staged_diff_stat(path).unwrap_or_default(),
+        ..ChangesContext::default()
+    };
     for entry in status
         .split(|byte| *byte == 0)
         .filter(|entry| entry.len() >= 4)
     {
-        let value = json!({
-            "status": String::from_utf8_lossy(&entry[..2]),
-            "path": path_json(&OsString::from_vec(entry[3..].to_vec()))
-        });
+        let value = ChangeEntry {
+            status: String::from_utf8_lossy(&entry[..2]).into_owned(),
+            path: protocol::BytePath::new(&OsString::from_vec(entry[3..].to_vec())),
+        };
         if &entry[..2] == b"??" {
-            untracked.push(value);
+            changes.untracked.push(value);
         } else {
             if entry[0] != b' ' {
-                staged.push(value.clone());
+                changes.staged.push(value.clone());
             }
             if entry[1] != b' ' {
-                unstaged.push(value);
+                changes.unstaged.push(value);
             }
         }
     }
-    json!({"repository":{"path":path_json(path.as_os_str())},"changes":{"staged":staged,"unstaged":unstaged,"untracked":untracked,"staged_diffstat":git::staged_diff_stat(path).unwrap_or_default()}})
-}
-fn path_json(path: &std::ffi::OsStr) -> Value {
-    match path.to_str() {
-        Some(value) => json!({"encoding":"utf8","value":value}),
-        None => {
-            json!({"encoding":"base64","display":String::from_utf8_lossy(path.as_bytes()),"value":STANDARD.encode(path.as_bytes())})
-        }
+    CommitContext {
+        repository: RepositoryContext {
+            path: Some(protocol::BytePath::path(path)),
+        },
+        changes,
     }
 }
 
@@ -759,24 +808,6 @@ fn response(
 }
 fn print_response(value: &Response) -> Result<()> {
     protocol::write(value)
-}
-fn emit_success(
-    request_id: Option<String>,
-    repository: &Repository,
-    result: Value,
-    effects: Vec<Effect>,
-    diagnostics: Vec<Diagnostic>,
-) -> Result<()> {
-    print_response(&response(
-        request_id,
-        "success",
-        Some(result),
-        None,
-        context_json(repository),
-        effects,
-        diagnostics,
-        Vec::new(),
-    ))
 }
 fn emit_failure(
     code: &str,
@@ -809,81 +840,58 @@ fn emit_failure_with_id(
     ))?;
     std::process::exit(1)
 }
-fn emit_failure_with_context(
-    code: &str,
-    message: &str,
-    request_id: Option<String>,
-    repository: &Repository,
-    effects: Vec<Effect>,
-    next_steps: Vec<NextStep>,
-) -> Result<()> {
-    emit_failure_with_context_and_diagnostics(
-        code,
-        message,
-        request_id,
-        repository,
-        effects,
-        Vec::new(),
-        next_steps,
-    )
-}
-fn emit_failure_with_context_and_diagnostics(
-    code: &str,
-    message: &str,
-    request_id: Option<String>,
-    repository: &Repository,
-    effects: Vec<Effect>,
-    diagnostics: Vec<Diagnostic>,
-    next_steps: Vec<NextStep>,
-) -> Result<()> {
-    print_response(&response(
-        request_id,
-        "error",
-        None,
-        Some(ErrorBody {
-            code: code.into(),
-            message: message.into(),
-        }),
-        context_json(repository),
-        effects,
-        diagnostics,
-        next_steps,
-    ))?;
-    std::process::exit(1)
-}
-
-fn recovery_steps(request_mode: bool, request_id: Option<&str>) -> Vec<NextStep> {
-    let invocation = |argv: Vec<&str>, stdin: Option<Value>| json!({"argv":argv,"stdin":stdin});
-    let stdin = request_mode.then(|| json!({"schema_version":1,"request_id":request_id,"input":{"selection":"stage_all","message":{"source":"configured_generator"},"dry_run":false}}));
-    vec![
-        NextStep {
-            action: "git.stage_paths".into(),
-            description: "Stage selected paths with Git".into(),
-            mutation: "repository".into(),
-            requires_human_approval: false,
-            invocation: invocation(vec!["git", "add", "<paths>"], None),
-        },
-        NextStep {
-            action: "git.stage_patch".into(),
-            description: "Interactively stage patches with Git".into(),
-            mutation: "repository".into(),
-            requires_human_approval: true,
-            invocation: invocation(vec!["git", "add", "--patch"], None),
-        },
-        NextStep {
-            action: "commit.stage_all".into(),
-            description: "Stage every change and retry".into(),
-            mutation: "repository".into(),
-            requires_human_approval: false,
-            invocation: invocation(
-                if request_mode {
-                    vec!["pando", "commit", "--input-output", "json"]
-                } else {
-                    vec!["pando", "commit", "--stage-all", "--output", "json"]
-                },
+fn recovery_steps(
+    request_mode: bool,
+    request_id: Option<&str>,
+) -> Vec<protocol::RecoveryAction<CommitRequestEnvelope>> {
+    let action = |name: &str, description: &str, approval, argv: Vec<&str>, stdin| {
+        protocol::RecoveryAction {
+            action: name.into(),
+            description: description.into(),
+            mutation: protocol::MutationClass::Repository,
+            requires_human_approval: approval,
+            invocation: protocol::RecoveryInvocation {
+                argv: argv.into_iter().map(String::from).collect(),
                 stdin,
-            ),
+                working_directory: None,
+            },
+        }
+    };
+    let stdin = request_mode.then(|| CommitRequestEnvelope {
+        schema_version: SCHEMA_VERSION,
+        request_id: request_id.map(String::from),
+        input: CommitRequest {
+            selection: Selection::StageAll,
+            message: MessageSource::ConfiguredGenerator,
+            dry_run: false,
         },
+    });
+    vec![
+        action(
+            "git.stage_paths",
+            "Stage selected paths with Git",
+            false,
+            vec!["git", "add", "<paths>"],
+            None,
+        ),
+        action(
+            "git.stage_patch",
+            "Interactively stage patches with Git",
+            true,
+            vec!["git", "add", "--patch"],
+            None,
+        ),
+        action(
+            "commit.stage_all",
+            "Stage every change and retry",
+            false,
+            if request_mode {
+                vec!["pando", "commit", "--input-output", "json"]
+            } else {
+                vec!["pando", "commit", "--stage-all", "--output", "json"]
+            },
+            stdin,
+        ),
     ]
 }
 
