@@ -426,11 +426,19 @@ pub fn remove(branches: &[String], force: bool) -> Result<()> {
         )?;
     }
     for target in &plan.targets {
-        run_hooks(
+        let execution = setup::execute(
             HookPhase::PreRemove,
             &target.config.pre_remove,
             &target.worktree.path,
+            setup::OutputPolicy::Streamed,
         )?;
+        match execution.outcome {
+            HookOutcome::Success => {}
+            HookOutcome::Failed(status) => {
+                bail!("pre-remove hook failed with status {status}");
+            }
+            HookOutcome::Interrupted => bail!("pre-remove hook was interrupted"),
+        }
     }
     for target in &plan.targets {
         if let Some(path) = &target.stale_journal {

@@ -6884,6 +6884,87 @@ fn approved_remove_hooks_run_in_target_order_and_retain_branches() {
 }
 
 #[test]
+fn json_remove_hook_failure_keeps_bounded_stream_diagnostics_and_retry() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let later = repo.temp.path().join("later-hook-ran");
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        format!(
+            "hooks:\n  pre-remove:\n    - name: Noisy failure\n      command: printf hook-out; printf %020000d 0; printf hook-err >&2; printf %020001d 0 >&2; exit 23\n    - name: Later removal\n      command: touch {}\n",
+            later.display()
+        ),
+    )
+    .unwrap();
+
+    // Grant approval through the public human flow. Its failing hook preserves
+    // the target, allowing the structured retry to exercise the same command.
+    let mut approve = Command::cargo_bin("pando").unwrap();
+    approve
+        .args(["remove", "--force", "feature"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let approved = run_pty_command(approve, b"y\r");
+    assert!(!approved.status.success());
+    assert!(approved.stderr.contains("hook-out"), "{}", approved.stderr);
+    assert!(approved.stderr.contains("hook-err"), "{}", approved.stderr);
+    assert!(repo.linked.exists());
+    assert!(!later.exists());
+
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "request_id": "remove-hook-failure",
+        "input": {"branches": ["feature"]}
+    });
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["remove", "--force", "--input-output", "json"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = run_json_command(command, Some(&request));
+
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["error"]["code"], "remove.hook_failed");
+    assert_eq!(value["request_id"], "remove-hook-failure");
+    let diagnostics = value["diagnostics"].as_array().unwrap();
+    assert_eq!(diagnostics.len(), 2);
+    assert_eq!(diagnostics[0]["source"], "hook");
+    assert_eq!(diagnostics[0]["stream"], "stdout");
+    assert_eq!(diagnostics[0]["original_size"], 20_008);
+    assert_eq!(diagnostics[0]["truncated"], true);
+    assert_eq!(diagnostics[0]["content"].as_str().unwrap().len(), 16 * 1024);
+    assert_eq!(diagnostics[1]["source"], "hook");
+    assert_eq!(diagnostics[1]["stream"], "stderr");
+    assert_eq!(diagnostics[1]["original_size"], 20_009);
+    assert_eq!(diagnostics[1]["truncated"], true);
+    assert_eq!(diagnostics[1]["content"].as_str().unwrap().len(), 16 * 1024);
+    assert_eq!(value["effects"][0]["action"], "pre_remove_hooks");
+    assert_eq!(value["effects"][0]["attempted"], true);
+    assert_eq!(value["effects"][0]["completed"], false);
+    assert_eq!(value["effects"][1]["action"], "remove_worktree");
+    assert_eq!(value["effects"][1]["attempted"], false);
+    assert_eq!(value["effects"][1]["completed"], false);
+    assert_eq!(value["next_steps"][0]["action"], "remove.retry");
+    assert_eq!(
+        value["next_steps"][0]["invocation"]["stdin"],
+        serde_json::json!({
+            "schema_version": 1,
+            "input": {"branches": ["feature"], "dry_run": false}
+        })
+    );
+    assert!(repo.linked.exists());
+    assert!(!later.exists());
+    assert!(git_output(&repo.main, ["branch", "--list", "feature"]).contains("feature"));
+}
+
+#[test]
 fn json_forced_remove_requires_explicit_force_and_reports_retention() {
     let repo = Repository::new();
     fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();

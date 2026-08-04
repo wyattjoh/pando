@@ -4,6 +4,7 @@ use crate::{
     config::{EffectiveConfig, HookPhase},
     git, hook_approval, install,
     protocol::{self, BytePath, Effect, EmptyInput},
+    setup::{self, HookOutput, OutputPolicy},
     smart, trust,
 };
 use anyhow::{Context, Result};
@@ -1451,9 +1452,11 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
     for (index, target) in plan.targets.iter().enumerate() {
         if !target.config.pre_remove.is_empty() {
             response.effects[index * 2].attempted = true;
-            let (outcome, output) = match crate::setup::run_steps_captured(
+            let execution = match setup::execute(
+                HookPhase::PreRemove,
                 &target.config.pre_remove,
                 &target.worktree.path,
+                OutputPolicy::Captured,
             ) {
                 Ok(value) => value,
                 Err(error) => {
@@ -1467,14 +1470,17 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
                     return emit(response, true);
                 }
             };
-            for (stdout, stderr) in output {
-                push_diagnostic(&mut response, "hook", "stdout", &stdout);
-                push_diagnostic(&mut response, "hook", "stderr", &stderr);
+            let HookOutput::Captured(output) = execution.output else {
+                unreachable!("captured hook execution always returns captured output");
+            };
+            for step in output {
+                push_captured_diagnostic(&mut response, "hook", "stdout", &step.stdout);
+                push_captured_diagnostic(&mut response, "hook", "stderr", &step.stderr);
             }
-            if outcome != crate::setup::HookOutcome::Success {
+            if execution.outcome != setup::HookOutcome::Success {
                 response.error = Some(crate::protocol::ErrorBody {
                     code: "remove.hook_failed".into(),
-                    message: format!("pre-remove hook outcome: {outcome:?}"),
+                    message: format!("pre-remove hook outcome: {:?}", execution.outcome),
                 });
                 response.status = "error";
                 response.result = None;
@@ -1536,19 +1542,27 @@ fn push_hook_diagnostics(
     steps: Vec<crate::setup::CapturedStep>,
 ) {
     for step in steps {
-        for (stream, captured) in [("stdout", step.stdout), ("stderr", step.stderr)] {
-            if captured.original_size == 0 {
-                continue;
-            }
-            response.diagnostics.push(crate::protocol::Diagnostic {
-                source: "hook".into(),
-                stream: stream.into(),
-                content: String::from_utf8_lossy(&captured.content).into_owned(),
-                original_size: captured.original_size,
-                truncated: captured.truncated,
-            });
-        }
+        push_captured_diagnostic(response, "hook", "stdout", &step.stdout);
+        push_captured_diagnostic(response, "hook", "stderr", &step.stderr);
     }
+}
+
+fn push_captured_diagnostic(
+    response: &mut protocol::Response,
+    source: &str,
+    stream: &str,
+    captured: &setup::CapturedStream,
+) {
+    if captured.original_size == 0 {
+        return;
+    }
+    response.diagnostics.push(crate::protocol::Diagnostic {
+        source: source.into(),
+        stream: stream.into(),
+        content: String::from_utf8_lossy(&captured.content).into_owned(),
+        original_size: captured.original_size,
+        truncated: captured.truncated,
+    });
 }
 
 fn push_diagnostic(response: &mut protocol::Response, source: &str, stream: &str, bytes: &[u8]) {
