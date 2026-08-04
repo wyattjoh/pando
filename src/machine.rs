@@ -1,7 +1,7 @@
 use crate::{
     BaseMode, Condition, Row, Worktree, WorktreeKind,
     config::{EffectiveConfig, HookPhase},
-    git, install,
+    git, hook_approval, install,
     protocol::{self, BytePath, Effect, EmptyInput},
     smart, trust,
 };
@@ -587,15 +587,40 @@ fn resolve(
             }
         }
     };
-    if !config.post_create.is_empty()
-        && !trust::is_trusted(&repo, HookPhase::PostCreate, &config.post_create)?
+    if let hook_approval::Evaluation::ApprovalRequired(candidate) =
+        hook_approval::evaluate(&repo, HookPhase::PostCreate, &config.post_create)?
     {
-        return emit_err(
+        let mut response = protocol::failure(
             command,
             id,
             "trust.approval_required",
             "post-create hooks require manual review and approval before mutation",
         );
+        response.context = json!({
+            "approval": {
+                "phase": candidate.phase().key(),
+                "commands": candidate.commands().iter().map(|step| json!({
+                    "name": step.name,
+                    "command": step.command,
+                })).collect::<Vec<_>>(),
+                "repository": candidate.repository(),
+                "identity": candidate.identity(),
+            },
+            "branch": branch,
+            "destination": BytePath::path(&destination),
+        });
+        response.next_steps.push(protocol::NextStep {
+            action: "trust.approve_hooks".into(),
+            description: "Review and approve post-create hooks interactively".into(),
+            mutation: "trust".into(),
+            requires_human_approval: true,
+            invocation: json!({
+                "argv": ["pando", command, branch],
+                "stdin": null,
+                "working_directory": BytePath::path(&repo.current().path),
+            }),
+        });
+        return emit(response, true);
     }
     let mut effects = Vec::new();
     if let Some(base) = &new_base {

@@ -5786,6 +5786,66 @@ fn json_create_makes_a_new_branch_and_reports_both_effects() {
 }
 
 #[test]
+fn json_switch_and_create_report_post_create_approval_before_mutation() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("topics");
+    let xdg = config_home_with_root(&root);
+    let hook_output = repo.temp.path().join("hook-ran");
+    fs::write(
+        repo.main.join(".pando.yaml"),
+        format!(
+            "hooks:\n  post-create:\n    - name: First step\n      command: printf first > {}\n    - name: Second step\n      command: printf second >> {}\n",
+            hook_output.display(),
+            hook_output.display()
+        ),
+    )
+    .unwrap();
+    git(&repo.main, ["branch", "existing-topic"]);
+    let before = git_output(&repo.main, ["worktree", "list", "--porcelain"]);
+
+    for (command, branch) in [("switch", "existing-topic"), ("create", "new-topic")] {
+        let output = create_command(&repo, &xdg, &[command, branch, "--output", "json"]);
+
+        assert!(!output.status.success());
+        let value = assert_json_pure(&output);
+        assert_eq!(value["error"]["code"], "trust.approval_required");
+        assert_eq!(value["context"]["approval"]["phase"], "post-create");
+        assert_eq!(
+            value["context"]["approval"]["commands"],
+            serde_json::json!([
+                {"name":"First step","command":format!("printf first > {}", hook_output.display())},
+                {"name":"Second step","command":format!("printf second >> {}", hook_output.display())}
+            ])
+        );
+        assert!(
+            value["context"]["approval"]["repository"]
+                .as_str()
+                .is_some_and(|identity| identity.starts_with("hex:"))
+        );
+        assert!(
+            value["context"]["approval"]["identity"]
+                .as_str()
+                .is_some_and(|identity| !identity.is_empty())
+        );
+        assert_eq!(value["next_steps"][0]["action"], "trust.approve_hooks");
+        assert_eq!(
+            value["next_steps"][0]["invocation"]["argv"],
+            serde_json::json!(["pando", command, branch])
+        );
+        assert_eq!(value["next_steps"][0]["requires_human_approval"], true);
+        assert_eq!(
+            git_output(&repo.main, ["worktree", "list", "--porcelain"]),
+            before
+        );
+        assert!(!root.join(branch).exists());
+        assert!(!hook_output.exists());
+        assert!(!xdg.path().join("pando/trust.json").exists());
+        assert!(!repo.main.join(".git/pando-state").exists());
+    }
+    assert!(git_output(&repo.main, ["branch", "--list", "new-topic"]).is_empty());
+}
+
+#[test]
 fn json_create_refuses_a_registered_branch_and_points_at_switch() {
     let repo = Repository::new();
     let root = repo.temp.path().join("topics");
