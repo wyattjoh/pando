@@ -255,6 +255,14 @@ impl<'cwd> WorktreeMutation<'cwd> {
     }
 }
 
+/// Typed transcript from a captured lifecycle mutation.
+#[derive(Debug)]
+pub(crate) struct MutationTranscript {
+    pub(crate) succeeded: bool,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+}
+
 /// Controls whether a lifecycle operation is rendered directly or captured
 /// for an owning adapter. The operation still chooses stdin and environment
 /// policy, so callers cannot accidentally inherit an editor or prompt.
@@ -340,11 +348,16 @@ impl<'cwd> LifecycleMutation<'cwd> {
             .with_context(|| format!("failed to create commit in {}", self.cwd.display()))
     }
 
-    pub(crate) fn commit_captured(self, message: &str) -> Result<Output> {
-        GitProcess::new(self.cwd, ["commit", "-m", message])
+    pub(crate) fn commit_captured(self, message: &str) -> Result<MutationTranscript> {
+        let output = GitProcess::new(self.cwd, ["commit", "-m", message])
             .disable_terminal_prompt()
             .captured()
-            .with_context(|| format!("failed to start git commit in {}", self.cwd.display()))
+            .with_context(|| format!("failed to start git commit in {}", self.cwd.display()))?;
+        Ok(MutationTranscript {
+            succeeded: output.status.success(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
     }
 }
 

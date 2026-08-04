@@ -44,6 +44,8 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 | `render.rs` | Column alignment shared by `list` output and the picker's menu labels, plus the shared styling for captured Git output and commit messages |
 | `hash.rs` | Hex encoding shared by `trust.rs` and `setup.rs` |
 
+Git ownership is capability-based. `RepositoryObservation` owns discovery and repository facts; `branch::Resolver` and `BranchRepository` own ref planning; `WorktreeMutation` owns worktree changes; `HistoryObservation` owns history and diffs; `LifecycleMutation` owns index and history-changing lifecycle operations; private parsers own structured output; and private `GitProcess` owns execution policy. These interfaces return typed semantic results, not command-shaped forwarding APIs or raw subprocess policy. Do not add direct Git process construction outside `src/git.rs`, a public Git trait, fake adapter, cache, registry, or alternate repository implementation. `.claude/rules/git-ownership.md` contains the detailed routing guidance, and `tests/git_architecture.rs` enforces the process and execution-kernel boundary.
+
 ### Load-bearing invariants
 
 **stdout purity.** The binary writes *only* a successful destination path (`switch`) or a single property value (`get`) to stdout, always with a trailing newline. Prompts, warnings, hook output, and guided installer agent output go to stderr. The installed zsh function captures stdout and `cd`s to it, so any stray `println!` in a `switch` path silently breaks directory switching. Note the asymmetry: `finish_setup` writes the destination *before* returning an error on hook failure, so the shell still enters a half-configured worktree while preserving the nonzero status.

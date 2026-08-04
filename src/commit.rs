@@ -408,17 +408,19 @@ fn execute_json(
             .completed = true;
     }
     outcome.effects.push(effect("commit.create", true));
-    let output = match git_commit_captured(&repository.current().path, &message) {
-        Ok(output) => output,
+    let transcript = match git_commit_captured(&repository.current().path, &message) {
+        Ok(transcript) => transcript,
         Err(error) => {
             outcome.result = Err(commit_error("commit.git_failed", format!("{error:#}")));
             return outcome;
         }
     };
-    outcome
-        .diagnostics
-        .extend(diagnostics_for("git.commit", &output));
-    if !output.status.success() {
+    outcome.diagnostics.extend(diagnostics_for_streams(
+        "git.commit",
+        &transcript.stdout,
+        &transcript.stderr,
+    ));
+    if !transcript.succeeded {
         outcome.result = Err(commit_error("commit.git_failed", "git commit failed"));
         return outcome;
     }
@@ -643,12 +645,16 @@ fn validate_message(message: &str) -> Result<String> {
     Ok(message)
 }
 
-fn git_commit_captured(cwd: &Path, message: &str) -> Result<Output> {
+fn git_commit_captured(cwd: &Path, message: &str) -> Result<git::MutationTranscript> {
     LifecycleMutation::new(cwd).commit_captured(message)
 }
 
 fn diagnostics_for(source: &str, output: &Output) -> Vec<Diagnostic> {
-    [("stdout", &output.stdout), ("stderr", &output.stderr)]
+    diagnostics_for_streams(source, &output.stdout, &output.stderr)
+}
+
+fn diagnostics_for_streams(source: &str, stdout: &[u8], stderr: &[u8]) -> Vec<Diagnostic> {
+    [("stdout", stdout), ("stderr", stderr)]
         .into_iter()
         .filter(|(_, bytes)| !bytes.is_empty())
         .map(|(stream, bytes)| {
