@@ -461,34 +461,6 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
     emit(response, failed)
 }
 
-fn push_diagnostic(response: &mut protocol::Response, source: &str, stream: &str, bytes: &[u8]) {
-    const LIMIT: usize = 16 * 1024;
-    if bytes.is_empty() {
-        return;
-    }
-    let kept = &bytes[..bytes.len().min(LIMIT)];
-    response.diagnostics.push(crate::protocol::Diagnostic {
-        source: source.into(),
-        stream: stream.into(),
-        content: String::from_utf8_lossy(kept).into_owned(),
-        original_size: bytes.len(),
-        truncated: bytes.len() > LIMIT,
-    });
-}
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields)]
-#[allow(clippy::struct_excessive_bools)] // Each flag is an independent policy opt-out.
-struct MergeInput {
-    #[serde(default)]
-    no_rebase: bool,
-    #[serde(default)]
-    no_remove: bool,
-    #[serde(default)]
-    no_squash: bool,
-    #[serde(default)]
-    dry_run: bool,
-}
-
 /// Plans or executes the structured merge lifecycle.
 ///
 /// # Errors
@@ -515,7 +487,7 @@ pub fn merge(
                 "command options are forbidden with --input-output json",
             );
         }
-        match protocol::read_request::<MergeInput>() {
+        match protocol::read_request::<crate::lifecycle::MergeInput>() {
             Ok(r) if r.schema_version == 1 => (r.request_id, r.input),
             Ok(r) => {
                 return emit_err(
@@ -530,7 +502,7 @@ pub fn merge(
     } else {
         (
             None,
-            MergeInput {
+            crate::lifecycle::MergeInput {
                 no_rebase,
                 no_remove,
                 no_squash,
@@ -538,29 +510,23 @@ pub fn merge(
             },
         )
     };
-    let policy =
-        crate::lifecycle::MergePolicy::new(input.no_rebase, input.no_remove, input.no_squash);
+    let policy = input.policy();
     let plan = match crate::lifecycle::plan_merge(policy) {
         Ok(plan) => plan,
-        Err(e) => {
-            let message = e.to_string();
-            let code = match e.kind {
-                crate::lifecycle::PreflightFailureKind::PolicyConflict => "merge.policy_conflict",
-                crate::lifecycle::PreflightFailureKind::Dirty => "merge.dirty",
-                crate::lifecycle::PreflightFailureKind::NotFastForwardable => {
-                    "merge.not_fast_forwardable"
-                }
-                crate::lifecycle::PreflightFailureKind::NothingToMerge => "merge.nothing_to_merge",
-                crate::lifecycle::PreflightFailureKind::SquashGeneratorMissing => {
-                    "merge.squash_generator_missing"
-                }
-                _ => "merge.blocked",
-            };
-            return emit_err("merge", id, code, message);
+        Err(error) => {
+            let outcome = crate::lifecycle::merge_preflight_outcome(&error);
+            let response = protocol::adapt(
+                "merge",
+                id,
+                outcome.result,
+                outcome.context,
+                outcome.effects,
+                outcome.diagnostics,
+                outcome.recovery,
+            )?;
+            return emit(response, true);
         }
     };
-    // An in-place merge owns no topic worktree, so removal and the `cd` destination never apply.
-    let removes = !input.no_remove && !plan.context.in_place;
     let pre_merge_approval = if plan.context.cleanup_pending {
         None
     } else {
@@ -578,105 +544,22 @@ pub fn merge(
             }
         }
     };
-    let mut context = serde_json::to_value(&plan.context)?;
-    if let Some(candidate) = &pre_merge_approval {
-        context["approval"] = json!({
-            "phase": candidate.phase().key(),
-            "commands": candidate.commands().iter().map(|step| json!({
-                "name": step.name,
-                "command": step.command,
-            })).collect::<Vec<_>>(),
-            "repository": candidate.repository(),
-            "identity": candidate.identity(),
-        });
-    }
-    let effects = plan.effects.clone();
-    let approval_blocked = if plan.context.cleanup_pending {
-        !plan.context.pre_remove_hooks_trusted
-    } else {
-        pre_merge_approval.is_some() || plan.squash.approval_required()
-    };
-    if input.dry_run {
-        let mut response = protocol::success(
-            "merge",
-            id,
-            json!({"outcome":"dry_run","plan":if plan.context.in_place{"in_place"}else if input.no_remove{"retained_topic"}else{"cleanup"},"policy":plan.context.policy,"ready":!approval_blocked,"approval_required":approval_blocked}),
-            context,
-            effects,
-        );
-        if approval_blocked {
-            response.next_steps.push(protocol::NextStep { action:"trust.review".into(), description:"Review and explicitly trust the configured lifecycle hooks".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["pando","trust","show"],"working_directory":plan.context.topic_worktree}) });
-        }
-        return emit(response, false);
-    }
-    if approval_blocked {
-        let squash_blocked = !plan.context.cleanup_pending && plan.squash.approval_required();
-        let mut response = if squash_blocked {
-            protocol::failure(
-                "merge",
-                id,
-                "merge.squash_approval_required",
-                "the shared squash message generator is not trusted",
-            )
-        } else {
-            protocol::failure(
-                "merge",
-                id,
-                "merge.hook_approval_required",
-                "configured lifecycle hooks are not trusted",
-            )
-        };
-        response.context = context;
-        response.effects = effects;
-        response.next_steps.push(if squash_blocked {
-            protocol::NextStep { action:"trust.review_squash_generator".into(), description:"Review and explicitly trust the shared squash message generator before retrying, or retry with no_squash".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["pando","trust","merge-approve"],"working_directory":plan.context.topic_worktree}) }
-        } else {
-            protocol::NextStep { action:"trust.review".into(), description:"Review and explicitly trust the configured lifecycle hooks before retrying".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["pando","trust","show"],"working_directory":plan.context.topic_worktree}) }
-        });
-        return emit(response, true);
-    }
-    let outcome =
-        crate::lifecycle::execute_merge(&plan, crate::lifecycle::MergeExecutionMode::Captured);
-    let failed = outcome.failure.is_some();
-    let mut response = if let Some((kind, message)) = &outcome.failure {
-        let code = match kind {
-            crate::lifecycle::MergeExecutionFailureKind::StalePlan => "merge.stale_plan",
-            crate::lifecycle::MergeExecutionFailureKind::Rebase => "merge.rebase_conflict",
-            crate::lifecycle::MergeExecutionFailureKind::Squash
-            | crate::lifecycle::MergeExecutionFailureKind::Integration => "merge.execution_failed",
-            crate::lifecycle::MergeExecutionFailureKind::Validation => "merge.validation_failed",
-            crate::lifecycle::MergeExecutionFailureKind::Cleanup => "merge.cleanup_failed",
-            crate::lifecycle::MergeExecutionFailureKind::Removal => "merge.remove_failed",
-            crate::lifecycle::MergeExecutionFailureKind::Journal
-            | crate::lifecycle::MergeExecutionFailureKind::JournalCleanup => "merge.journal_failed",
-        };
-        let mut response = protocol::failure("merge", id, code, message);
-        response.context = serde_json::to_value(&outcome.context)?;
-        response.effects.clone_from(&outcome.effects);
-        let working_directory = outcome
-            .destination
-            .as_ref()
-            .unwrap_or(&plan.context.topic_worktree);
-        response.next_steps.push(protocol::NextStep { action:"merge.retry".into(), description:"Resolve the reported blocker and retry the journaled lifecycle with its pinned policy".into(), mutation:"repository".into(), requires_human_approval:false, invocation:json!({"argv":["pando","merge","--input-output","json"],"stdin":{"schema_version":1,"input":input},"working_directory":working_directory}) });
-        response
-    } else {
-        protocol::success(
-            "merge",
-            id,
-            json!({"outcome":if plan.context.in_place{"in_place"}else if removes{"removed"}else{"retained"},"destination":outcome.destination}),
-            json!({"initial":plan.context,"phase":outcome.context.phase}),
-            outcome.effects.clone(),
-        )
-    };
-    for diagnostic in outcome.diagnostics {
-        response.diagnostics.push(crate::protocol::Diagnostic {
-            source: diagnostic.phase.into(),
-            stream: diagnostic.stream.into(),
-            content: String::from_utf8_lossy(&diagnostic.content).into_owned(),
-            original_size: diagnostic.original_size,
-            truncated: diagnostic.truncated,
-        });
-    }
+    let outcome = crate::lifecycle::merge_outcome(
+        &plan,
+        &input,
+        pre_merge_approval.as_ref(),
+        crate::lifecycle::MergeExecutionMode::Captured,
+    );
+    let failed = outcome.result.is_err();
+    let response = protocol::adapt(
+        "merge",
+        id,
+        outcome.result,
+        outcome.context,
+        outcome.effects,
+        outcome.diagnostics,
+        outcome.recovery,
+    )?;
     emit(response, failed)
 }
 
@@ -738,7 +621,9 @@ pub fn help(command: &str) -> Value {
         "remove" => json!(schemars::schema_for!(
             protocol::Request<crate::lifecycle::RemovalInput>
         )),
-        "merge" => json!(schemars::schema_for!(protocol::Request<MergeInput>)),
+        "merge" => json!(schemars::schema_for!(
+            protocol::Request<crate::lifecycle::MergeInput>
+        )),
         "trust.reset"
         | "trust.commit_reset"
         | "trust.commit_approve"
@@ -782,35 +667,8 @@ pub fn help(command: &str) -> Value {
             &["pre_remove_hooks", "remove_worktree"],
         ),
         "merge" => (
-            &[
-                "json.invalid_request",
-                "json.unsupported_schema_version",
-                "repository.invalid",
-                "merge.primary_forbidden",
-                "merge.dirty",
-                "merge.not_fast_forwardable",
-                "merge.squash_generator_missing",
-                "merge.squash_approval_required",
-                "merge.policy_conflict",
-                "merge.hook_approval_required",
-                "merge.rebase_conflict",
-                "merge.cleanup_failed",
-                "merge.execution_failed",
-                "merge.blocked",
-            ],
-            &[
-                "journal",
-                "rebase",
-                "squash",
-                "pre_merge_hooks",
-                "fast_forward_merge",
-                "pre_remove_hooks",
-                "remove_worktree",
-                "destination",
-                "trust.review",
-                "merge.retry",
-                "trust.review_squash_generator",
-            ],
+            crate::lifecycle::MERGE_ERRORS,
+            crate::lifecycle::MERGE_ACTIONS,
         ),
         "trust.reset" | "trust.commit_reset" | "trust.merge_reset" => (
             &[
@@ -853,6 +711,7 @@ pub fn help(command: &str) -> Value {
         "list" => json!(schemars::schema_for!(read_only::ListResult)),
         "get" => json!(schemars::schema_for!(read_only::GetResult)),
         "install" => json!(schemars::schema_for!(install::InstallResult)),
+        "merge" => json!(schemars::schema_for!(crate::lifecycle::MergeResult)),
         "switch" | "create" => json!(schemars::schema_for!(OperationResult)),
         _ => Value::Null,
     };

@@ -90,6 +90,145 @@ impl MergePolicy {
     }
 }
 
+/// Strict version 1 input for the merge lifecycle.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Each flag is an independent policy opt-out.
+pub struct MergeInput {
+    #[serde(default)]
+    pub no_rebase: bool,
+    #[serde(default)]
+    pub no_remove: bool,
+    #[serde(default)]
+    pub no_squash: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+impl MergeInput {
+    #[must_use]
+    pub const fn policy(&self) -> MergePolicy {
+        MergePolicy::new(self.no_rebase, self.no_remove, self.no_squash)
+    }
+}
+
+/// Public result shared by human and JSON merge adapters.
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum MergeResult {
+    DryRun {
+        plan: String,
+        policy: MergePolicy,
+        ready: bool,
+        approval_required: bool,
+    },
+    InPlace {
+        destination: Option<BytePath>,
+    },
+    Removed {
+        destination: Option<BytePath>,
+    },
+    Retained {
+        destination: Option<BytePath>,
+    },
+}
+
+/// Stable merge failure rendered by protocol adapters.
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct MergeError {
+    pub code: String,
+    pub message: String,
+}
+
+impl From<MergeError> for ErrorBody {
+    fn from(error: MergeError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+        }
+    }
+}
+
+/// One exact hook command awaiting merge approval.
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct MergeApprovalCommand {
+    pub name: Option<String>,
+    pub command: String,
+}
+
+/// Hook trust facts preserved when a merge is blocked before mutation.
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct MergeApprovalContext {
+    pub phase: String,
+    pub commands: Vec<MergeApprovalCommand>,
+    pub repository: String,
+    pub identity: String,
+}
+
+/// Adapter-neutral context for every merge outcome shape in protocol version 1.
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+#[serde(untagged)]
+pub enum MergeOutcomeContext {
+    Unavailable {},
+    Lifecycle(MergeContext),
+    Approval {
+        #[serde(flatten)]
+        lifecycle: MergeContext,
+        approval: MergeApprovalContext,
+    },
+    Completed {
+        initial: MergeContext,
+        phase: MergePhase,
+    },
+}
+
+/// Complete command-owned merge outcome before presentation adaptation.
+#[derive(Debug)]
+pub struct MergeOutcome {
+    pub result: std::result::Result<MergeResult, MergeError>,
+    pub context: MergeOutcomeContext,
+    pub effects: Vec<Effect>,
+    pub diagnostics: Vec<Diagnostic>,
+    pub recovery: Vec<RecoveryAction<protocol::Request<MergeInput>>>,
+}
+
+/// Stable version 1 merge protocol catalogs owned by the merge command.
+pub const MERGE_ERRORS: &[&str] = &[
+    "json.invalid_request",
+    "json.unsupported_schema_version",
+    "repository.invalid",
+    "merge.primary_forbidden",
+    "merge.dirty",
+    "merge.not_fast_forwardable",
+    "merge.squash_generator_missing",
+    "merge.squash_approval_required",
+    "merge.policy_conflict",
+    "merge.hook_approval_required",
+    "merge.nothing_to_merge",
+    "merge.stale_plan",
+    "merge.rebase_conflict",
+    "merge.validation_failed",
+    "merge.cleanup_failed",
+    "merge.remove_failed",
+    "merge.journal_failed",
+    "merge.execution_failed",
+    "merge.blocked",
+    "trust.read_failed",
+];
+pub const MERGE_ACTIONS: &[&str] = &[
+    "journal",
+    "rebase",
+    "squash",
+    "pre_merge_hooks",
+    "fast_forward_merge",
+    "pre_remove_hooks",
+    "remove_worktree",
+    "destination",
+    "trust.review",
+    "merge.retry",
+    "trust.review_squash_generator",
+];
+
 #[derive(Clone, Copy, Debug)]
 pub enum PreflightFailureKind {
     DuplicateTarget,
@@ -130,6 +269,30 @@ fn preflight(kind: PreflightFailureKind, message: impl Into<String>) -> Prefligh
         error: anyhow::anyhow!(message.into()),
     }
 }
+
+/// Converts a merge preflight blocker to its stable command outcome.
+#[must_use]
+pub fn merge_preflight_outcome(error: &PreflightFailure) -> MergeOutcome {
+    let code = match error.kind {
+        PreflightFailureKind::PolicyConflict => "merge.policy_conflict",
+        PreflightFailureKind::Dirty => "merge.dirty",
+        PreflightFailureKind::NotFastForwardable => "merge.not_fast_forwardable",
+        PreflightFailureKind::NothingToMerge => "merge.nothing_to_merge",
+        PreflightFailureKind::SquashGeneratorMissing => "merge.squash_generator_missing",
+        _ => "merge.blocked",
+    };
+    MergeOutcome {
+        result: Err(MergeError {
+            code: code.into(),
+            message: error.to_string(),
+        }),
+        context: MergeOutcomeContext::Unavailable {},
+        effects: Vec::new(),
+        diagnostics: Vec::new(),
+        recovery: Vec::new(),
+    }
+}
+
 type PreflightResult<T> = std::result::Result<T, PreflightFailure>;
 
 /// Validated, read-only merge plan shared by command adapters.
@@ -206,6 +369,217 @@ impl MergeExecutionOutcome {
     #[must_use]
     pub const fn succeeded(&self) -> bool {
         self.failure.is_none()
+    }
+}
+
+fn merge_failure_code(kind: MergeExecutionFailureKind) -> &'static str {
+    match kind {
+        MergeExecutionFailureKind::StalePlan => "merge.stale_plan",
+        MergeExecutionFailureKind::Rebase => "merge.rebase_conflict",
+        MergeExecutionFailureKind::Squash | MergeExecutionFailureKind::Integration => {
+            "merge.execution_failed"
+        }
+        MergeExecutionFailureKind::Validation => "merge.validation_failed",
+        MergeExecutionFailureKind::Cleanup => "merge.cleanup_failed",
+        MergeExecutionFailureKind::Removal => "merge.remove_failed",
+        MergeExecutionFailureKind::Journal | MergeExecutionFailureKind::JournalCleanup => {
+            "merge.journal_failed"
+        }
+    }
+}
+
+fn merge_diagnostics(diagnostics: Vec<MergeDiagnostic>) -> Vec<Diagnostic> {
+    const LIMIT: usize = 16 * 1024;
+    diagnostics
+        .into_iter()
+        .filter(|diagnostic| !diagnostic.content.is_empty())
+        .map(|diagnostic| {
+            let original_size = diagnostic.content.len();
+            let kept = &diagnostic.content[..original_size.min(LIMIT)];
+            Diagnostic {
+                source: diagnostic.phase.into(),
+                stream: diagnostic.stream.into(),
+                content: String::from_utf8_lossy(kept).into_owned(),
+                original_size,
+                truncated: original_size > LIMIT,
+            }
+        })
+        .collect()
+}
+
+fn merge_approval_context(candidate: &hook_approval::Candidate) -> MergeApprovalContext {
+    MergeApprovalContext {
+        phase: candidate.phase().key().into(),
+        commands: candidate
+            .commands()
+            .iter()
+            .map(|step| MergeApprovalCommand {
+                name: step.name.clone(),
+                command: step.command.clone(),
+            })
+            .collect(),
+        repository: candidate.repository().into(),
+        identity: candidate.identity().into(),
+    }
+}
+
+/// Converts one validated merge plan into the command-owned protocol outcome.
+///
+/// The same function handles previews, trust blockers, and execution so adapters
+/// cannot infer lifecycle progress from Git or rebuild retry policy.
+#[must_use]
+#[allow(clippy::too_many_lines)] // The outcome records every version 1 lifecycle contract in one seam.
+pub fn merge_outcome(
+    plan: &MergePlan,
+    input: &MergeInput,
+    approval: Option<&hook_approval::Candidate>,
+    mode: MergeExecutionMode,
+) -> MergeOutcome {
+    let squash_blocked = !plan.context.cleanup_pending && plan.squash.approval_required();
+    let hook_blocked = if plan.context.cleanup_pending {
+        !plan.context.pre_remove_hooks_trusted
+    } else {
+        approval.is_some()
+    };
+    let approval_blocked = squash_blocked || hook_blocked;
+    let context = approval.map_or_else(
+        || MergeOutcomeContext::Lifecycle(plan.context.clone()),
+        |candidate| MergeOutcomeContext::Approval {
+            lifecycle: plan.context.clone(),
+            approval: merge_approval_context(candidate),
+        },
+    );
+    if input.dry_run {
+        return MergeOutcome {
+            result: Ok(MergeResult::DryRun {
+                plan: if plan.context.in_place {
+                    "in_place"
+                } else if input.no_remove {
+                    "retained_topic"
+                } else {
+                    "cleanup"
+                }
+                .into(),
+                policy: plan.context.policy,
+                ready: !approval_blocked,
+                approval_required: approval_blocked,
+            }),
+            context,
+            effects: plan.effects.clone(),
+            diagnostics: Vec::new(),
+            recovery: if approval_blocked {
+                vec![merge_trust_recovery(plan, false)]
+            } else {
+                Vec::new()
+            },
+        };
+    }
+    if approval_blocked {
+        return MergeOutcome {
+            result: Err(MergeError {
+                code: if squash_blocked {
+                    "merge.squash_approval_required"
+                } else {
+                    "merge.hook_approval_required"
+                }
+                .into(),
+                message: if squash_blocked {
+                    "the shared squash message generator is not trusted"
+                } else {
+                    "configured lifecycle hooks are not trusted"
+                }
+                .into(),
+            }),
+            context,
+            effects: plan.effects.clone(),
+            diagnostics: Vec::new(),
+            recovery: vec![merge_trust_recovery(plan, squash_blocked)],
+        };
+    }
+    let execution = execute_merge(plan, mode);
+    let diagnostics = merge_diagnostics(execution.diagnostics);
+    if let Some((kind, message)) = execution.failure {
+        let working_directory = execution
+            .destination
+            .unwrap_or_else(|| plan.context.topic_worktree.clone());
+        return MergeOutcome {
+            result: Err(MergeError {
+                code: merge_failure_code(kind).into(),
+                message,
+            }),
+            context: MergeOutcomeContext::Lifecycle(execution.context),
+            effects: execution.effects,
+            diagnostics,
+            recovery: vec![RecoveryAction {
+                action: "merge.retry".into(),
+                description: "Resolve the reported blocker and retry the journaled lifecycle with its pinned policy".into(),
+                mutation: MutationClass::Repository,
+                requires_human_approval: false,
+                invocation: RecoveryInvocation {
+                    argv: vec!["pando".into(), "merge".into(), "--input-output".into(), "json".into()],
+                    stdin: Some(protocol::Request {
+                        schema_version: 1,
+                        request_id: None,
+                        input: input.clone(),
+                    }),
+                    working_directory: Some(working_directory),
+                },
+            }],
+        };
+    }
+    let result = if plan.context.in_place {
+        MergeResult::InPlace {
+            destination: execution.destination,
+        }
+    } else if input.no_remove {
+        MergeResult::Retained {
+            destination: execution.destination,
+        }
+    } else {
+        MergeResult::Removed {
+            destination: execution.destination,
+        }
+    };
+    MergeOutcome {
+        result: Ok(result),
+        context: MergeOutcomeContext::Completed {
+            initial: plan.context.clone(),
+            phase: execution.context.phase,
+        },
+        effects: execution.effects,
+        diagnostics,
+        recovery: Vec::new(),
+    }
+}
+
+fn merge_trust_recovery(
+    plan: &MergePlan,
+    squash_blocked: bool,
+) -> RecoveryAction<protocol::Request<MergeInput>> {
+    RecoveryAction {
+        action: if squash_blocked {
+            "trust.review_squash_generator"
+        } else {
+            "trust.review"
+        }
+        .into(),
+        description: if squash_blocked {
+            "Review and explicitly trust the shared squash message generator before retrying, or retry with no_squash"
+        } else {
+            "Review and explicitly trust the configured lifecycle hooks before retrying"
+        }
+        .into(),
+        mutation: MutationClass::Trust,
+        requires_human_approval: true,
+        invocation: RecoveryInvocation {
+            argv: if squash_blocked {
+                vec!["pando".into(), "trust".into(), "merge-approve".into()]
+            } else {
+                vec!["pando".into(), "trust".into(), "show".into()]
+            },
+            stdin: None,
+            working_directory: Some(plan.context.topic_worktree.clone()),
+        },
     }
 }
 
@@ -1966,8 +2340,22 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
         // Approval changes trust state, so execution consumes a fresh
         // validated plan rather than the pre-approval snapshot.
         let plan = plan_merge(policy)?;
-        let outcome = execute_merge(&plan, MergeExecutionMode::Human);
-        if outcome.destination.is_some() {
+        let input = MergeInput {
+            no_rebase: policy.no_rebase,
+            no_remove: policy.no_remove,
+            no_squash: policy.no_squash,
+            dry_run: false,
+        };
+        let outcome = merge_outcome(&plan, &input, None, MergeExecutionMode::Human);
+        let destination = match &outcome.result {
+            Ok(
+                MergeResult::InPlace { destination }
+                | MergeResult::Removed { destination }
+                | MergeResult::Retained { destination },
+            ) => destination.is_some(),
+            Ok(MergeResult::DryRun { .. }) | Err(_) => false,
+        };
+        if destination {
             write_destination(
                 plan.repository
                     .primary
@@ -1975,21 +2363,20 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
                     .expect("a merge plan always has a primary worktree"),
             )?;
         }
-        if let Some((_, message)) = outcome.failure {
-            bail!(message);
-        }
+        let epilogue = match &outcome.result {
+            Ok(MergeResult::InPlace { .. }) => "; primary worktree switched to target.",
+            Ok(MergeResult::Retained { .. }) => "; worktree retained.",
+            Ok(MergeResult::Removed { .. }) => "; worktree removed.",
+            Ok(MergeResult::DryRun { .. }) => {
+                unreachable!("human merge execution is not a dry run")
+            }
+            Err(error) => bail!(error.message.clone()),
+        };
         let squashed = outcome
             .effects
             .iter()
             .find(|effect| effect.action == "squash")
             .is_some_and(|effect| effect.completed);
-        let epilogue = if plan.context.in_place {
-            "; primary worktree switched to target."
-        } else if plan.context.policy.no_remove {
-            "; worktree retained."
-        } else {
-            "; worktree removed."
-        };
         return ui::finish(styled_merge_summary(
             &plan.context.source_branch,
             &plan.context.target_branch,

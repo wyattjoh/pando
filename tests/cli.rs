@@ -1671,6 +1671,35 @@ fn merge_reports_a_rebase_conflict_and_resumes_without_an_editor() {
 }
 
 #[test]
+fn json_merge_help_derives_request_result_and_catalogs_from_lifecycle_types() {
+    let repo = Repository::new();
+    let output = json_command(&repo.linked, &["merge", "--help", "--output", "json"], None);
+    assert!(output.status.success());
+    let value = assert_json_pure(&output);
+    let result = &value["result"];
+    let request_schema = serde_json::to_string(&result["request_schema"]).unwrap();
+    for field in ["no_rebase", "no_remove", "no_squash", "dry_run"] {
+        assert!(request_schema.contains(field), "{request_schema}");
+    }
+    let result_schema = serde_json::to_string(&result["result_schema"]).unwrap();
+    for outcome in ["dry_run", "in_place", "removed", "retained"] {
+        assert!(result_schema.contains(outcome), "{result_schema}");
+    }
+    assert!(
+        result["error_codes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("merge.validation_failed"))
+    );
+    assert!(
+        result["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("merge.retry"))
+    );
+}
+
+#[test]
 fn json_merge_executes_the_lifecycle_without_a_nested_pando_process() {
     let repo = Repository::new();
     commit_three_on_topic(&repo);
@@ -1735,6 +1764,15 @@ fn json_merge_reports_incomplete_rebase_effect_and_resumes_pinned_journal() {
     assert_eq!(value["context"]["target_branch"], "main");
     assert_eq!(value["context"]["policy"]["no_remove"], true);
     assert_eq!(value["context"]["policy"]["no_squash"], true);
+    let retry = &value["next_steps"][0]["invocation"];
+    assert_eq!(retry["stdin"]["input"]["no_rebase"], false);
+    assert_eq!(retry["stdin"]["input"]["no_remove"], true);
+    assert_eq!(retry["stdin"]["input"]["no_squash"], true);
+    assert_eq!(retry["stdin"]["input"]["dry_run"], false);
+    assert_eq!(
+        retry["working_directory"]["value"],
+        fs::canonicalize(&repo.linked).unwrap().to_str().unwrap()
+    );
 
     fs::write(repo.linked.join("README.md"), "resolved\n").unwrap();
     git(&repo.linked, ["add", "README.md"]);
@@ -7018,6 +7056,33 @@ fn json_version_one_byte_paths_effects_diagnostics_and_recovery_are_public() {
         "base64"
     );
     assert!(create["diagnostics"].as_array().unwrap().is_empty());
+
+    fs::write(repo.main.join("README.md"), "main conflict\n").unwrap();
+    git(&repo.main, ["add", "README.md"]);
+    git(&repo.main, ["commit", "-m", "main conflict"]);
+    fs::write(path.join("README.md"), "topic conflict\n").unwrap();
+    git(&path, ["add", "README.md"]);
+    git(&path, ["commit", "-m", "topic conflict"]);
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {"no_remove": true, "no_squash": true}
+    });
+    let merge = json_command(&path, &["merge", "--input-output", "json"], Some(&request));
+    assert!(!merge.status.success());
+    let merge = assert_json_pure(&merge);
+    assert_eq!(merge["error"]["code"], "merge.rebase_conflict");
+    assert_eq!(
+        merge["next_steps"][0]["invocation"]["working_directory"]["encoding"],
+        "base64"
+    );
+    assert_eq!(
+        merge["next_steps"][0]["invocation"]["stdin"]["input"]["no_remove"],
+        true
+    );
+    assert_eq!(
+        merge["next_steps"][0]["invocation"]["stdin"]["input"]["no_squash"],
+        true
+    );
 }
 
 #[test]
