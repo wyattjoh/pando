@@ -431,6 +431,14 @@ pub(crate) struct CommitRange {
     pub(crate) statistics: String,
 }
 
+/// Diff material and committed subjects used to generate pull-request metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PullRequestChanges {
+    pub(crate) patch: String,
+    pub(crate) statistics: String,
+    pub(crate) subjects: String,
+}
+
 /// Concrete interface to commit graph, index, status, and diff observations.
 ///
 /// Range construction, stable diff flags, message ordering, and byte-safe
@@ -471,6 +479,16 @@ impl<'cwd> HistoryObservation<'cwd> {
         Ok(StagedChanges {
             patch: staged_patch(self.cwd, target)?,
             statistics: staged_statistics(self.cwd, target)?,
+        })
+    }
+
+    pub(crate) fn pull_request_changes(self, base: &str) -> Result<PullRequestChanges> {
+        let diff_range = format!("{base}...HEAD");
+        let subject_range = format!("{base}..HEAD");
+        Ok(PullRequestChanges {
+            patch: stable_diff(self.cwd, &diff_range, None)?,
+            statistics: stable_diff(self.cwd, &diff_range, Some("--stat"))?,
+            subjects: git_stdout(self.cwd, ["log", "--format=%s", &subject_range])?,
         })
     }
 
@@ -563,6 +581,26 @@ impl<'cwd> RepositoryObservation<'cwd> {
 
     pub(crate) fn branches(self) -> Result<Vec<BranchRecord>> {
         Ok(discover_branch_refs(self.cwd)?.0)
+    }
+
+    pub(crate) fn configured_editor(self) -> Result<Option<String>> {
+        let output = run_git(self.cwd, ["config", "--get", "core.editor"])?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        Ok((!value.is_empty()).then_some(value))
+    }
+
+    pub(crate) fn committed_file(self, path: &str) -> Result<Option<String>> {
+        let object = format!("HEAD:{path}");
+        let output = run_git(self.cwd, ["show", &object])?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        String::from_utf8(output.stdout)
+            .context("repository pull-request template is not UTF-8")
+            .map(Some)
     }
 
     pub(crate) fn remote_branches(self) -> Result<Vec<String>> {
@@ -1585,9 +1623,10 @@ fn range_patch(
     descendant: &str,
     extra: Option<&str>,
 ) -> Result<String> {
-    let range = format!("{ancestor}..{descendant}");
-    // `--stat` is passed as an empty flag when absent so both shapes share the
-    // fixed-size argument array `git_stdout` requires.
+    stable_diff(cwd, &format!("{ancestor}..{descendant}"), extra)
+}
+
+fn stable_diff(cwd: &Path, range: &str, extra: Option<&str>) -> Result<String> {
     let output = run_git(
         cwd,
         [
@@ -1596,7 +1635,7 @@ fn range_patch(
             "--no-ext-diff",
             "--no-textconv",
             extra.unwrap_or("--patch"),
-            &range,
+            range,
         ],
     )
     .with_context(|| format!("failed to diff {range}"))?;

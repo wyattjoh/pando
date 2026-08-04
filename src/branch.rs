@@ -224,6 +224,10 @@ impl<'repository> Resolver<'repository> {
         Ok(PushResolution::Ambiguous(remotes))
     }
 
+    pub(crate) fn publish(self, plan: &PushPlan, display_output: bool) -> Result<()> {
+        git::push(self.cwd(), plan, display_output)
+    }
+
     pub(crate) fn new_branch_base(
         self,
         mode: BaseMode,

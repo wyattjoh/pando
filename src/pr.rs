@@ -488,7 +488,7 @@ fn execute(
         "Publishing topic branch...",
         "Published topic branch",
         "Failed to publish topic branch",
-        |animated| crate::git::push(&repo.current().path, &push_plan, !json_mode && !animated),
+        |animated| resolver.publish(&push_plan, !json_mode && !animated),
     );
     if let Err(error) = push {
         return Ok(PrOutcome {
@@ -593,22 +593,24 @@ fn generate_metadata(
         .map_or("(unknown)".into(), |value| {
             value.to_string_lossy().into_owned()
         });
-    let diffstat = git_cmd(repo, &["diff", "--stat", &format!("{base}...HEAD")])?;
-    let diff = git_cmd(repo, &["diff", &format!("{base}...HEAD")])?;
-    let subjects = git_cmd(repo, &["log", "--format=%s", &format!("{base}..HEAD")])?;
+    let changes =
+        crate::git::HistoryObservation::new(&repo.current().path).pull_request_changes(base)?;
     let explicit_title = title.unwrap_or("");
     let explicit_description = body.unwrap_or("");
     let prompt = if let Some(template) = config.pr_generation.template.as_ref() {
         let mut environment = Environment::new();
         environment.add_template("pr", &template.value)?;
         environment.get_template("pr")?.render(context! {
-            repo => repo_name, branch => head, base, git_diff_stat => diffstat,
-            git_diff => diff, git_commit_subjects => subjects,
+            repo => repo_name, branch => head, base, git_diff_stat => changes.statistics,
+            git_diff => changes.patch, git_commit_subjects => changes.subjects,
             explicit_title, explicit_description, pull_request_template
         })?
     } else {
         format!(
-            "Generate a PR metadata document. Return exactly one first-line level-one heading, followed by the description. Preserve required headings, checklists, and sections from the pull-request template; replace placeholders and instructional comments with factual content.\nRepository: {repo_name}\nTopic branch: {head}\nTarget branch: {base}\nDiffstat:\n{diffstat}\nCommitted commit subjects:\n{subjects}\nExplicit title: {explicit_title}\nExplicit description:\n{explicit_description}\nDiff:\n{diff}\nPull-request template:\n{pull_request_template}\n"
+            "Generate a PR metadata document. Return exactly one first-line level-one heading, followed by the description. Preserve required headings, checklists, and sections from the pull-request template; replace placeholders and instructional comments with factual content.\nRepository: {repo_name}\nTopic branch: {head}\nTarget branch: {base}\nDiffstat:\n{statistics}\nCommitted commit subjects:\n{subjects}\nExplicit title: {explicit_title}\nExplicit description:\n{explicit_description}\nDiff:\n{patch}\nPull-request template:\n{pull_request_template}\n",
+            statistics = changes.statistics,
+            subjects = changes.subjects,
+            patch = changes.patch,
         )
     };
     crate::ui::run_timed(
@@ -745,7 +747,7 @@ fn review_metadata(
             Key::Char('\u{7}') => {
                 let path = env::temp_dir().join(format!("pando-pr-{}.md", std::process::id()));
                 fs::write(&path, format!("# {title}\n\n{body}\n"))?;
-                let editor = resolve_editor()?;
+                let editor = resolve_editor(&env::current_dir()?)?;
                 let status = Command::new("/bin/sh")
                     .args(["-c", &format!(r#"{editor} "$1""#)])
                     .arg("pando-pr-editor")
@@ -770,18 +772,12 @@ fn review_metadata(
     }
 }
 
-fn resolve_editor() -> Result<String> {
+fn resolve_editor(cwd: &Path) -> Result<String> {
     if let Some(editor) = env::var_os("GIT_EDITOR").filter(|v| !v.is_empty()) {
         return Ok(editor.to_string_lossy().into_owned());
     }
-    let config = Command::new("git")
-        .args(["config", "--get", "core.editor"])
-        .output()?;
-    if config.status.success() {
-        let value = String::from_utf8_lossy(&config.stdout).trim().to_owned();
-        if !value.is_empty() {
-            return Ok(value);
-        }
+    if let Some(editor) = crate::git::RepositoryObservation::new(cwd).configured_editor()? {
+        return Ok(editor);
     }
     for name in ["VISUAL", "EDITOR"] {
         if let Some(editor) = env::var_os(name).filter(|v| !v.is_empty()) {
@@ -815,36 +811,21 @@ fn resolved_pull_request_template(
     {
         return Ok(value.value.clone());
     }
+    let observation = crate::git::RepositoryObservation::new(&repo.current().path);
     for path in [
         ".github/pull_request_template.md",
         ".github/PULL_REQUEST_TEMPLATE.md",
         "pull_request_template.md",
         "PULL_REQUEST_TEMPLATE.md",
     ] {
-        let output = Command::new("git")
-            .args(["show", &format!("HEAD:{path}")])
-            .current_dir(&repo.current().path)
-            .output()?;
-        if output.status.success() {
-            return String::from_utf8(output.stdout)
-                .context("repository pull-request template is not UTF-8");
+        if let Some(template) = observation.committed_file(path)? {
+            return Ok(template);
         }
     }
     Ok(config
         .pull_request_template
         .as_ref()
         .map_or_else(String::new, |value| value.value.clone()))
-}
-
-fn git_cmd(repo: &crate::git::Repository, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(&repo.current().path)
-        .output()?;
-    if !output.status.success() {
-        bail!("git command failed");
-    }
-    String::from_utf8(output.stdout).context("git output was not UTF-8")
 }
 
 /// Strips a fence that wraps the *entire* document, which generators
