@@ -8896,6 +8896,15 @@ fn json_help_exposes_create_description_and_shared_base_inputs() {
             "{command}: {errors}"
         );
         let actions = serde_json::to_string(&value["result"]["actions"]).unwrap();
+        let result_schema = &value["result"]["result_schema"];
+        assert!(result_schema.is_object(), "{command}: {result_schema}");
+        let serialized_schema = serde_json::to_string(result_schema).unwrap();
+        for outcome in ["existing", "creation_plan", "created"] {
+            assert!(
+                serialized_schema.contains(outcome),
+                "{command}: {serialized_schema}"
+            );
+        }
         assert_eq!(
             actions.contains("set_branch_description"),
             command == "create"

@@ -3,9 +3,11 @@
 use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::protocol::Effect;
+use crate::protocol::{BytePath, Effect};
 
 use crate::{
     Worktree,
@@ -15,6 +17,122 @@ use crate::{
     hook_approval,
     setup::{self, HookOutcome, HookOutput, OutputPolicy},
 };
+
+/// Stable error codes advertised by the switch protocol.
+pub(crate) const SWITCH_ERRORS: &[&str] = &[
+    "json.invalid_request",
+    "json.unsupported_schema_version",
+    "repository.invalid",
+    "switch.selection_required",
+    "switch.invalid_branch",
+    "switch.destination_unavailable",
+    "switch.destination_collision",
+    "switch.remote_selection_required",
+    "switch.fetch_not_applicable",
+    "switch.base_unavailable",
+    "switch.approval_required",
+    "trust.approval_required",
+];
+
+/// Stable error codes advertised by the create protocol.
+pub(crate) const CREATE_ERRORS: &[&str] = &[
+    "json.invalid_request",
+    "json.unsupported_schema_version",
+    "repository.invalid",
+    "create.branch_required",
+    "create.invalid_branch",
+    "create.branch_registered",
+    "create.destination_unavailable",
+    "create.destination_collision",
+    "create.remote_selection_required",
+    "create.fetch_not_applicable",
+    "create.base_unavailable",
+    "create.creation_failed",
+    "create.description_failed",
+    "create.setup_failed",
+    "trust.approval_required",
+];
+
+pub(crate) const SWITCH_ACTIONS: &[&str] = &["fetch_base_ref", "create_branch", "create_worktree"];
+pub(crate) const CREATE_ACTIONS: &[&str] = &[
+    "fetch_base_ref",
+    "create_branch",
+    "create_worktree",
+    "set_branch_description",
+];
+
+/// Strict machine request for switching worktrees.
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SwitchInput {
+    #[serde(default)]
+    pub(crate) branch: Option<String>,
+    #[serde(default)]
+    pub(crate) remote: Option<String>,
+    #[serde(default)]
+    pub(crate) fetch: bool,
+    #[serde(default)]
+    pub(crate) dry_run: bool,
+}
+
+/// Strict machine request for creating worktrees.
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateInput {
+    #[serde(default)]
+    pub(crate) branch: Option<String>,
+    #[serde(default)]
+    pub(crate) remote: Option<String>,
+    #[serde(default)]
+    pub(crate) fetch: bool,
+    #[serde(default)]
+    pub(crate) dry_run: bool,
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+}
+
+/// Version 1 success variants shared by switch and create adapters.
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub(crate) enum OperationResult {
+    Existing {
+        branch: String,
+        destination: BytePath,
+        dry_run: bool,
+    },
+    #[serde(rename = "creation_plan")]
+    NewBranchApproval {
+        branch: String,
+        destination: BytePath,
+        kind: &'static str,
+        start_point: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_ref: Option<String>,
+        approval_required: bool,
+    },
+    CreationPlan {
+        branch: String,
+        destination: BytePath,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        start_point: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_ref: Option<String>,
+        remote: Option<String>,
+    },
+    Created {
+        branch: String,
+        destination: BytePath,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        start_point: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_ref: Option<String>,
+        remote: Option<String>,
+    },
+}
 
 /// The public command intent whose policy differences affect planning.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

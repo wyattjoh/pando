@@ -6,44 +6,13 @@ use crate::{
     read_only::{self, GetProperty, GetRequest},
     setup::{self, OutputPolicy},
     trust,
-    worktree_plan::Intent,
+    worktree_plan::{CreateInput, Intent, OperationResult, SwitchInput},
 };
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::env;
-
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields)]
-struct SwitchInput {
-    #[serde(default)]
-    branch: Option<String>,
-    #[serde(default)]
-    remote: Option<String>,
-    /// Refresh the resolved base ref before creating a genuinely new branch.
-    #[serde(default)]
-    fetch: bool,
-    #[serde(default)]
-    dry_run: bool,
-}
-
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields)]
-struct CreateInput {
-    #[serde(default)]
-    branch: Option<String>,
-    #[serde(default)]
-    remote: Option<String>,
-    /// Refresh the resolved base ref before creating a genuinely new branch.
-    #[serde(default)]
-    fetch: bool,
-    #[serde(default)]
-    dry_run: bool,
-    /// Repository-local Git description to set on the resolved branch.
-    #[serde(default)]
-    description: Option<String>,
-}
 
 #[derive(Debug)]
 struct ResolveInput {
@@ -424,13 +393,19 @@ fn resolve(
     let destination = shared_plan.destination.clone();
     if let crate::worktree_plan::Source::Registered(worktree) = &shared_plan.source {
         return emit(
-            protocol::success(
+            protocol::adapt::<_, protocol::ErrorBody, _, EmptyInput>(
                 command,
                 id,
-                json!({"outcome":"existing","branch":branch,"destination":BytePath::path(&worktree.path),"dry_run":input.dry_run}),
+                Ok(OperationResult::Existing {
+                    branch,
+                    destination: BytePath::path(&worktree.path),
+                    dry_run: input.dry_run,
+                }),
                 json!({}),
                 vec![],
-            ),
+                vec![],
+                vec![],
+            )?,
             false,
         );
     }
@@ -452,12 +427,24 @@ fn resolve(
             );
         }
         let effects = crate::worktree_plan::planned_effects(&shared_plan);
-        let mut result = json!({"outcome":"creation_plan","kind":"new","branch":branch,"destination":BytePath::path(&destination),"start_point":base.commit,"approval_required":true});
-        if let Some(base_ref) = &base.base_ref {
-            result["base_ref"] = json!(base_ref.reference());
-        }
+        let result = OperationResult::NewBranchApproval {
+            branch,
+            destination: BytePath::path(&destination),
+            kind: "new",
+            start_point: base.commit.clone(),
+            base_ref: base.base_ref.as_ref().map(crate::git::BaseRef::reference),
+            approval_required: true,
+        };
         return emit(
-            protocol::success("switch", id, result, json!({}), effects),
+            protocol::adapt::<_, protocol::ErrorBody, _, EmptyInput>(
+                "switch",
+                id,
+                Ok(result),
+                json!({}),
+                effects,
+                vec![],
+                vec![],
+            )?,
             false,
         );
     }
@@ -519,20 +506,41 @@ fn resolve(
         };
         let effects = outcome.effects;
         let hook_output = outcome.hook_output;
-        let mut result = json!({
-            "outcome": if input.dry_run { "creation_plan" } else { "created" },
-            "branch": branch,
-            "destination": BytePath::path(&destination),
-            "remote": selected_remote,
+        let (kind, start_point, base_ref) = new_base.map_or((None, None, None), |base| {
+            (
+                Some("new"),
+                Some(base.commit),
+                base.base_ref.map(|value| value.reference()),
+            )
         });
-        if let Some(base) = new_base {
-            result["kind"] = json!("new");
-            result["start_point"] = json!(base.commit);
-            if let Some(base_ref) = &base.base_ref {
-                result["base_ref"] = json!(base_ref.reference());
+        let result = if input.dry_run {
+            OperationResult::CreationPlan {
+                branch,
+                destination: BytePath::path(&destination),
+                kind,
+                start_point,
+                base_ref,
+                remote: selected_remote,
             }
-        }
-        let mut response = protocol::success(command, id, result, json!({}), effects);
+        } else {
+            OperationResult::Created {
+                branch,
+                destination: BytePath::path(&destination),
+                kind,
+                start_point,
+                base_ref,
+                remote: selected_remote,
+            }
+        };
+        let mut response = protocol::adapt::<_, protocol::ErrorBody, _, EmptyInput>(
+            command,
+            id,
+            Ok(result),
+            json!({}),
+            effects,
+            vec![],
+            vec![],
+        )?;
         if let crate::setup::HookOutput::Captured(output) = hook_output {
             push_hook_diagnostics(&mut response, output);
         }
@@ -1204,46 +1212,12 @@ pub fn help(command: &str) -> Value {
         ),
         "get" => (read_only::GET_ERRORS, read_only::ACTIONS),
         "switch" => (
-            &[
-                "json.invalid_request",
-                "json.unsupported_schema_version",
-                "repository.invalid",
-                "switch.selection_required",
-                "switch.invalid_branch",
-                "switch.destination_unavailable",
-                "switch.destination_collision",
-                "switch.remote_selection_required",
-                "switch.fetch_not_applicable",
-                "switch.base_unavailable",
-                "switch.approval_required",
-                "trust.approval_required",
-            ],
-            &["fetch_base_ref", "create_branch", "create_worktree"],
+            crate::worktree_plan::SWITCH_ERRORS,
+            crate::worktree_plan::SWITCH_ACTIONS,
         ),
         "create" => (
-            &[
-                "json.invalid_request",
-                "json.unsupported_schema_version",
-                "repository.invalid",
-                "create.branch_required",
-                "create.invalid_branch",
-                "create.branch_registered",
-                "create.destination_unavailable",
-                "create.destination_collision",
-                "create.remote_selection_required",
-                "create.fetch_not_applicable",
-                "create.base_unavailable",
-                "create.creation_failed",
-                "create.description_failed",
-                "create.setup_failed",
-                "trust.approval_required",
-            ],
-            &[
-                "fetch_base_ref",
-                "create_branch",
-                "create_worktree",
-                "set_branch_description",
-            ],
+            crate::worktree_plan::CREATE_ERRORS,
+            crate::worktree_plan::CREATE_ACTIONS,
         ),
         "remove" => (
             &[
@@ -1330,6 +1304,7 @@ pub fn help(command: &str) -> Value {
         "list" => json!(schemars::schema_for!(read_only::ListResult)),
         "get" => json!(schemars::schema_for!(read_only::GetResult)),
         "install" => json!(schemars::schema_for!(install::InstallResult)),
+        "switch" | "create" => json!(schemars::schema_for!(OperationResult)),
         _ => Value::Null,
     };
     let selection_required_context_schema = if command == "switch" {
