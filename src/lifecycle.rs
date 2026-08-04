@@ -146,11 +146,15 @@ impl MergePlan {
     /// fast-forwardable topic and intentionally retain its worktree.
     #[must_use]
     pub const fn is_clean_retained(&self) -> bool {
+        self.is_retained_execution() && !self.context.rebase_active && !self.needs_rebase
+    }
+
+    /// Whether the shared executor can run this retained-topic lifecycle.
+    #[must_use]
+    pub const fn is_retained_execution(&self) -> bool {
         self.context.policy.no_remove
             && !self.context.in_place
             && !self.context.cleanup_pending
-            && !self.context.rebase_active
-            && !self.needs_rebase
             && !self.squash.applicable
     }
 }
@@ -176,6 +180,7 @@ pub struct MergeDiagnostic {
 pub enum MergeExecutionFailureKind {
     StalePlan,
     Journal,
+    Rebase,
     Validation,
     Integration,
     JournalCleanup,
@@ -214,6 +219,12 @@ pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
     let identity = git::worktree_identity(&repository.current().path)?;
     let journal = read_journal(&repository.common_dir, &identity)?;
     let rebase_active = git::rebase_in_progress(&repository.current().path)?;
+    if rebase_active && journal.is_none() {
+        return Err(preflight(
+            PreflightFailureKind::LifecycleActive,
+            "an unrelated Git rebase is already in progress; finish or abort it before merging",
+        ));
+    }
     if let Some(state) = &journal {
         if state.version != 1
             || state.topic_path != repository.current().path
@@ -617,7 +628,7 @@ fn execution_failure(
     }
 }
 
-/// Executes an already validated clean retained-topic plan.
+/// Executes an already validated retained-topic plan, including rebase recovery.
 ///
 /// The journal is established before the first Git mutation, and effects are
 /// updated beside their transitions so adapters never infer progress.
@@ -627,20 +638,17 @@ fn execution_failure(
 /// effect, both of which are planner invariants.
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn execute_clean_retained_merge(
-    plan: &MergePlan,
-    mode: MergeExecutionMode,
-) -> MergeExecutionOutcome {
+pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecutionOutcome {
     let mut effects = plan.effects.clone();
     let mut diagnostics = Vec::new();
-    if !plan.is_clean_retained() {
+    if !plan.is_retained_execution() {
         return execution_failure(
             plan,
             effects,
             diagnostics,
             MergePhase::Planned,
             MergeExecutionFailureKind::StalePlan,
-            "the validated plan is not a clean retained-topic lifecycle",
+            "the validated plan is not a retained-topic lifecycle supported by this executor",
         );
     }
     let current = plan.repository.current();
@@ -652,7 +660,7 @@ pub fn execute_clean_retained_merge(
     if !git::head_commit(&current.path).is_ok_and(|head| head == plan.context.source_commit)
         || !git::branch_commit(primary, &plan.context.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
-        || git::is_dirty(&current.path).unwrap_or(true)
+        || (!plan.context.rebase_active && git::is_dirty(&current.path).unwrap_or(true))
     {
         return execution_failure(
             plan,
@@ -676,20 +684,46 @@ pub fn execute_clean_retained_merge(
             );
         }
     };
-    let mut state = MergeJournal {
-        version: 1,
-        topic_path: current.path.clone(),
-        topic_identity: identity,
-        source_branch: plan.context.source_branch.clone(),
-        target_branch: plan.context.target_branch.clone(),
-        no_rebase: plan.context.policy.no_rebase,
-        no_remove: plan.context.policy.no_remove,
-        no_squash: plan.context.policy.no_squash,
-        yolo_stage_all: false,
-        squashed: false,
-        cleanup_pending: false,
-        validated_source: None,
-        validated_target: None,
+    let mut state = if plan.context.journaled {
+        match read_journal(&plan.repository.common_dir, &identity) {
+            Ok(Some(state)) => state,
+            Ok(None) => {
+                return execution_failure(
+                    plan,
+                    effects,
+                    diagnostics,
+                    MergePhase::Planned,
+                    MergeExecutionFailureKind::StalePlan,
+                    "the lifecycle journal disappeared after merge planning; retry to create a fresh plan",
+                );
+            }
+            Err(error) => {
+                return execution_failure(
+                    plan,
+                    effects,
+                    diagnostics,
+                    MergePhase::Planned,
+                    MergeExecutionFailureKind::Journal,
+                    error,
+                );
+            }
+        }
+    } else {
+        MergeJournal {
+            version: 1,
+            topic_path: current.path.clone(),
+            topic_identity: identity,
+            source_branch: plan.context.source_branch.clone(),
+            target_branch: plan.context.target_branch.clone(),
+            no_rebase: plan.context.policy.no_rebase,
+            no_remove: plan.context.policy.no_remove,
+            no_squash: plan.context.policy.no_squash,
+            yolo_stage_all: false,
+            squashed: false,
+            cleanup_pending: false,
+            validated_source: None,
+            validated_target: None,
+        }
     };
     if !plan.context.journaled {
         mark_effect(&mut effects, "journal", true, false);
@@ -705,6 +739,80 @@ pub fn execute_clean_retained_merge(
         }
         mark_effect(&mut effects, "journal", true, true);
     }
+
+    if plan.needs_rebase || plan.context.rebase_active {
+        mark_effect(&mut effects, "rebase", true, false);
+        let rebase_result = match (mode, plan.context.rebase_active) {
+            (MergeExecutionMode::Human, true) => ui::run_timed(
+                true,
+                "Continuing rebase...",
+                "Continued rebase",
+                "Failed to continue the rebase",
+                |animated| git::rebase_continue(&current.path, !animated),
+            )
+            .and_then(|transcript| {
+                report(&transcript)?;
+                Ok(transcript)
+            }),
+            (MergeExecutionMode::Human, false) => ui::run_timed(
+                true,
+                &format!("Rebasing onto {}...", state.target_branch),
+                &format!("Rebased onto {}", state.target_branch),
+                &format!("Failed to rebase onto {}", state.target_branch),
+                |animated| git::rebase_onto(&current.path, &state.target_branch, !animated),
+            )
+            .and_then(|transcript| {
+                report(&transcript)?;
+                Ok(transcript)
+            }),
+            (MergeExecutionMode::Captured, true) => git::rebase_continue(&current.path, false),
+            (MergeExecutionMode::Captured, false) => {
+                git::rebase_onto(&current.path, &state.target_branch, false)
+            }
+        };
+        match rebase_result {
+            Ok(transcript) => {
+                if matches!(mode, MergeExecutionMode::Captured) && !transcript.is_empty() {
+                    diagnostics.push(MergeDiagnostic {
+                        phase: "rebase",
+                        stream: "stderr",
+                        content: transcript.into_bytes(),
+                    });
+                }
+                mark_effect(&mut effects, "rebase", true, true);
+            }
+            Err(error) => {
+                if matches!(mode, MergeExecutionMode::Captured) {
+                    diagnostics.push(MergeDiagnostic {
+                        phase: "rebase",
+                        stream: "stderr",
+                        content: error.to_string().into_bytes(),
+                    });
+                }
+                return execution_failure(
+                    plan,
+                    effects,
+                    diagnostics,
+                    MergePhase::Rebase,
+                    MergeExecutionFailureKind::Rebase,
+                    error,
+                );
+            }
+        }
+    }
+    let candidate = match git::head_commit(&current.path) {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            return execution_failure(
+                plan,
+                effects,
+                diagnostics,
+                MergePhase::Rebase,
+                MergeExecutionFailureKind::StalePlan,
+                error,
+            );
+        }
+    };
 
     mark_effect(&mut effects, "pre_merge_hooks", true, false);
     let hook_result = match mode {
@@ -751,7 +859,7 @@ pub fn execute_clean_retained_merge(
         );
     }
     if git::is_dirty(&current.path).unwrap_or(true)
-        || !git::head_commit(&current.path).is_ok_and(|head| head == plan.context.source_commit)
+        || !git::head_commit(&current.path).is_ok_and(|head| head == candidate)
         || !git::branch_commit(primary, &plan.context.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
     {
@@ -765,7 +873,7 @@ pub fn execute_clean_retained_merge(
         );
     }
     mark_effect(&mut effects, "pre_merge_hooks", true, true);
-    state.validated_source = Some(plan.context.source_commit.clone());
+    state.validated_source = Some(candidate);
     state.validated_target = Some(plan.context.target_commit.clone());
     if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
         return execution_failure(
@@ -863,27 +971,26 @@ pub fn merge_yolo(no_rebase: bool, no_remove: bool) -> Result<()> {
 #[allow(clippy::too_many_lines)] // This is the explicit lifecycle state-machine boundary.
 fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     if matches!(intent, MergeIntent::Normal) {
-        if let Ok(plan) = plan_merge(policy) {
-            if plan.is_clean_retained() {
-                hook_approval::approve_interactively(
-                    &plan.repository,
-                    HookPhase::PreMerge,
-                    &plan.config.pre_merge,
-                )?;
-                // Approval changes trust state, so execution consumes a fresh
-                // validated plan rather than the pre-approval snapshot.
-                let plan = plan_merge(policy)?;
-                let outcome = execute_clean_retained_merge(&plan, MergeExecutionMode::Human);
-                if let Some((_, message)) = outcome.failure {
-                    bail!(message);
-                }
-                return ui::finish(styled_merge_summary(
-                    &plan.context.source_branch,
-                    &plan.context.target_branch,
-                    false,
-                    "; worktree retained.",
-                ));
+        let plan = plan_merge(policy)?;
+        if plan.is_retained_execution() {
+            hook_approval::approve_interactively(
+                &plan.repository,
+                HookPhase::PreMerge,
+                &plan.config.pre_merge,
+            )?;
+            // Approval changes trust state, so execution consumes a fresh
+            // validated plan rather than the pre-approval snapshot.
+            let plan = plan_merge(policy)?;
+            let outcome = execute_retained_merge(&plan, MergeExecutionMode::Human);
+            if let Some((_, message)) = outcome.failure {
+                bail!(message);
             }
+            return ui::finish(styled_merge_summary(
+                &plan.context.source_branch,
+                &plan.context.target_branch,
+                false,
+                "; worktree retained.",
+            ));
         }
     }
     let yolo_stage_all = matches!(intent, MergeIntent::StageAll);

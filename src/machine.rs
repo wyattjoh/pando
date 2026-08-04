@@ -1764,14 +1764,15 @@ pub fn merge(
         });
         return emit(response, true);
     }
-    if plan.is_clean_retained() {
-        let outcome = crate::lifecycle::execute_clean_retained_merge(
+    if plan.is_retained_execution() {
+        let outcome = crate::lifecycle::execute_retained_merge(
             &plan,
             crate::lifecycle::MergeExecutionMode::Captured,
         );
         let mut response = if let Some((kind, message)) = &outcome.failure {
             let code = match kind {
                 crate::lifecycle::MergeExecutionFailureKind::StalePlan => "merge.stale_plan",
+                crate::lifecycle::MergeExecutionFailureKind::Rebase => "merge.rebase_conflict",
                 crate::lifecycle::MergeExecutionFailureKind::Validation => {
                     "merge.validation_failed"
                 }

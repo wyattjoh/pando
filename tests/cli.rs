@@ -1671,6 +1671,101 @@ fn merge_reports_a_rebase_conflict_and_resumes_without_an_editor() {
 }
 
 #[test]
+fn json_merge_reports_incomplete_rebase_effect_and_resumes_pinned_journal() {
+    let repo = Repository::new();
+    fs::write(repo.main.join("README.md"), "main version\n").unwrap();
+    git(&repo.main, ["add", "README.md"]);
+    git(&repo.main, ["commit", "-m", "main edits readme"]);
+    fs::write(repo.linked.join("README.md"), "feature version\n").unwrap();
+    git(&repo.linked, ["add", "README.md"]);
+    git(&repo.linked, ["commit", "-m", "feature edits readme"]);
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {"no_remove": true, "no_squash": true}
+    });
+
+    let conflicted = json_command(
+        &repo.linked,
+        &["merge", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(!conflicted.status.success());
+    let value = assert_json_pure(&conflicted);
+    assert_eq!(value["error"]["code"], "merge.rebase_conflict");
+    let effect = value["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["action"] == "rebase")
+        .unwrap();
+    assert_eq!(effect["attempted"], true);
+    assert_eq!(effect["completed"], false);
+    assert_eq!(value["context"]["journaled"], true);
+    assert_eq!(value["context"]["target_branch"], "main");
+    assert_eq!(value["context"]["policy"]["no_remove"], true);
+    assert_eq!(value["context"]["policy"]["no_squash"], true);
+
+    fs::write(repo.linked.join("README.md"), "resolved\n").unwrap();
+    git(&repo.linked, ["add", "README.md"]);
+    let resumed = json_command(
+        &repo.linked,
+        &["merge", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stdout)
+    );
+    let value = assert_json_pure(&resumed);
+    assert_eq!(value["status"], "success");
+    let effect = value["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["action"] == "rebase")
+        .unwrap();
+    assert_eq!(effect["attempted"], true);
+    assert_eq!(effect["completed"], true);
+    assert_eq!(
+        fs::read_to_string(repo.main.join("README.md")).unwrap(),
+        "resolved\n"
+    );
+}
+
+#[test]
+fn merge_rejects_an_unrelated_in_progress_rebase_without_journaling() {
+    let repo = Repository::new();
+    fs::write(repo.main.join("README.md"), "main version\n").unwrap();
+    git(&repo.main, ["add", "README.md"]);
+    git(&repo.main, ["commit", "-m", "main edits readme"]);
+    fs::write(repo.linked.join("README.md"), "feature version\n").unwrap();
+    git(&repo.linked, ["add", "README.md"]);
+    git(&repo.linked, ["commit", "-m", "feature edits readme"]);
+    let unrelated = Command::new("git")
+        .args(["rebase", "main"])
+        .current_dir(&repo.linked)
+        .output()
+        .unwrap();
+    assert!(!unrelated.status.success());
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove", "--no-squash"])
+        .current_dir(&repo.linked)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unrelated Git rebase"), "{stderr}");
+    let common_dir = PathBuf::from(git_output(
+        &repo.linked,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ));
+    assert!(!common_dir.join("pando-state/lifecycle").exists());
+}
+
+#[test]
 fn merge_falls_back_to_main_without_target_configuration() {
     let repo = Repository::new();
     fs::write(repo.linked.join("feature.txt"), "feature\n").unwrap();
