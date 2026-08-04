@@ -495,6 +495,39 @@ fn resolve(
         Err(crate::worktree_plan::Blocker::BaseUnavailable { message }) => {
             return emit_err(command, id, &format!("{command}.base_unavailable"), message);
         }
+        Err(crate::worktree_plan::Blocker::ApprovalRequired { candidate }) => {
+            let mut response = protocol::failure(
+                command,
+                id,
+                "trust.approval_required",
+                "post-create hooks require manual review and approval before mutation",
+            );
+            response.context = json!({
+                "approval": {
+                    "phase": candidate.phase().key(),
+                    "commands": candidate.commands().iter().map(|step| json!({
+                        "name": step.name,
+                        "command": step.command,
+                    })).collect::<Vec<_>>(),
+                    "repository": candidate.repository(),
+                    "identity": candidate.identity(),
+                },
+                "branch": branch,
+                "destination": BytePath::path(&destination),
+            });
+            response.next_steps.push(protocol::NextStep {
+                action: "trust.approve_hooks".into(),
+                description: "Review and approve post-create hooks interactively".into(),
+                mutation: "trust".into(),
+                requires_human_approval: true,
+                invocation: json!({
+                    "argv": ["pando", command, branch],
+                    "stdin": null,
+                    "working_directory": BytePath::path(&repo.current().path),
+                }),
+            });
+            return emit(response, true);
+        }
         Err(blocker) => {
             return emit_err(
                 command,
@@ -536,41 +569,6 @@ fn resolve(
             protocol::success("switch", id, result, json!({}), effects),
             false,
         );
-    }
-    if let hook_approval::Evaluation::ApprovalRequired(candidate) =
-        hook_approval::evaluate(&repo, HookPhase::PostCreate, &config.post_create)?
-    {
-        let mut response = protocol::failure(
-            command,
-            id,
-            "trust.approval_required",
-            "post-create hooks require manual review and approval before mutation",
-        );
-        response.context = json!({
-            "approval": {
-                "phase": candidate.phase().key(),
-                "commands": candidate.commands().iter().map(|step| json!({
-                    "name": step.name,
-                    "command": step.command,
-                })).collect::<Vec<_>>(),
-                "repository": candidate.repository(),
-                "identity": candidate.identity(),
-            },
-            "branch": branch,
-            "destination": BytePath::path(&destination),
-        });
-        response.next_steps.push(protocol::NextStep {
-            action: "trust.approve_hooks".into(),
-            description: "Review and approve post-create hooks interactively".into(),
-            mutation: "trust".into(),
-            requires_human_approval: true,
-            invocation: json!({
-                "argv": ["pando", command, branch],
-                "stdin": null,
-                "working_directory": BytePath::path(&repo.current().path),
-            }),
-        });
-        return emit(response, true);
     }
     if config.post_create.is_empty() {
         let execution = crate::worktree_plan::execute(&repo, &shared_plan);

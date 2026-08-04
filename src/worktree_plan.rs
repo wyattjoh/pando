@@ -12,6 +12,7 @@ use crate::{
     branch::{self, Classification},
     config::EffectiveConfig,
     git::{self, Repository},
+    hook_approval,
 };
 
 /// The public command intent whose policy differences affect planning.
@@ -108,6 +109,7 @@ pub(crate) enum Blocker {
     RemoteSelectionRequired { remotes: Vec<String> },
     FetchNotApplicable { message: String },
     BaseUnavailable { message: String },
+    ApprovalRequired { candidate: hook_approval::Candidate },
 }
 
 /// Plans the selected source and byte-preserving destination.
@@ -190,12 +192,26 @@ pub(crate) fn plan(
         }));
     }
 
+    // A requested fresh-base fetch is itself a repository mutation, so gate it
+    // before source planning. Other source planning is read-only and remains
+    // ahead of approval to preserve remote-choice and validation behavior.
+    if fetch.refreshes()
+        && let Some(candidate) = approval_candidate(repository, &config)?
+    {
+        return Ok(Err(Blocker::ApprovalRequired { candidate }));
+    }
+
     let source = match plan_source(repository, classification, branch, remote, &config, fetch) {
         Ok(source) => source,
         Err(blocker) => return Ok(Err(*blocker)),
     };
+    if !fetch.refreshes()
+        && let Some(candidate) = approval_candidate(repository, &config)?
+    {
+        return Ok(Err(Blocker::ApprovalRequired { candidate }));
+    }
 
-    Ok(Ok(Plan {
+    let plan = Plan {
         intent,
         branch: branch.to_owned(),
         destination,
@@ -203,7 +219,24 @@ pub(crate) fn plan(
         config: Some(config),
         description,
         dry_run,
-    }))
+    };
+    Ok(Ok(plan))
+}
+
+fn approval_candidate(
+    repository: &Repository,
+    config: &EffectiveConfig,
+) -> Result<Option<hook_approval::Candidate>> {
+    match hook_approval::evaluate(
+        repository,
+        crate::config::HookPhase::PostCreate,
+        &config.post_create,
+    )? {
+        hook_approval::Evaluation::ApprovalRequired(candidate) => Ok(Some(candidate)),
+        hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted { .. } => {
+            Ok(None)
+        }
+    }
 }
 
 fn plan_source(

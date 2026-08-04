@@ -6931,6 +6931,36 @@ fn json_switch_and_create_report_post_create_approval_before_mutation() {
 }
 
 #[test]
+fn post_create_approval_gates_an_explicit_fresh_base_fetch() {
+    let repo = Repository::new();
+    let origin = add_local_origin(&repo);
+    let stale = git_output(&repo.main, ["rev-parse", "origin/main"]);
+    let advanced = advance_origin(&repo, &origin);
+    assert_ne!(stale, advanced);
+    let root = repo.temp.path().join("topics");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+    fs::write(
+        repo.main.join(".pando.yaml"),
+        "hooks:\n  post-create:\n    - command: printf ran > hook-ran\n",
+    )
+    .unwrap();
+
+    let output = create_command(
+        &repo,
+        &xdg,
+        &["create", "topic/fetched", "--fetch", "--output", "json"],
+    );
+
+    assert!(!output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["error"]["code"], "trust.approval_required");
+    assert_eq!(git_output(&repo.main, ["rev-parse", "origin/main"]), stale);
+    assert!(git_output(&repo.main, ["branch", "--list", "topic/fetched"]).is_empty());
+    assert!(!root.join("topic/fetched").exists());
+    assert!(!xdg.path().join("pando/trust.json").exists());
+}
+
+#[test]
 fn json_create_and_switch_capture_post_create_streams_in_order() {
     let repo = Repository::new();
     let root = repo.temp.path().join("topics");

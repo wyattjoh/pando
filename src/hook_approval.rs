@@ -108,6 +108,20 @@ pub fn approve_interactively(
     let Evaluation::ApprovalRequired(candidate) = evaluate(repository, phase, commands)? else {
         return Ok(());
     };
+    approve_candidate_interactively(repository, &candidate)
+}
+
+/// Renders and persists one approval candidate after explicit human consent.
+///
+/// # Errors
+///
+/// Returns an error when approval requires a noninteractive terminal, the user
+/// declines or cancels, or approval cannot be persisted.
+pub fn approve_candidate_interactively(
+    repository: &Repository,
+    candidate: &Candidate,
+) -> Result<()> {
+    let phase = candidate.phase();
     ui::ensure_interactive(&format!("{} require approval", phase.plural_name()))?;
     ui::info(format!(
         "The repository requests these {}:",
@@ -129,5 +143,5 @@ pub fn approve_interactively(
             phase.plural_name()
         )));
     }
-    approve(repository, &candidate)
+    approve(repository, candidate)
 }

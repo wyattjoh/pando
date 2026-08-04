@@ -1287,6 +1287,7 @@ fn read_branch_name() -> Result<String> {
     Ok(value.trim().to_owned())
 }
 
+#[allow(clippy::too_many_lines)] // One adapter loop handles every typed planning outcome.
 fn resolve_and_switch(
     repository: &Repository,
     branch: &str,
@@ -1308,6 +1309,9 @@ fn resolve_and_switch(
             Ok(plan) => break plan,
             Err(PlanBlocker::RemoteSelectionRequired { remotes }) => {
                 remote = Some(choose_remote(&remotes, branch)?);
+            }
+            Err(PlanBlocker::ApprovalRequired { candidate }) => {
+                approve_planned_hooks(repository, &candidate)?;
             }
             Err(
                 blocker @ (PlanBlocker::RegisteredForCreate { .. }
@@ -1395,6 +1399,15 @@ fn resolve_and_switch(
     }
 }
 
+fn approve_planned_hooks(
+    repository: &Repository,
+    candidate: &hook_approval::Candidate,
+) -> Result<()> {
+    hook_approval::approve_candidate_interactively(repository, candidate)
+    // Approval changes trust state. The caller discards every provisional fact
+    // and requests an executable plan from current repository state.
+}
+
 fn already_registered(branch: &str, path: &Path) -> anyhow::Error {
     anyhow::anyhow!(
         "branch {branch:?} is already registered at {}; enter it with 'pando switch {branch}'",
@@ -1429,8 +1442,8 @@ fn render_plan_blocker(branch: &str, blocker: PlanBlocker) -> anyhow::Error {
         PlanBlocker::FetchNotApplicable { message } | PlanBlocker::BaseUnavailable { message } => {
             anyhow::anyhow!(message)
         }
-        PlanBlocker::RemoteSelectionRequired { .. } => {
-            unreachable!("the human adapter resolves remote choices")
+        PlanBlocker::RemoteSelectionRequired { .. } | PlanBlocker::ApprovalRequired { .. } => {
+            unreachable!("the human adapter resolves interactive blockers")
         }
     }
 }
@@ -1475,8 +1488,6 @@ fn create_worktree(
             Intent::Create => announce_new_branch(repository, branch, base, destination)?,
         }
     }
-    hook_approval::approve_interactively(repository, HookPhase::PostCreate, &config.post_create)?;
-
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create destination parent {}", parent.display()))?;
