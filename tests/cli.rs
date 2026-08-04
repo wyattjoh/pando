@@ -1765,6 +1765,137 @@ fn json_merge_reports_incomplete_rebase_effect_and_resumes_pinned_journal() {
 }
 
 #[test]
+fn json_merge_captures_bounded_validation_diagnostics_and_retries_the_journal() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("topic.txt"), "topic\n").unwrap();
+    git(&repo.linked, ["add", "topic.txt"]);
+    git(&repo.linked, ["commit", "-m", "topic"]);
+    write_ignored_local_config(
+        &repo,
+        "hooks:\n  pre-merge:\n    - name: captured validation\n      command: 'if read ignored; then exit 90; fi; printf validation-out; printf %020001d 0 >&2; exit 7'\n",
+    );
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {"no_remove": true, "no_squash": true}
+    });
+    let mut approve = Command::cargo_bin("pando").unwrap();
+    approve
+        .args(["merge", "--no-remove", "--no-squash"])
+        .current_dir(&repo.linked);
+    let approved = run_pty_command(approve, b"y\r");
+    assert!(!approved.status.success(), "{}", approved.stderr);
+
+    let failed = json_command(
+        &repo.linked,
+        &["merge", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(!failed.status.success());
+    let value = assert_json_pure(&failed);
+    assert_eq!(value["error"]["code"], "merge.validation_failed");
+    assert_eq!(value["context"]["phase"], "validation");
+    let hook_effect = value["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["action"] == "pre_merge_hooks")
+        .unwrap();
+    assert_eq!(hook_effect["attempted"], true);
+    assert_eq!(hook_effect["completed"], false);
+    let diagnostics = value["diagnostics"].as_array().unwrap();
+    let stdout = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["source"] == "validation" && diagnostic["stream"] == "stdout")
+        .unwrap();
+    assert_eq!(stdout["content"], "validation-out");
+    assert_eq!(stdout["original_size"], 14);
+    assert_eq!(stdout["truncated"], false);
+    let stderr = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["source"] == "validation" && diagnostic["stream"] == "stderr")
+        .unwrap();
+    assert_eq!(stderr["original_size"], 20_001);
+    assert_eq!(stderr["truncated"], true);
+    assert_eq!(stderr["content"].as_str().unwrap().len(), 16 * 1024);
+    assert!(repo.linked.exists());
+
+    write_ignored_local_config(&repo, "hooks:\n  pre-merge: []\n");
+    let retried = json_command(
+        &repo.linked,
+        &["merge", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(
+        retried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retried.stdout)
+    );
+    let value = assert_json_pure(&retried);
+    assert_eq!(value["result"]["outcome"], "retained");
+}
+
+#[test]
+fn json_merge_cleanup_failure_preserves_topic_and_retries_captured_hooks() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("topic.txt"), "topic\n").unwrap();
+    git(&repo.linked, ["add", "topic.txt"]);
+    git(&repo.linked, ["commit", "-m", "topic"]);
+    write_ignored_local_config(
+        &repo,
+        "hooks:\n  pre-remove:\n    - name: captured cleanup\n      command: 'if read ignored; then exit 90; fi; printf cleanup-out; printf cleanup-err >&2; exit 9'\n",
+    );
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {"no_squash": true}
+    });
+    let mut approve = Command::cargo_bin("pando").unwrap();
+    approve
+        .args(["merge", "--no-squash"])
+        .current_dir(&repo.linked);
+    let approved = run_pty_command(approve, b"y\r");
+    assert!(!approved.status.success(), "{}", approved.stderr);
+
+    let failed = json_command(
+        &repo.linked,
+        &["merge", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(!failed.status.success());
+    let value = assert_json_pure(&failed);
+    assert_eq!(value["error"]["code"], "merge.cleanup_failed");
+    assert_eq!(value["context"]["phase"], "cleanup");
+    assert_eq!(value["context"]["cleanup_pending"], true);
+    for stream in ["stdout", "stderr"] {
+        assert!(
+            value["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic["source"] == "cleanup" && diagnostic["stream"] == stream
+                })
+        );
+    }
+    assert!(repo.linked.exists());
+    assert_eq!(git_output(&repo.main, ["show", "HEAD:topic.txt"]), "topic");
+
+    write_ignored_local_config(&repo, "hooks:\n  pre-remove: []\n");
+    let retried = json_command(
+        &repo.linked,
+        &["merge", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(
+        retried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retried.stdout)
+    );
+    let value = assert_json_pure(&retried);
+    assert_eq!(value["result"]["outcome"], "removed");
+    assert!(!repo.linked.exists());
+}
+
+#[test]
 fn merge_rejects_an_unrelated_in_progress_rebase_without_journaling() {
     let repo = Repository::new();
     fs::write(repo.main.join("README.md"), "main version\n").unwrap();

@@ -1121,12 +1121,13 @@ pub fn merge(
         )
     };
     for diagnostic in outcome.diagnostics {
-        push_diagnostic(
-            &mut response,
-            diagnostic.phase,
-            diagnostic.stream,
-            &diagnostic.content,
-        );
+        response.diagnostics.push(crate::protocol::Diagnostic {
+            source: diagnostic.phase.into(),
+            stream: diagnostic.stream.into(),
+            content: String::from_utf8_lossy(&diagnostic.content).into_owned(),
+            original_size: diagnostic.original_size,
+            truncated: diagnostic.truncated,
+        });
     }
     emit(response, failed)
 }

@@ -174,6 +174,8 @@ pub struct MergeDiagnostic {
     pub phase: &'static str,
     pub stream: &'static str,
     pub content: Vec<u8>,
+    pub original_size: usize,
+    pub truncated: bool,
 }
 
 /// Typed failure returned at the plan-to-execution seam.
@@ -1143,7 +1145,56 @@ fn push_merge_diagnostic(
         phase,
         stream,
         content: content[..content.len().min(LIMIT)].to_vec(),
+        original_size: content.len(),
+        truncated: content.len() > LIMIT,
     });
+}
+
+fn push_captured_merge_diagnostic(
+    diagnostics: &mut Vec<MergeDiagnostic>,
+    phase: &'static str,
+    stream: &'static str,
+    captured: setup::CapturedStream,
+) {
+    if captured.original_size == 0 {
+        return;
+    }
+    diagnostics.push(MergeDiagnostic {
+        phase,
+        stream,
+        content: captured.content,
+        original_size: captured.original_size,
+        truncated: captured.truncated,
+    });
+}
+
+fn execute_merge_hooks(
+    hook_phase: HookPhase,
+    diagnostic_phase: &'static str,
+    steps: &[crate::config::HookStep],
+    destination: &Path,
+    mode: MergeExecutionMode,
+    diagnostics: &mut Vec<MergeDiagnostic>,
+) -> Result<()> {
+    let policy = match mode {
+        MergeExecutionMode::Human => setup::OutputPolicy::Streamed,
+        MergeExecutionMode::Captured => setup::OutputPolicy::Captured,
+    };
+    let execution = setup::execute(hook_phase, steps, destination, policy)?;
+    if let setup::HookOutput::Captured(output) = execution.output {
+        for step in output {
+            push_captured_merge_diagnostic(diagnostics, diagnostic_phase, "stdout", step.stdout);
+            push_captured_merge_diagnostic(diagnostics, diagnostic_phase, "stderr", step.stderr);
+        }
+    }
+    match execution.outcome {
+        HookOutcome::Success => Ok(()),
+        HookOutcome::Failed(status) => Err(anyhow::anyhow!(
+            "{} hook failed with status {status}",
+            hook_phase.key()
+        )),
+        HookOutcome::Interrupted => Err(anyhow::anyhow!("{} hook interrupted", hook_phase.key())),
+    }
 }
 
 fn execution_failure(
@@ -1308,21 +1359,23 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
         match rebase_result {
             Ok(transcript) => {
                 if matches!(mode, MergeExecutionMode::Captured) && !transcript.is_empty() {
-                    diagnostics.push(MergeDiagnostic {
-                        phase: "rebase",
-                        stream: "stderr",
-                        content: transcript.into_bytes(),
-                    });
+                    push_merge_diagnostic(
+                        &mut diagnostics,
+                        "rebase",
+                        "stderr",
+                        transcript.as_bytes(),
+                    );
                 }
                 mark_effect(&mut effects, "rebase", true, true);
             }
             Err(error) => {
                 if matches!(mode, MergeExecutionMode::Captured) {
-                    diagnostics.push(MergeDiagnostic {
-                        phase: "rebase",
-                        stream: "stderr",
-                        content: error.to_string().into_bytes(),
-                    });
+                    push_merge_diagnostic(
+                        &mut diagnostics,
+                        "rebase",
+                        "stderr",
+                        error.to_string().as_bytes(),
+                    );
                 }
                 return execution_failure(
                     plan,
@@ -1503,41 +1556,14 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
             }
         }
         mark_effect(&mut effects, "pre_merge_hooks", true, false);
-        let hook_result = match mode {
-            MergeExecutionMode::Human => {
-                run_hooks(HookPhase::PreMerge, &plan.config.pre_merge, &current.path)
-            }
-            MergeExecutionMode::Captured => {
-                match setup::run_steps_captured(&plan.config.pre_merge, &current.path) {
-                    Ok((outcome, output)) => {
-                        for (stdout, stderr) in output {
-                            push_merge_diagnostic(
-                                &mut diagnostics,
-                                "validation",
-                                "stdout",
-                                &stdout,
-                            );
-                            push_merge_diagnostic(
-                                &mut diagnostics,
-                                "validation",
-                                "stderr",
-                                &stderr,
-                            );
-                        }
-                        match outcome {
-                            HookOutcome::Success => Ok(()),
-                            HookOutcome::Failed(status) => Err(anyhow::anyhow!(
-                                "pre-merge hook failed with status {status}"
-                            )),
-                            HookOutcome::Interrupted => {
-                                Err(anyhow::anyhow!("pre-merge hook interrupted"))
-                            }
-                        }
-                    }
-                    Err(error) => Err(error),
-                }
-            }
-        };
+        let hook_result = execute_merge_hooks(
+            HookPhase::PreMerge,
+            "validation",
+            &plan.config.pre_merge,
+            &current.path,
+            mode,
+            &mut diagnostics,
+        );
         if let Err(error) = hook_result {
             push_merge_diagnostic(
                 &mut diagnostics,
@@ -1713,11 +1739,12 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
         }
     };
     if matches!(mode, MergeExecutionMode::Captured) && !transcript.is_empty() {
-        diagnostics.push(MergeDiagnostic {
-            phase: "integration",
-            stream: "stderr",
-            content: transcript.into_bytes(),
-        });
+        push_merge_diagnostic(
+            &mut diagnostics,
+            "integration",
+            "stderr",
+            transcript.as_bytes(),
+        );
     }
     mark_effect(&mut effects, "fast_forward_merge", true, true);
     if plan.context.policy.removes_topic(plan.context.in_place) {
@@ -1795,33 +1822,14 @@ fn execute_merge_cleanup(
         }
     }
     mark_effect(&mut effects, "pre_remove_hooks", true, false);
-    let hook_result = match mode {
-        MergeExecutionMode::Human => run_hooks(
-            HookPhase::PreRemove,
-            &plan.config.pre_remove,
-            &state.topic_path,
-        ),
-        MergeExecutionMode::Captured => {
-            match setup::run_steps_captured(&plan.config.pre_remove, &state.topic_path) {
-                Ok((outcome, output)) => {
-                    for (stdout, stderr) in output {
-                        push_merge_diagnostic(&mut diagnostics, "cleanup", "stdout", &stdout);
-                        push_merge_diagnostic(&mut diagnostics, "cleanup", "stderr", &stderr);
-                    }
-                    match outcome {
-                        HookOutcome::Success => Ok(()),
-                        HookOutcome::Failed(status) => Err(anyhow::anyhow!(
-                            "pre-remove hook failed with status {status}"
-                        )),
-                        HookOutcome::Interrupted => {
-                            Err(anyhow::anyhow!("pre-remove hook interrupted"))
-                        }
-                    }
-                }
-                Err(error) => Err(error),
-            }
-        }
-    };
+    let hook_result = execute_merge_hooks(
+        HookPhase::PreRemove,
+        "cleanup",
+        &plan.config.pre_remove,
+        &state.topic_path,
+        mode,
+        &mut diagnostics,
+    );
     if let Err(error) = hook_result {
         push_merge_diagnostic(
             &mut diagnostics,
