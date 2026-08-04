@@ -3321,6 +3321,127 @@ fn install_preserves_an_existing_unmarked_agent_command_without_duplicate_yaml()
 }
 
 #[test]
+fn install_json_dry_run_and_approval_share_one_plan_without_writes() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let launched = home.path().join("agent-launched");
+    fs::write(
+        bin.path().join("pi"),
+        format!("#!/bin/sh\ntouch '{}'\n", launched.display()),
+    )
+    .unwrap();
+    fs::set_permissions(bin.path().join("pi"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let invoke = |dry_run| {
+        let mut command = guided_install_command(home.path(), xdg.path(), Some(zdot.path()));
+        command
+            .args(["--input-output", "json"])
+            .env("PATH", bin.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        run_json_command(
+            command,
+            Some(&serde_json::json!({"schema_version":1,"input":{"dry_run":dry_run}})),
+        )
+    };
+
+    let preview = invoke(true);
+    assert!(preview.status.success());
+    let preview = assert_json_pure(&preview);
+    assert_eq!(preview["result"]["outcome"], "dry_run");
+    assert_eq!(preview["effects"].as_array().unwrap().len(), 3);
+    assert!(
+        preview["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|effect| effect["attempted"] == false && effect["completed"] == false)
+    );
+
+    let blocked = invoke(false);
+    assert!(!blocked.status.success());
+    let blocked = assert_json_pure(&blocked);
+    assert_eq!(blocked["error"]["code"], "install.approval_required");
+    assert_eq!(blocked["effects"], preview["effects"]);
+    assert_eq!(blocked["next_steps"][0]["action"], "install.approve");
+    assert!(!xdg.path().join("pando/config.yaml").exists());
+    assert!(!xdg.path().join("pando/pando.zsh").exists());
+    assert!(!zdot.path().join(".zshrc").exists());
+    assert!(!launched.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn install_json_plan_encodes_non_utf8_startup_paths() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let zdot = parent.path().join(OsString::from_vec(b"zsh-\xff".to_vec()));
+    fs::create_dir(&zdot).unwrap();
+    let mut command = guided_install_command(home.path(), xdg.path(), Some(&zdot));
+    command
+        .args(["--input-output", "json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = run_json_command(
+        command,
+        Some(&serde_json::json!({"schema_version":1,"input":{"dry_run":true}})),
+    );
+
+    assert!(output.status.success());
+    let response = assert_json_pure(&output);
+    assert_eq!(
+        response["result"]["plan"]["startup"]["path"]["encoding"],
+        "base64"
+    );
+    assert!(!zdot.join(".zshrc").exists());
+}
+
+#[test]
+fn install_json_reports_the_approved_files_as_already_current() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+    let installed = run_install(home.path(), xdg.path(), Some(zdot.path()), b"y\r");
+    assert!(installed.status.success(), "{}", installed.stderr);
+
+    let config_before = fs::read(xdg.path().join("pando/config.yaml")).unwrap();
+    let integration_before = fs::read(xdg.path().join("pando/pando.zsh")).unwrap();
+    let startup_before = fs::read(zdot.path().join(".zshrc")).unwrap();
+    let mut command = guided_install_command(home.path(), xdg.path(), Some(zdot.path()));
+    command
+        .args(["--input-output", "json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = run_json_command(
+        command,
+        Some(&serde_json::json!({"schema_version":1,"input":{"dry_run":false}})),
+    );
+
+    assert!(output.status.success());
+    let response = assert_json_pure(&output);
+    assert_eq!(response["result"]["outcome"], "already_current");
+    assert_eq!(response["effects"], serde_json::json!([]));
+    assert_eq!(
+        fs::read(xdg.path().join("pando/config.yaml")).unwrap(),
+        config_before
+    );
+    assert_eq!(
+        fs::read(xdg.path().join("pando/pando.zsh")).unwrap(),
+        integration_before
+    );
+    assert_eq!(
+        fs::read(zdot.path().join(".zshrc")).unwrap(),
+        startup_before
+    );
+}
+
+#[test]
 fn install_request_mode_rejects_the_human_no_guide_flag() {
     let home = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();

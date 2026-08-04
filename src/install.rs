@@ -10,9 +10,16 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use cliclack::{confirm, input, select};
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
-use crate::{config, ui};
+use crate::{
+    config,
+    protocol::{
+        self, BytePath, Effect, ErrorBody, MutationClass, RecoveryAction, RecoveryInvocation,
+    },
+    ui,
+};
 
 const START_MARKER: &[u8] = b"# >>> pando shell integration >>>";
 const END_MARKER: &[u8] = b"# <<< pando shell integration <<<";
@@ -120,26 +127,164 @@ if [[ -o interactive ]]; then
 fi
 "#;
 
-/// Returns the deterministic installation plan used by JSON previews.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallInput {
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct InstallTarget {
+    pub path: BytePath,
+    pub would_change: bool,
+}
+
+/// Deterministic filesystem changes shared by installation adapters.
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct InstallPlan {
+    pub changed: bool,
+    pub configuration: InstallTarget,
+    pub integration: InstallTarget,
+    pub startup: InstallTarget,
+    #[serde(skip)]
+    config_path: PathBuf,
+    #[serde(skip)]
+    integration_path: PathBuf,
+    #[serde(skip)]
+    startup_path: PathBuf,
+    #[serde(skip)]
+    desired_config: Vec<u8>,
+    #[serde(skip)]
+    desired_startup: Vec<u8>,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum InstallResult {
+    DryRun { plan: InstallPlan },
+    AlreadyCurrent { plan: InstallPlan },
+    Installed { plan: InstallPlan },
+}
+
+#[derive(Debug)]
+pub struct InstallFailure {
+    code: &'static str,
+    message: String,
+}
+
+impl From<InstallFailure> for ErrorBody {
+    fn from(failure: InstallFailure) -> Self {
+        Self {
+            code: failure.code.into(),
+            message: failure.message,
+        }
+    }
+}
+
+/// Command-owned result consumed by the human and JSON adapters.
+#[derive(Debug)]
+pub struct InstallOutcome {
+    pub result: std::result::Result<InstallResult, InstallFailure>,
+    pub effects: Vec<Effect>,
+    pub recovery: Vec<RecoveryAction<protocol::EmptyInput>>,
+}
+
+/// Builds the deterministic installation plan.
 ///
 /// # Errors
 /// Returns an error when paths or existing installation files cannot be read.
-pub fn json_plan() -> Result<serde_json::Value> {
+pub fn plan() -> Result<InstallPlan> {
     let config_path = config_home()?.join("pando/config.yaml");
     let integration_path = config_home()?.join("pando/pando.zsh");
-    let zshrc_path = zshrc_path()?;
+    let startup_path = zshrc_path()?;
     let source_block = source_block(&integration_path);
     let existing_config = read_optional(&config_path)?;
     let existing_integration = read_optional(&integration_path)?;
-    let existing_zshrc = read_optional(&zshrc_path)?;
+    let existing_startup = read_optional(&startup_path)?;
     let desired_config = update_config_scaffold(&existing_config)?;
-    let desired_zshrc = update_source_block(&existing_zshrc, &source_block)?;
-    let config_changed = existing_config != desired_config;
+    let desired_startup = update_source_block(&existing_startup, &source_block)?;
+    let configuration_changed = existing_config != desired_config;
     let integration_changed = existing_integration != INTEGRATION;
-    let startup_changed = existing_zshrc != desired_zshrc;
-    Ok(
-        serde_json::json!({"changed":config_changed || integration_changed || startup_changed,"configuration":{"path":crate::protocol::BytePath::path(&config_path),"would_change":config_changed},"integration":{"path":crate::protocol::BytePath::path(&integration_path),"would_change":integration_changed},"startup":{"path":crate::protocol::BytePath::path(&zshrc_path),"would_change":startup_changed}}),
-    )
+    let startup_changed = existing_startup != desired_startup;
+    Ok(InstallPlan {
+        changed: configuration_changed || integration_changed || startup_changed,
+        configuration: InstallTarget {
+            path: BytePath::path(&config_path),
+            would_change: configuration_changed,
+        },
+        integration: InstallTarget {
+            path: BytePath::path(&integration_path),
+            would_change: integration_changed,
+        },
+        startup: InstallTarget {
+            path: BytePath::path(&startup_path),
+            would_change: startup_changed,
+        },
+        config_path,
+        integration_path,
+        startup_path,
+        desired_config,
+        desired_startup,
+    })
+}
+
+fn effects(plan: &InstallPlan, attempted: bool) -> Vec<Effect> {
+    [
+        ("configuration", &plan.configuration),
+        ("integration", &plan.integration),
+        ("startup", &plan.startup),
+    ]
+    .into_iter()
+    .filter(|(_, target)| target.would_change)
+    .map(|(role, target)| Effect {
+        action: "file.write".into(),
+        attempted,
+        completed: attempted,
+        details: Some(serde_json::json!({"target":target.path,"role":role})),
+    })
+    .collect()
+}
+
+/// Returns the typed non-mutating outcome for structured installation.
+///
+/// # Errors
+/// Returns an error when the installation plan cannot be inspected.
+pub fn inspect(input: &InstallInput) -> Result<InstallOutcome> {
+    let plan = plan()?;
+    if !plan.changed {
+        return Ok(InstallOutcome {
+            result: Ok(InstallResult::AlreadyCurrent { plan }),
+            effects: Vec::new(),
+            recovery: Vec::new(),
+        });
+    }
+    let planned_effects = effects(&plan, false);
+    if input.dry_run {
+        return Ok(InstallOutcome {
+            result: Ok(InstallResult::DryRun { plan }),
+            effects: planned_effects,
+            recovery: Vec::new(),
+        });
+    }
+    Ok(InstallOutcome {
+        result: Err(InstallFailure {
+            code: "install.approval_required",
+            message: "installation requires a manual human invocation".into(),
+        }),
+        effects: planned_effects,
+        recovery: vec![RecoveryAction {
+            action: "install.approve".into(),
+            description: "Review and approve installation interactively".into(),
+            mutation: MutationClass::Filesystem,
+            requires_human_approval: true,
+            invocation: RecoveryInvocation {
+                argv: vec!["pando".into(), "install".into()],
+                stdin: None,
+                working_directory: None,
+            },
+        }],
+    })
 }
 
 /// Renders the installation plan without writing or prompting.
@@ -147,19 +292,20 @@ pub fn json_plan() -> Result<serde_json::Value> {
 /// # Errors
 /// Returns an error when paths or existing installation files cannot be read or rendered.
 pub fn preview() -> Result<()> {
-    let plan = json_plan()?;
+    let plan = plan()?;
     ui::info(ui::heading_style().apply_to("Planned zsh integration changes:"))?;
-    for key in ["integration", "startup"] {
-        let item = &plan[key];
-        let state = if item["would_change"].as_bool().unwrap_or(false) {
+    for (path, changed) in [
+        (&plan.integration_path, plan.integration.would_change),
+        (&plan.startup_path, plan.startup.would_change),
+    ] {
+        let state = if changed {
             "would update"
         } else {
             "already current"
         };
-        let path = item["path"]["value"].as_str().unwrap_or("<non-UTF-8 path>");
         ui::step(format!(
             "{state}: {}",
-            ui::worktree_data_style().apply_to(path)
+            ui::worktree_data_style().apply_to(path.display())
         ))?;
     }
     ui::finish(ui::success_style().apply_to("Installation preview complete."))
@@ -176,41 +322,27 @@ pub fn preview() -> Result<()> {
 /// cannot be inspected, confirmation cannot be read, a planned write fails, or
 /// the selected agent cannot complete its session.
 pub fn run(guided: bool) -> Result<()> {
-    let config_path = config_home()?.join("pando/config.yaml");
-    let integration_path = config_home()?.join("pando/pando.zsh");
-    let zshrc_path = zshrc_path()?;
-    let source_block = source_block(&integration_path);
-
-    let existing_config = read_optional(&config_path)?;
-    let existing_integration = read_optional(&integration_path)?;
-    let existing_zshrc = read_optional(&zshrc_path)?;
-    let desired_config = update_config_scaffold(&existing_config)?;
-    let desired_zshrc = update_source_block(&existing_zshrc, &source_block)?;
-    let config_changed = existing_config != desired_config;
-    let integration_changed = existing_integration != INTEGRATION;
-    let zshrc_changed = existing_zshrc != desired_zshrc;
-    let shell_changed = config_changed || integration_changed || zshrc_changed;
+    let plan = plan()?;
+    let shell_changed = plan.changed;
 
     if shell_changed {
         ui::ensure_interactive("Pando installation requires confirmation")?;
         ui::info(ui::heading_style().apply_to("Planned Pando installation changes:"))?;
-        if config_changed {
-            ui::step(format!(
-                "write {}",
-                ui::worktree_data_style().apply_to(config_path.display())
-            ))?;
-        }
-        if integration_changed {
-            ui::step(format!(
-                "write {}",
-                ui::worktree_data_style().apply_to(integration_path.display())
-            ))?;
-        }
-        if zshrc_changed {
-            ui::step(format!(
-                "update {}",
-                ui::worktree_data_style().apply_to(zshrc_path.display())
-            ))?;
+        for (verb, path, changed) in [
+            ("write", &plan.config_path, plan.configuration.would_change),
+            (
+                "write",
+                &plan.integration_path,
+                plan.integration.would_change,
+            ),
+            ("update", &plan.startup_path, plan.startup.would_change),
+        ] {
+            if changed {
+                ui::step(format!(
+                    "{verb} {}",
+                    ui::worktree_data_style().apply_to(path.display())
+                ))?;
+            }
         }
 
         let confirmed = ui::prompt_result(
@@ -227,30 +359,21 @@ pub fn run(guided: bool) -> Result<()> {
             ));
         }
 
-        if config_changed {
-            write_atomic(&config_path, &desired_config)
-                .with_context(|| format!("failed to update {}", config_path.display()))?;
+        let outcome = apply(&plan);
+        if let Err(failure) = outcome.result {
+            bail!(failure.message);
         }
-        if integration_changed {
-            write_atomic(&integration_path, INTEGRATION)
-                .with_context(|| format!("failed to write {}", integration_path.display()))?;
-        }
-        if zshrc_changed {
-            write_atomic(&zshrc_path, &desired_zshrc)
-                .with_context(|| format!("failed to update {}", zshrc_path.display()))?;
-        }
-
         ui::success("Installed zsh integration.")?;
         ui::info(format!(
             "Restart zsh or run: source {}",
-            ui::worktree_data_style().apply_to(zshrc_path.display())
+            ui::worktree_data_style().apply_to(plan.startup_path.display())
         ))?;
     } else {
         ui::info("The Pando shell integration is already current.")?;
     }
 
     if guided {
-        return run_guided_configuration(&config_path);
+        return run_guided_configuration(&plan.config_path);
     }
 
     let completion = if shell_changed {
@@ -259,6 +382,54 @@ pub fn run(guided: bool) -> Result<()> {
         "Pando installation is already current."
     };
     ui::finish(ui::success_style().apply_to(completion))
+}
+
+fn apply(plan: &InstallPlan) -> InstallOutcome {
+    let mut effects = effects(plan, false);
+    let writes = [
+        (
+            plan.configuration.would_change,
+            &plan.config_path,
+            plan.desired_config.as_slice(),
+            "update",
+        ),
+        (
+            plan.integration.would_change,
+            &plan.integration_path,
+            INTEGRATION,
+            "write",
+        ),
+        (
+            plan.startup.would_change,
+            &plan.startup_path,
+            plan.desired_startup.as_slice(),
+            "update",
+        ),
+    ];
+    let mut effect_index = 0;
+    for (changed, path, desired, verb) in writes {
+        if !changed {
+            continue;
+        }
+        effects[effect_index].attempted = true;
+        if let Err(error) = write_atomic(path, desired) {
+            return InstallOutcome {
+                result: Err(InstallFailure {
+                    code: "install.write_failed",
+                    message: format!("failed to {verb} {}: {error:#}", path.display()),
+                }),
+                effects,
+                recovery: Vec::new(),
+            };
+        }
+        effects[effect_index].completed = true;
+        effect_index += 1;
+    }
+    InstallOutcome {
+        result: Ok(InstallResult::Installed { plan: plan.clone() }),
+        effects,
+        recovery: Vec::new(),
+    }
 }
 
 #[derive(Clone, Copy)]

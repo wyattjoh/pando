@@ -1600,56 +1600,18 @@ pub fn install(request_mode: bool, dry_flag: bool, no_guide: bool) -> Result<()>
     } else {
         (None, dry_flag)
     };
-    let plan = install::json_plan()?;
-    let effects = ["configuration", "integration", "startup"]
-        .into_iter()
-        .filter(|key| plan[*key]["would_change"] == true)
-        .map(|key| Effect {
-            action: "file.write".into(),
-            attempted: false,
-            completed: false,
-            details: Some(json!({"target":plan[key]["path"],"role":key})),
-        })
-        .collect::<Vec<_>>();
-    if plan["changed"] == false {
-        return emit(
-            protocol::success(
-                "install",
-                id,
-                json!({"outcome":"already_current","plan":plan}),
-                json!({}),
-                vec![],
-            ),
-            false,
-        );
-    }
-    if !dry {
-        let mut response = protocol::failure(
-            "install",
-            id,
-            "install.approval_required",
-            "installation requires a manual human invocation",
-        );
-        response.effects = effects;
-        response.next_steps.push(crate::protocol::NextStep {
-            action: "install.approve".into(),
-            description: "Review and approve installation interactively".into(),
-            mutation: "filesystem".into(),
-            requires_human_approval: true,
-            invocation: json!({"argv":["pando","install"],"stdin":null}),
-        });
-        return emit(response, true);
-    }
-    emit(
-        protocol::success(
-            "install",
-            id,
-            json!({"outcome":"dry_run","plan":plan}),
-            json!({}),
-            effects,
-        ),
-        false,
-    )
+    let outcome = install::inspect(&install::InstallInput { dry_run: dry })?;
+    let failed = outcome.result.is_err();
+    let response = protocol::adapt(
+        "install",
+        id,
+        outcome.result,
+        protocol::EmptyInput::default(),
+        outcome.effects,
+        Vec::new(),
+        outcome.recovery,
+    )?;
+    emit(response, failed)
 }
 /// Builds exact-leaf JSON help from the runtime request and response types.
 #[must_use]
@@ -1670,10 +1632,10 @@ pub fn help(command: &str) -> Value {
         | "trust.commit_reset"
         | "trust.commit_approve"
         | "trust.merge_reset"
-        | "trust.merge_approve"
-        | "install" => {
-            json!(schemars::schema_for!(protocol::Request<DryRunInput>))
-        }
+        | "trust.merge_approve" => json!(schemars::schema_for!(protocol::Request<DryRunInput>)),
+        "install" => json!(schemars::schema_for!(
+            protocol::Request<install::InstallInput>
+        )),
         _ => Value::Null,
     };
     let (errors, actions): (&[&str], &[&str]) = match command {
@@ -1804,6 +1766,7 @@ pub fn help(command: &str) -> Value {
                 "json.invalid_request",
                 "json.unsupported_schema_version",
                 "install.approval_required",
+                "install.write_failed",
             ],
             &["file.write", "install.approve"],
         ),
@@ -1812,6 +1775,7 @@ pub fn help(command: &str) -> Value {
     let result_schema = match command {
         "list" => json!(schemars::schema_for!(read_only::ListResult)),
         "get" => json!(schemars::schema_for!(read_only::GetResult)),
+        "install" => json!(schemars::schema_for!(install::InstallResult)),
         _ => Value::Null,
     };
     let selection_required_context_schema = if command == "switch" {
