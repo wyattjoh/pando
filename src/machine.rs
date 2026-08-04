@@ -1623,7 +1623,33 @@ pub fn merge(
     };
     // An in-place merge owns no topic worktree, so removal and the `cd` destination never apply.
     let removes = !input.no_remove && !plan.context.in_place;
-    let context = serde_json::to_value(&plan.context)?;
+    let pre_merge_approval = if plan.context.cleanup_pending {
+        None
+    } else {
+        match hook_approval::evaluate(
+            &plan.repository,
+            HookPhase::PreMerge,
+            &plan.config.pre_merge,
+        ) {
+            Ok(hook_approval::Evaluation::ApprovalRequired(candidate)) => Some(candidate),
+            Ok(hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted) => None,
+            Err(error) => {
+                return emit_err("merge", id, "trust.read_failed", format!("{error:#}"));
+            }
+        }
+    };
+    let mut context = serde_json::to_value(&plan.context)?;
+    if let Some(candidate) = &pre_merge_approval {
+        context["approval"] = json!({
+            "phase": candidate.phase().key(),
+            "commands": candidate.commands().iter().map(|step| json!({
+                "name": step.name,
+                "command": step.command,
+            })).collect::<Vec<_>>(),
+            "repository": candidate.repository(),
+            "identity": candidate.identity(),
+        });
+    }
     let mut effects = vec![
         Effect {
             action: "journal".into(),
@@ -1683,7 +1709,7 @@ pub fn merge(
     let approval_blocked = if plan.context.cleanup_pending {
         !plan.context.pre_remove_hooks_trusted
     } else {
-        !plan.context.pre_merge_hooks_trusted || plan.squash.approval_required()
+        pre_merge_approval.is_some() || plan.squash.approval_required()
     };
     if input.dry_run {
         let mut response = protocol::success(
