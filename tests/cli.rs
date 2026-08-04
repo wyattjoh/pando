@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     thread,
+    time::Duration,
 };
 
 use nix::{
@@ -1841,6 +1842,240 @@ fn configure_pre_merge_hook(repo: &Repository, marker: &Path) {
     fs::write(repo.main.join("target.txt"), "target\n").unwrap();
     git(&repo.main, ["add", "target.txt"]);
     git(&repo.main, ["commit", "-m", "advance target"]);
+}
+
+#[test]
+fn merge_validation_hooks_stream_interactively_without_polluting_stdout() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        "hooks:\n  pre-merge:\n    - name: interactive validation\n      command: printf 'validation-ready\\n'; read leftover; read reply; printf 'validation:%s\\n' \"$reply\"\n",
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(
+        &repo.linked,
+        ["commit", "-m", "configure interactive validation"],
+    );
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--no-remove", "--no-squash"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let PtySession {
+        child,
+        mut master_writer,
+        mut master_reader,
+    } = start_pty_command(
+        command,
+        Winsize {
+            ws_row: 24,
+            ws_col: 600,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        },
+    );
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = master_reader.read_to_end(&mut bytes);
+        bytes
+    });
+    master_writer.write_all(b"y\n").unwrap();
+    master_writer.flush().unwrap();
+    thread::sleep(Duration::from_millis(200));
+    master_writer.write_all(b"accepted\n").unwrap();
+    master_writer.flush().unwrap();
+    drop(master_writer);
+    let output = finish_pty_command(child, reader);
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(stderr.contains("validation-ready"), "{stderr}");
+    assert!(stderr.contains("validation:accepted"), "{stderr}");
+    assert_eq!(
+        stderr
+            .matches("Running pre-merge interactive validation:")
+            .count(),
+        1,
+        "the hook command must be announced exactly once: {stderr}"
+    );
+}
+
+#[test]
+fn merge_validation_failure_preserves_order_worktree_and_recovery() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let order = repo.temp.path().join("merge-validation-order");
+    let allow = repo.temp.path().join("allow-validation");
+    fs::write(repo.main.join(".gitignore"), "/.pando.local.yaml\n").unwrap();
+    git(&repo.main, ["add", ".gitignore"]);
+    git(&repo.main, ["commit", "-m", "ignore local pando config"]);
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        format!(
+            "hooks:\n  pre-merge:\n    - name: shared first\n      command: printf 'shared:%s\\n' \"$PWD\" >> {}\n    - name: shared gate\n      command: printf 'gate:%s\\n' \"$PWD\" >> {}; test -f {}\n",
+            shell_quote(&order),
+            shell_quote(&order),
+            shell_quote(&allow),
+        ),
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(
+        &repo.linked,
+        ["commit", "-m", "configure shared validation"],
+    );
+    fs::write(
+        repo.main.join(".pando.local.yaml"),
+        format!(
+            "hooks:\n  pre-merge:\n    - name: local last\n      command: printf 'local:%s\\n' \"$PWD\" >> {}\n",
+            shell_quote(&order)
+        ),
+    )
+    .unwrap();
+    let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--no-remove", "--no-squash"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let failed = run_pty_command(command, b"y\n");
+
+    assert!(!failed.status.success());
+    assert!(failed.stdout.is_empty());
+    assert!(
+        failed
+            .stderr
+            .contains("pre-merge hook failed with status 1")
+    );
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), main_before);
+    assert!(repo.linked.exists());
+    assert!(repo.main.join(".git/pando-state/lifecycle").exists());
+    let topic = repo.linked.canonicalize().unwrap();
+    let first_attempt = fs::read_to_string(&order).unwrap();
+    assert_eq!(
+        first_attempt,
+        format!("shared:{}\ngate:{}\n", topic.display(), topic.display())
+    );
+    assert!(!first_attempt.contains("local:"));
+
+    fs::write(&allow, "allow\n").unwrap();
+    let retry = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove", "--no-squash"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert!(retry.stdout.is_empty());
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "HEAD"]),
+        git_output(&repo.linked, ["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        fs::read_dir(repo.main.join(".git/pando-state/lifecycle"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(
+        fs::read_to_string(&order).unwrap(),
+        format!(
+            "shared:{}\ngate:{}\nshared:{}\ngate:{}\nlocal:{}\n",
+            topic.display(),
+            topic.display(),
+            topic.display(),
+            topic.display(),
+            topic.display()
+        )
+    );
+}
+
+#[test]
+fn merge_cleanup_hook_failure_retains_integrated_worktree_and_pending_recovery() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let allow = repo.temp.path().join("allow-cleanup");
+    let hook_log = repo.temp.path().join("cleanup-hook-log");
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        format!(
+            "hooks:\n  pre-remove:\n    - name: cleanup gate\n      command: printf '%s\\n' \"$PWD\" >> {}; test -f {}\n    - name: cleanup later\n      command: printf later >> {}\n",
+            shell_quote(&hook_log),
+            shell_quote(&allow),
+            shell_quote(&hook_log),
+        ),
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(&repo.linked, ["commit", "-m", "configure cleanup hooks"]);
+    let topic_head = git_output(&repo.linked, ["rev-parse", "HEAD"]);
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--no-squash"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let failed = run_pty_command(command, b"y\n");
+
+    assert!(!failed.status.success());
+    assert!(failed.stdout.is_empty());
+    assert!(
+        failed
+            .stderr
+            .contains("pre-remove hook failed with status 1")
+    );
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), topic_head);
+    assert!(repo.linked.exists());
+    let journal_dir = repo.main.join(".git/pando-state/lifecycle");
+    let journal = fs::read_dir(&journal_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let journal: serde_json::Value = serde_json::from_slice(&fs::read(journal).unwrap()).unwrap();
+    assert_eq!(journal["cleanup_pending"], true);
+    assert_eq!(
+        fs::read_to_string(&hook_log).unwrap(),
+        format!("{}\n", repo.linked.canonicalize().unwrap().display())
+    );
+
+    fs::write(&allow, "allow\n").unwrap();
+    let retry = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-squash"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(
+        retry.stdout,
+        format!("{}\n", repo.main.canonicalize().unwrap().display()).as_bytes()
+    );
+    assert!(!repo.linked.exists());
+    assert_eq!(fs::read_dir(journal_dir).unwrap().count(), 0);
 }
 
 #[test]
