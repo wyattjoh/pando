@@ -5,7 +5,7 @@ use crate::{
     git, hook_approval, install,
     protocol::{self, BytePath, Effect, EmptyInput},
     read_only::{self, GetProperty, GetRequest},
-    setup::{self, HookOutput, OutputPolicy},
+    setup::{self, OutputPolicy},
     trust,
     worktree_plan::Intent,
 };
@@ -1034,22 +1034,12 @@ pub fn trust(command: &str, request_mode: bool, dry_run_flag: bool) -> Result<()
     emit(response, failed)
 }
 
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-#[serde(deny_unknown_fields)]
-struct RemoveInput {
-    #[serde(default)]
-    branches: Vec<String>,
-    #[serde(default)]
-    dry_run: bool,
-}
-
 /// Plans or executes structured worktree removal.
 ///
 /// # Errors
 /// Returns an error when repository state cannot be inspected, mutation fails, or stdout cannot be written.
-#[allow(clippy::too_many_lines)]
 pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: bool) -> Result<()> {
-    let (id, input, force) = if request_mode {
+    let (id, input) = if request_mode {
         if !branches.is_empty() || dry_run {
             return emit_err(
                 "remove",
@@ -1058,26 +1048,25 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
                 "command options are forbidden with --input-output json",
             );
         }
-        match protocol::read_request::<RemoveInput>() {
-            Ok(r) if r.schema_version == 1 => (r.request_id, r.input, force),
-            Ok(r) => {
+        match protocol::read_request::<crate::lifecycle::RemovalInput>() {
+            Ok(request) if request.schema_version == 1 => (request.request_id, request.input),
+            Ok(request) => {
                 return emit_err(
                     "remove",
-                    r.request_id,
+                    request.request_id,
                     "json.unsupported_schema_version",
                     "unsupported schema version",
                 );
             }
-            Err(e) => return emit_err("remove", None, "json.invalid_request", e),
+            Err(error) => return emit_err("remove", None, "json.invalid_request", error),
         }
     } else {
-        (None, RemoveInput { branches, dry_run }, force)
+        (None, crate::lifecycle::RemovalInput { branches, dry_run })
     };
 
     let plan = match crate::lifecycle::plan_remove(&input.branches, force) {
         Ok(plan) => plan,
         Err(error) => {
-            let message = error.to_string();
             let code = match error.kind {
                 crate::lifecycle::PreflightFailureKind::DuplicateTarget => {
                     "remove.duplicate_target"
@@ -1093,171 +1082,45 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
                 crate::lifecycle::PreflightFailureKind::UnknownTarget => "remove.unknown_target",
                 _ => "remove.preflight_failed",
             };
-            return emit_err("remove", id, code, message);
+            return emit_err("remove", id, code, error.to_string());
         }
     };
-    for target in &plan.targets {
-        let evaluation = match hook_approval::evaluate(
-            &plan.repository,
-            HookPhase::PreRemove,
-            &target.config.pre_remove,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                return emit_err("remove", id, "trust.read_failed", format!("{error:#}"));
-            }
-        };
-        if let hook_approval::Evaluation::ApprovalRequired(candidate) = evaluation {
-            let mut response = protocol::failure(
-                "remove",
-                id,
-                "trust.approval_required",
-                "pre-remove hooks require manual review and approval before mutation",
-            );
-            response.context = json!({
-                "approval": {
-                    "phase": candidate.phase().key(),
-                    "commands": candidate.commands().iter().map(|step| json!({
-                        "name": step.name,
-                        "command": step.command,
-                    })).collect::<Vec<_>>(),
-                    "repository": candidate.repository(),
-                    "identity": candidate.identity(),
-                },
-                "branch": target.worktree.branch_label(),
-                "path": BytePath::path(&target.worktree.path),
-            });
-            response.next_steps.push(crate::protocol::NextStep {
-                action: "trust.approve_hooks".into(),
-                description: "Review and approve pre-remove hooks interactively".into(),
-                mutation: "trust".into(),
-                requires_human_approval: true,
-                invocation: json!({
-                    "argv": ["pando", "remove", target.worktree.branch_label()],
-                    "stdin": null,
-                    "working_directory": BytePath::path(&plan.current),
-                }),
-            });
-            return emit(response, true);
+    let outcome = if input.dry_run {
+        crate::lifecycle::RemovalOutcome {
+            result: Ok(crate::lifecycle::RemovalResult::DryRun {
+                targets: plan.context.targets.clone(),
+                force,
+            }),
+            context: crate::lifecycle::RemovalOutcomeContext {
+                removal: plan.context.clone(),
+                completed_targets: Vec::new(),
+                failed_targets: Vec::new(),
+                pending_targets: plan.context.targets.clone(),
+                branch: None,
+                path: None,
+                approval: None,
+            },
+            effects: plan.effects.clone(),
+            diagnostics: Vec::new(),
+            recovery: Vec::new(),
         }
-    }
-    let mut effects = Vec::new();
-    for target in &plan.targets {
-        let details = Some(
-            json!({"branch":target.worktree.branch_label(),"path":BytePath::path(&target.worktree.path),"branch_retained":true}),
-        );
-        effects.push(Effect {
-            action: "pre_remove_hooks".into(),
-            attempted: false,
-            completed: target.config.pre_remove.is_empty(),
-            details: details.clone(),
-        });
-        effects.push(Effect {
-            action: "remove_worktree".into(),
-            attempted: false,
-            completed: false,
-            details,
-        });
-    }
-    if input.dry_run {
-        return emit(
-            protocol::success(
-                "remove",
-                id,
-                json!({"outcome":"dry_run","targets":plan.targets.iter().map(|t|json!({"branch":t.worktree.branch_label(),"path":BytePath::path(&t.worktree.path),"branch_retained":true})).collect::<Vec<_>>(),"force":force}),
-                json!({}),
-                effects,
-            ),
-            false,
-        );
-    }
-    let mut response = protocol::success("remove", id, json!({}), json!({}), effects);
-    for (index, target) in plan.targets.iter().enumerate() {
-        if !target.config.pre_remove.is_empty() {
-            response.effects[index * 2].attempted = true;
-            let execution = match setup::execute(
-                HookPhase::PreRemove,
-                &target.config.pre_remove,
-                &target.worktree.path,
-                OutputPolicy::Captured,
-            ) {
-                Ok(value) => value,
-                Err(error) => {
-                    response.error = Some(crate::protocol::ErrorBody {
-                        code: "remove.hook_start_failed".into(),
-                        message: format!("{error:#}"),
-                    });
-                    response.status = "error";
-                    response.result = None;
-                    add_remove_retry(&mut response, &input, force, &plan.current);
-                    return emit(response, true);
-                }
-            };
-            let HookOutput::Captured(output) = execution.output else {
-                unreachable!("captured hook execution always returns captured output");
-            };
-            for step in output {
-                push_captured_diagnostic(&mut response, "hook", "stdout", &step.stdout);
-                push_captured_diagnostic(&mut response, "hook", "stderr", &step.stderr);
-            }
-            if execution.outcome != setup::HookOutcome::Success {
-                response.error = Some(crate::protocol::ErrorBody {
-                    code: "remove.hook_failed".into(),
-                    message: format!("pre-remove hook outcome: {:?}", execution.outcome),
-                });
-                response.status = "error";
-                response.result = None;
-                add_remove_retry(&mut response, &input, force, &plan.current);
-                return emit(response, true);
-            }
-            response.effects[index * 2].completed = true;
-        }
-        if let Some(path) = &target.stale_journal {
-            if let Err(error) = fs::remove_file(path) {
-                response.error = Some(crate::protocol::ErrorBody {
-                    code: "remove.journal_cleanup_failed".into(),
-                    message: error.to_string(),
-                });
-                response.status = "error";
-                response.result = None;
-                add_remove_retry(&mut response, &input, force, &plan.current);
-                return emit(response, true);
-            }
-        }
-        response.effects[index * 2 + 1].attempted = true;
-        let output =
-            match git::remove_worktree_captured(&plan.primary, &target.worktree.path, force) {
-                Ok(value) => value,
-                Err(error) => {
-                    response.error = Some(crate::protocol::ErrorBody {
-                        code: "remove.git_start_failed".into(),
-                        message: format!("{error:#}"),
-                    });
-                    response.status = "error";
-                    response.result = None;
-                    add_remove_retry(&mut response, &input, force, &plan.current);
-                    return emit(response, true);
-                }
-            };
-        push_diagnostic(&mut response, "git", "stdout", &output.stdout);
-        push_diagnostic(&mut response, "git", "stderr", &output.stderr);
-        if !output.status.success() {
-            response.error = Some(crate::protocol::ErrorBody {
-                code: "remove.git_failed".into(),
-                message: format!("git worktree remove failed with {}", output.status),
-            });
-            response.status = "error";
-            response.result = None;
-            add_remove_retry(&mut response, &input, force, &plan.current);
-            return emit(response, true);
-        }
-        response.effects[index * 2 + 1].completed = true;
-    }
-    let removed_current = plan.targets.iter().any(|t| t.worktree.path == plan.current);
-    response.result = Some(
-        json!({"outcome":"removed","targets":plan.targets.iter().map(|t|json!({"branch":t.worktree.branch_label(),"path":BytePath::path(&t.worktree.path),"branch_retained":true})).collect::<Vec<_>>(),"destination":if removed_current{Some(BytePath::path(&plan.primary))}else{None}}),
-    );
-    emit(response, false)
+    } else {
+        crate::lifecycle::removal_outcome(
+            crate::lifecycle::execute_removal_with_policy(&plan, OutputPolicy::Captured),
+            &input,
+        )
+    };
+    let failed = outcome.result.is_err();
+    let response = protocol::adapt(
+        "remove",
+        id,
+        outcome.result,
+        outcome.context,
+        outcome.effects,
+        outcome.diagnostics,
+        outcome.recovery,
+    )?;
+    emit(response, failed)
 }
 
 fn push_hook_diagnostics(
@@ -1302,24 +1165,6 @@ fn push_diagnostic(response: &mut protocol::Response, source: &str, stream: &str
         truncated: bytes.len() > LIMIT,
     });
 }
-fn add_remove_retry(
-    response: &mut crate::protocol::Response,
-    input: &RemoveInput,
-    force: bool,
-    cwd: &std::path::Path,
-) {
-    let mut argv = vec![
-        "pando".to_string(),
-        "remove".to_string(),
-        "--input-output".to_string(),
-        "json".to_string(),
-    ];
-    if force {
-        argv.push("--force".into());
-    }
-    response.next_steps.push(crate::protocol::NextStep{action:"remove.retry".into(),description:"Retry pending removal targets after resolving the failure".into(),mutation:"worktree".into(),requires_human_approval:force,invocation:json!({"argv":argv,"stdin":{"schema_version":1,"input":input},"working_directory":BytePath::path(cwd)})});
-}
-
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // Each flag is an independent policy opt-out.
@@ -1683,7 +1528,9 @@ pub fn help(command: &str) -> Value {
         "switch" => json!(schemars::schema_for!(protocol::Request<SwitchInput>)),
         "create" => json!(schemars::schema_for!(protocol::Request<CreateInput>)),
         "get" => json!(schemars::schema_for!(protocol::Request<GetRequest>)),
-        "remove" => json!(schemars::schema_for!(protocol::Request<RemoveInput>)),
+        "remove" => json!(schemars::schema_for!(
+            protocol::Request<crate::lifecycle::RemovalInput>
+        )),
         "merge" => json!(schemars::schema_for!(protocol::Request<MergeInput>)),
         "trust.reset"
         | "trust.commit_reset"

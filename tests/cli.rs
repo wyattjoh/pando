@@ -7660,6 +7660,13 @@ fn json_remove_hook_failure_keeps_bounded_stream_diagnostics_and_retry() {
     let value = assert_json_pure(&output);
     assert_eq!(value["error"]["code"], "remove.hook_failed");
     assert_eq!(value["request_id"], "remove-hook-failure");
+    assert_eq!(value["context"]["completed_targets"], serde_json::json!([]));
+    assert_eq!(value["context"]["failed_targets"][0]["branch"], "feature");
+    assert_eq!(value["context"]["pending_targets"], serde_json::json!([]));
+    assert_eq!(
+        value["context"]["failed_targets"][0]["branch_retained"],
+        true
+    );
     let diagnostics = value["diagnostics"].as_array().unwrap();
     assert_eq!(diagnostics.len(), 2);
     assert_eq!(diagnostics[0]["source"], "hook");
