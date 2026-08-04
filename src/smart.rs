@@ -1,7 +1,6 @@
 use std::{
     env,
     fmt::Write as FmtWrite,
-    fs,
     hash::{Hash, Hasher},
     io::{self, Write},
     os::unix::ffi::OsStrExt,
@@ -16,7 +15,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     Row, SortMode, Worktree, WorktreeKind,
-    branch::{self, Classification},
     config::{EffectiveConfig, HookPhase},
     git::{self, Repository},
     hook_approval,
@@ -131,62 +129,41 @@ fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> 
     let repository =
         git::repository(&env::current_dir().context("failed to read the current directory")?)?;
     git::validate_branch(&repository.current().path, branch)?;
-    let classification = branch::classify(&repository, branch)?;
-    if let Classification::Registered(existing) = &classification {
-        git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE)?;
-        if intent == Intent::Create {
-            return Err(already_registered(branch, &existing.path));
+    let plan = match worktree_plan::plan(&repository, intent, branch, None, fetch, None, true)? {
+        Ok(plan) => plan,
+        Err(PlanBlocker::RemoteSelectionRequired { destination, .. }) => {
+            return ui::finish(format!(
+                "Would create a worktree for {branch} at {}; no changes made.",
+                destination.display()
+            ));
         }
-        return ui::finish(format!(
+        Err(blocker) => return Err(render_plan_blocker(branch, blocker)),
+    };
+    match &plan.source {
+        Source::Registered(existing) => ui::finish(format!(
             "Would enter {}; no changes made.",
             existing.path.display()
-        ));
-    }
-    let config = EffectiveConfig::load(&repository)?;
-    let destination = config.require_root()?.join(branch);
-    if destination.exists() || repository.worktrees.iter().any(|w| w.path == destination) {
-        bail!("the configured destination already exists or is registered");
-    }
-    // A dry run never resolves a remote choice: the existing arms already
-    // preview identically, and only the new-branch arm depends on the base.
-    match classification {
-        Classification::Registered(_) => unreachable!("registered branches return above"),
-        Classification::Local => {
-            git::reject_fetch(fetch.requested(), git::FETCH_LOCAL_BRANCH)?;
-            return ui::finish(format!(
-                "Would create a worktree for {branch} at {}; no changes made.",
-                destination.display()
-            ));
+        )),
+        Source::New { base } => {
+            if let Some(base_ref) = &base.base_ref
+                && fetch.requested()
+            {
+                ui::info(format!(
+                    "Would fetch {} before branching; no changes made.",
+                    base_ref.reference()
+                ))?;
+            }
+            ui::finish(format!(
+                "Would create a worktree for {branch} from {} at {}; no changes made.",
+                new_branch_source(&repository, base),
+                plan.destination.display()
+            ))
         }
-        Classification::Remotes(_) => {
-            git::reject_fetch(fetch.requested(), git::FETCH_REMOTE_BRANCH)?;
-            return ui::finish(format!(
-                "Would create a worktree for {branch} at {}; no changes made.",
-                destination.display()
-            ));
-        }
-        Classification::New => {}
+        Source::Local { .. } | Source::Remote { .. } => ui::finish(format!(
+            "Would create a worktree for {branch} at {}; no changes made.",
+            plan.destination.display()
+        )),
     }
-    // Resolve the same start point the real run would, but never fetch: a dry
-    // run reports the refresh as something it would have done.
-    let plan = worktree_plan::plan(&repository, intent, branch, None, fetch, None, true)?
-        .map_err(|blocker| render_plan_blocker(branch, blocker))?;
-    let Source::New { base } = plan.source else {
-        unreachable!("new classification produces a new-branch plan")
-    };
-    if let Some(base_ref) = &base.base_ref
-        && fetch.requested()
-    {
-        ui::info(format!(
-            "Would fetch {} before branching; no changes made.",
-            base_ref.reference()
-        ))?;
-    }
-    ui::finish(format!(
-        "Would create a worktree for {branch} from {} at {}; no changes made.",
-        new_branch_source(&repository, &base),
-        destination.display()
-    ))
 }
 
 /// Previews a trust command without changing trust storage or prompting.
@@ -1307,10 +1284,10 @@ fn resolve_and_switch(
             false,
         )? {
             Ok(plan) => break plan,
-            Err(PlanBlocker::RemoteSelectionRequired { remotes }) => {
+            Err(PlanBlocker::RemoteSelectionRequired { remotes, .. }) => {
                 remote = Some(choose_remote(&remotes, branch)?);
             }
-            Err(PlanBlocker::ApprovalRequired { candidate }) => {
+            Err(PlanBlocker::ApprovalRequired { candidate, .. }) => {
                 approve_planned_hooks(repository, &candidate)?;
             }
             Err(
@@ -1375,49 +1352,11 @@ fn resolve_and_switch(
         ui::finish("Post-create setup complete")?;
         return write_destination(&outcome.destination);
     }
-    match plan.source {
-        Source::Registered(worktree) => {
-            git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE)?;
-            debug_assert_eq!(plan.destination, worktree.path);
-            enter_existing(repository, &plan.destination, Some(branch))
-        }
-        Source::Local { .. } => {
-            git::reject_fetch(fetch.requested(), git::FETCH_LOCAL_BRANCH)?;
-            create_worktree(
-                repository,
-                plan.config.as_ref().expect("creation plan has config"),
-                branch,
-                &plan.destination,
-                &CreationKind::Local,
-                intent,
-            )
-        }
-        Source::Remote {
-            reference: remote, ..
-        } => {
-            git::reject_fetch(fetch.requested(), git::FETCH_REMOTE_BRANCH)?;
-            create_worktree(
-                repository,
-                plan.config.as_ref().expect("creation plan has config"),
-                branch,
-                &plan.destination,
-                &CreationKind::Remote(remote),
-                intent,
-            )
-        }
-        Source::New { base } => {
-            if let Some(output) = base
-                .fetch_output
-                .as_deref()
-                .filter(|output| !output.trim().is_empty())
-            {
-                ui::step(render::git_output(output))?;
-            }
-            let config = plan.config.as_ref().expect("creation plan has config");
-            let kind = CreationKind::New { base };
-            create_worktree(repository, config, branch, &plan.destination, &kind, intent)
-        }
-    }
+    let Source::Registered(worktree) = &plan.source else {
+        unreachable!("creation plans execute before existing-worktree navigation")
+    };
+    debug_assert_eq!(plan.destination, worktree.path);
+    enter_existing(repository, &plan.destination, Some(branch))
 }
 
 fn approve_planned_hooks(
@@ -1438,6 +1377,9 @@ fn already_registered(branch: &str, path: &Path) -> anyhow::Error {
 
 fn render_plan_blocker(branch: &str, blocker: PlanBlocker) -> anyhow::Error {
     match blocker {
+        PlanBlocker::InvalidBranch { message } | PlanBlocker::ConfigInvalid { message } => {
+            anyhow::anyhow!(message)
+        }
         PlanBlocker::RegisteredForCreate { worktree } => already_registered(branch, &worktree.path),
         PlanBlocker::DestinationUnavailable { worktree } => anyhow::anyhow!(
             "branch {branch:?} is registered at {} but that worktree is {}; inspect it with 'git worktree list' and repair or prune it explicitly with Git",
@@ -1486,85 +1428,6 @@ fn choose_remote(remotes: &[String], branch: &str) -> Result<String> {
         "failed to read remote selection",
     )?;
     Ok(remotes[selection].clone())
-}
-
-#[derive(Debug)]
-enum CreationKind {
-    Local,
-    Remote(String),
-    New { base: git::NewBranchBase },
-}
-
-fn create_worktree(
-    repository: &Repository,
-    config: &EffectiveConfig,
-    branch: &str,
-    destination: &Path,
-    kind: &CreationKind,
-    intent: Intent,
-) -> Result<()> {
-    if let CreationKind::New { base } = kind {
-        match intent {
-            Intent::Switch => confirm_new_branch(repository, branch, base, destination)?,
-            Intent::Create => announce_new_branch(repository, branch, base, destination)?,
-        }
-    }
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create destination parent {}", parent.display()))?;
-    }
-    let pending = (!config.post_create.is_empty())
-        .then(|| setup::prepare(&repository.common_dir, branch, destination))
-        .transpose()?;
-    // With setup pending, creation is a mid-rail step the hook output follows;
-    // otherwise it is the last thing the rail says, so it closes the sequence.
-    let completion = if pending.is_some() {
-        ui::Completion::Step
-    } else {
-        ui::Completion::Outro
-    };
-    let creation = ui::run_timed_completing(
-        true,
-        "Creating worktree...",
-        "Created worktree",
-        "Failed to create worktree",
-        completion,
-        |_| match kind {
-            CreationKind::Local => {
-                git::add_existing_worktree(&repository.current().path, destination, branch)
-            }
-            CreationKind::Remote(remote) => {
-                git::add_tracking_worktree(&repository.current().path, destination, branch, remote)
-            }
-            CreationKind::New { base } => git::add_new_worktree(
-                &repository.current().path,
-                destination,
-                branch,
-                &base.commit,
-            ),
-        },
-    );
-    if let Err(error) = creation {
-        if let Some(pending) = pending {
-            pending
-                .cancel()
-                .context("worktree creation failed and pending setup state could not be cleared")?;
-        }
-        return Err(error);
-    }
-
-    let Some(pending) = pending else {
-        return write_destination(destination);
-    };
-    let worktree_identity = git::worktree_identity(destination)?;
-    pending.commit(&repository.common_dir, &worktree_identity)?;
-    finish_setup(
-        repository,
-        config,
-        &worktree_identity,
-        Some(branch),
-        destination,
-    )
 }
 
 fn confirm_new_branch(

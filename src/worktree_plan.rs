@@ -76,6 +76,7 @@ pub(crate) struct Plan {
     pub(crate) source: Source,
     pub(crate) config: Option<EffectiveConfig>,
     pub(crate) description: Option<String>,
+    pub(crate) fetch: FetchIntent,
     pub(crate) dry_run: bool,
 }
 
@@ -102,19 +103,46 @@ pub(crate) struct ExecutionFailure {
 /// A caller decision or safety condition that prevents an executable plan.
 #[derive(Debug)]
 pub(crate) enum Blocker {
-    RegisteredForCreate { worktree: Worktree },
-    DestinationUnavailable { worktree: Worktree },
+    InvalidBranch {
+        message: String,
+    },
+    ConfigInvalid {
+        message: String,
+    },
+    RegisteredForCreate {
+        worktree: Worktree,
+    },
+    DestinationUnavailable {
+        worktree: Worktree,
+    },
     PrimaryUnavailable,
-    RootUnavailable { message: String },
-    DestinationInvalid { message: String },
+    RootUnavailable {
+        message: String,
+    },
+    DestinationInvalid {
+        message: String,
+    },
     DestinationCollision,
-    DestinationNotIgnored { first: String, gitignore: PathBuf },
+    DestinationNotIgnored {
+        first: String,
+        gitignore: PathBuf,
+    },
     IrrelevantRemote,
     UnknownRemote,
-    RemoteSelectionRequired { remotes: Vec<String> },
-    FetchNotApplicable { message: String },
-    BaseUnavailable { message: String },
-    ApprovalRequired { candidate: hook_approval::Candidate },
+    RemoteSelectionRequired {
+        remotes: Vec<String>,
+        destination: PathBuf,
+    },
+    FetchNotApplicable {
+        message: String,
+    },
+    BaseUnavailable {
+        message: String,
+    },
+    ApprovalRequired {
+        candidate: hook_approval::Candidate,
+        destination: PathBuf,
+    },
 }
 
 /// Plans the selected source and byte-preserving destination.
@@ -125,6 +153,7 @@ pub(crate) enum Blocker {
 /// # Errors
 ///
 /// Returns an error when Git cannot classify the branch or configuration cannot be loaded.
+#[allow(clippy::too_many_lines)] // One authoritative planner owns every classification and safety check.
 pub(crate) fn plan(
     repository: &Repository,
     intent: Intent,
@@ -134,6 +163,11 @@ pub(crate) fn plan(
     description: Option<String>,
     dry_run: bool,
 ) -> Result<Result<Plan, Blocker>> {
+    if let Err(error) = git::validate_branch(&repository.current().path, branch) {
+        return Ok(Err(Blocker::InvalidBranch {
+            message: format!("{error:#}"),
+        }));
+    }
     let classification = branch::classify(repository, branch)?;
     if let Classification::Registered(worktree) = classification {
         if let Err(error) = git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE) {
@@ -157,6 +191,7 @@ pub(crate) fn plan(
             source: Source::Registered(worktree),
             config: None,
             description,
+            fetch,
             dry_run,
         }));
     }
@@ -164,7 +199,14 @@ pub(crate) fn plan(
     let Some(primary) = repository.primary.as_ref() else {
         return Ok(Err(Blocker::PrimaryUnavailable));
     };
-    let config = EffectiveConfig::load(repository)?;
+    let config = match EffectiveConfig::load(repository) {
+        Ok(config) => config,
+        Err(error) => {
+            return Ok(Err(Blocker::ConfigInvalid {
+                message: format!("{error:#}"),
+            }));
+        }
+    };
     let root = match config.require_root() {
         Ok(root) => root,
         Err(error) => {
@@ -200,20 +242,36 @@ pub(crate) fn plan(
     // A requested fresh-base fetch is itself a repository mutation, so gate it
     // before source planning. Other source planning is read-only and remains
     // ahead of approval to preserve remote-choice and validation behavior.
-    if fetch.refreshes()
+    if !dry_run
+        && fetch.refreshes()
         && let Some(candidate) = approval_candidate(repository, &config)?
     {
-        return Ok(Err(Blocker::ApprovalRequired { candidate }));
+        return Ok(Err(Blocker::ApprovalRequired {
+            candidate,
+            destination,
+        }));
     }
 
-    let source = match plan_source(repository, classification, branch, remote, &config, fetch) {
+    let source = match plan_source(
+        repository,
+        classification,
+        branch,
+        remote,
+        &config,
+        fetch,
+        &destination,
+    ) {
         Ok(source) => source,
         Err(blocker) => return Ok(Err(*blocker)),
     };
-    if !fetch.refreshes()
+    if !dry_run
+        && !fetch.refreshes()
         && let Some(candidate) = approval_candidate(repository, &config)?
     {
-        return Ok(Err(Blocker::ApprovalRequired { candidate }));
+        return Ok(Err(Blocker::ApprovalRequired {
+            candidate,
+            destination,
+        }));
     }
 
     let plan = Plan {
@@ -223,6 +281,7 @@ pub(crate) fn plan(
         source,
         config: Some(config),
         description,
+        fetch,
         dry_run,
     };
     Ok(Ok(plan))
@@ -251,6 +310,7 @@ fn plan_source(
     remote: Option<&str>,
     config: &EffectiveConfig,
     fetch: FetchIntent,
+    destination: &std::path::Path,
 ) -> Result<Source, Box<Blocker>> {
     match classification {
         Classification::Registered(_) => unreachable!("registered classification returned above"),
@@ -303,7 +363,10 @@ fn plan_source(
                         .expect("classified remote ref must remain resolvable while planning"),
                     reference: remotes[0].clone(),
                 }),
-                None => Err(Box::new(Blocker::RemoteSelectionRequired { remotes })),
+                None => Err(Box::new(Blocker::RemoteSelectionRequired {
+                    remotes,
+                    destination: destination.to_owned(),
+                })),
             }
         }
     }
@@ -519,17 +582,17 @@ fn revalidate_new(repository: &Repository, base: &git::NewBranchBase) -> Result<
     Ok(())
 }
 
-fn planned_effects(plan: &Plan) -> Vec<Effect> {
+pub(crate) fn planned_effects(plan: &Plan) -> Vec<Effect> {
     if matches!(plan.source, Source::Registered(_)) {
         return Vec::new();
     }
     let mut effects = Vec::new();
     if let Source::New { base } = &plan.source {
-        if base.fetch_output.is_some() {
+        if plan.fetch.requested() {
             effects.push(Effect {
                 action: "fetch_base_ref".into(),
-                attempted: true,
-                completed: true,
+                attempted: plan.fetch.refreshes(),
+                completed: plan.fetch.refreshes(),
                 details: base
                     .base_ref
                     .as_ref()

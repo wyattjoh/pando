@@ -1,9 +1,8 @@
 use crate::{
     WorktreeKind,
-    branch::{self, Classification},
-    config::{EffectiveConfig, HookPhase},
+    config::HookPhase,
     git, hook_approval, install,
-    protocol::{self, BytePath, Effect, EmptyInput},
+    protocol::{self, BytePath, EmptyInput},
     read_only::{self, GetProperty, GetRequest},
     setup::{self, OutputPolicy},
     trust,
@@ -13,7 +12,7 @@ use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{env, fs};
+use std::env;
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -139,19 +138,6 @@ fn resolve_request(
     }
 }
 
-/// Describes the single base-ref refresh `fetch` performs, attempted or planned.
-fn fetch_effect(base: &git::NewBranchBase, attempted: bool) -> Effect {
-    Effect {
-        action: "fetch_base_ref".into(),
-        attempted,
-        completed: attempted,
-        details: base
-            .base_ref
-            .as_ref()
-            .map(|base_ref| json!({"ref": base_ref.reference()})),
-    }
-}
-
 /// Runs the non-interactive switch interface.
 ///
 /// # Errors
@@ -261,41 +247,23 @@ fn resolve(
         }
         return emit(response, true);
     };
-    if let Err(error) = git::validate_branch(&repo.current().path, &branch) {
-        return emit_err(
-            command,
-            id,
-            &format!("{command}.invalid_branch"),
-            format!("{error:#}"),
-        );
-    }
-    let classification = branch::classify(&repo, &branch)?;
-    if let Classification::Registered(worktree) = &classification {
-        if input.remote.is_some() {
-            return emit_err(
-                command,
-                id,
-                &format!("{command}.irrelevant_remote"),
-                "remote is only valid when resolving a remote-tracking branch",
-            );
+    let shared_plan = match crate::worktree_plan::plan(
+        &repo,
+        intent,
+        &branch,
+        input.remote.as_deref(),
+        crate::worktree_plan::FetchIntent::new(input.fetch, input.dry_run),
+        input.description.clone(),
+        input.dry_run,
+    )? {
+        Ok(plan) => plan,
+        Err(crate::worktree_plan::Blocker::InvalidBranch { message }) => {
+            return emit_err(command, id, &format!("{command}.invalid_branch"), message);
         }
-        if let Err(error) = git::reject_fetch(input.fetch, git::FETCH_REGISTERED_WORKTREE) {
-            return emit_err(
-                command,
-                id,
-                &format!("{command}.fetch_not_applicable"),
-                format!("{error:#}"),
-            );
+        Err(crate::worktree_plan::Blocker::ConfigInvalid { message }) => {
+            return emit_err(command, id, &format!("{command}.config_invalid"), message);
         }
-        if !worktree.navigable() {
-            return emit_err(
-                command,
-                id,
-                &format!("{command}.destination_unavailable"),
-                format!("registered destination is {}", worktree.state_label()),
-            );
-        }
-        if intent == Intent::Create {
+        Err(crate::worktree_plan::Blocker::RegisteredForCreate { worktree }) => {
             let mut response = protocol::failure(
                 command,
                 id,
@@ -313,178 +281,34 @@ fn resolve(
             });
             return emit(response, true);
         }
-        return emit(
-            protocol::success(
+        Err(crate::worktree_plan::Blocker::RemoteSelectionRequired { remotes, .. }) => {
+            let mut response = protocol::failure(
                 command,
                 id,
-                json!({"outcome":"existing","branch":branch,"destination":BytePath::path(&worktree.path),"dry_run":input.dry_run}),
-                json!({}),
-                vec![],
-            ),
-            false,
-        );
-    }
-    #[allow(unused_variables)]
-    let Some(primary) = repo.primary.as_ref() else {
-        return emit_err(
-            command,
-            id,
-            "repository.primary_unavailable",
-            "a bare repository cannot create a worktree",
-        );
-    };
-    let config = match EffectiveConfig::load(&repo) {
-        Ok(value) => value,
-        Err(error) => {
-            return emit_err(
-                command,
-                id,
-                &format!("{command}.config_invalid"),
-                format!("{error:#}"),
+                &format!("{command}.remote_selection_required"),
+                "multiple fetched remotes match this branch",
             );
-        }
-    };
-    let root = match config.require_root() {
-        Ok(value) => value,
-        Err(error) => {
-            return emit_err(
-                command,
-                id,
-                "repository.root_unavailable",
-                format!("{error:#}"),
-            );
-        }
-    };
-    let destination = match git::canonical_or_normalized(&root.join(&branch)) {
-        Ok(value) => value,
-        Err(error) => {
-            return emit_err(
-                command,
-                id,
-                &format!("{command}.destination_invalid"),
-                format!("{error:#}"),
-            );
-        }
-    };
-    if destination.exists() || repo.worktrees.iter().any(|w| w.path == destination) {
-        return emit_err(
-            command,
-            id,
-            &format!("{command}.destination_collision"),
-            "the configured destination already exists or is registered",
-        );
-    }
-    let (local, remotes) = match &classification {
-        Classification::Registered(_) => unreachable!("registered branches return above"),
-        Classification::Local => (true, Vec::new()),
-        Classification::Remotes(remotes) => (false, remotes.clone()),
-        Classification::New => (false, Vec::new()),
-    };
-    if let Err(error) = git::reject_fetch(
-        input.fetch && (local || !remotes.is_empty()),
-        if local {
-            git::FETCH_LOCAL_BRANCH
-        } else {
-            git::FETCH_REMOTE_BRANCH
-        },
-    ) {
-        return emit_err(
-            command,
-            id,
-            &format!("{command}.fetch_not_applicable"),
-            format!("{error:#}"),
-        );
-    }
-    let selected_remote = if local {
-        if input.remote.is_some() {
-            return emit_err(
-                command,
-                id,
-                &format!("{command}.irrelevant_remote"),
-                "remote does not apply to an existing local branch",
-            );
-        }
-        None
-    } else if remotes.is_empty() {
-        if input.remote.is_some() {
-            return emit_err(
-                command,
-                id,
-                &format!("{command}.unknown_remote"),
-                "remote does not match a fetched remote-tracking branch",
-            );
-        }
-        if intent == Intent::Switch && !input.dry_run {
-            return emit_err(
-                "switch",
-                id,
-                "switch.approval_required",
-                "creating a genuinely new branch requires a manual human invocation",
-            );
-        }
-        None
-    } else {
-        match input.remote {
-            Some(remote)
-                if remotes
-                    .iter()
-                    .any(|value| value == &format!("{remote}/{branch}") || value == &remote) =>
-            {
-                remotes
-                    .iter()
-                    .find(|value| **value == remote || **value == format!("{remote}/{branch}"))
-                    .cloned()
+            response.context = json!({"branch":branch,"remotes":remotes});
+            for remote in &remotes {
+                response.next_steps.push(protocol::NextStep {
+                    action: "retry_with_remote".into(),
+                    description: format!("Retry with {remote} as the selected source"),
+                    mutation: "none".into(),
+                    requires_human_approval: false,
+                    invocation: json!({
+                        "argv": ["pando", "--input-output", "json", command],
+                        "stdin": {"schema_version": 1, "input": {
+                            "branch": branch,
+                            "remote": remote,
+                            "fetch": input.fetch,
+                            "dry_run": input.dry_run,
+                        }},
+                        "working_directory": BytePath::path(&repo.current().path),
+                    }),
+                });
             }
-            Some(_) => {
-                return emit_err(
-                    command,
-                    id,
-                    &format!("{command}.unknown_remote"),
-                    "explicit remote does not match an available fetched branch",
-                );
-            }
-            None if remotes.len() == 1 => Some(remotes[0].clone()),
-            None => {
-                let mut response = protocol::failure(
-                    command,
-                    id,
-                    &format!("{command}.remote_selection_required"),
-                    "multiple fetched remotes match this branch",
-                );
-                response.context = json!({"branch":branch,"remotes":remotes});
-                for remote in &remotes {
-                    response.next_steps.push(protocol::NextStep {
-                        action: "retry_with_remote".into(),
-                        description: format!("Retry with {remote} as the selected source"),
-                        mutation: "none".into(),
-                        requires_human_approval: false,
-                        invocation: json!({
-                            "argv": ["pando", "--input-output", "json", command],
-                            "stdin": {"schema_version": 1, "input": {
-                                "branch": branch,
-                                "remote": remote,
-                                "fetch": input.fetch,
-                                "dry_run": input.dry_run,
-                            }},
-                            "working_directory": BytePath::path(&repo.current().path),
-                        }),
-                    });
-                }
-                return emit(response, true);
-            }
+            return emit(response, true);
         }
-    };
-    let selected = selected_remote.as_deref();
-    let shared_plan = match crate::worktree_plan::plan(
-        &repo,
-        intent,
-        &branch,
-        selected,
-        crate::worktree_plan::FetchIntent::new(input.fetch, input.dry_run),
-        input.description.clone(),
-        input.dry_run,
-    )? {
-        Ok(plan) => plan,
         Err(crate::worktree_plan::Blocker::FetchNotApplicable { message }) => {
             return emit_err(
                 command,
@@ -496,7 +320,10 @@ fn resolve(
         Err(crate::worktree_plan::Blocker::BaseUnavailable { message }) => {
             return emit_err(command, id, &format!("{command}.base_unavailable"), message);
         }
-        Err(crate::worktree_plan::Blocker::ApprovalRequired { candidate }) => {
+        Err(crate::worktree_plan::Blocker::ApprovalRequired {
+            candidate,
+            destination,
+        }) => {
             let mut response = protocol::failure(
                 command,
                 id,
@@ -529,39 +356,102 @@ fn resolve(
             });
             return emit(response, true);
         }
-        Err(blocker) => {
+        Err(crate::worktree_plan::Blocker::DestinationUnavailable { worktree }) => {
+            return emit_err(
+                command,
+                id,
+                &format!("{command}.destination_unavailable"),
+                format!("registered destination is {}", worktree.state_label()),
+            );
+        }
+        Err(crate::worktree_plan::Blocker::PrimaryUnavailable) => {
+            return emit_err(
+                command,
+                id,
+                "repository.primary_unavailable",
+                "a bare repository cannot create a worktree",
+            );
+        }
+        Err(crate::worktree_plan::Blocker::RootUnavailable { message }) => {
+            return emit_err(command, id, "repository.root_unavailable", message);
+        }
+        Err(crate::worktree_plan::Blocker::DestinationInvalid { message }) => {
             return emit_err(
                 command,
                 id,
                 &format!("{command}.destination_invalid"),
-                format!("worktree plan blocked: {blocker:?}"),
+                message,
+            );
+        }
+        Err(crate::worktree_plan::Blocker::DestinationCollision) => {
+            return emit_err(
+                command,
+                id,
+                &format!("{command}.destination_collision"),
+                "the configured destination already exists or is registered",
+            );
+        }
+        Err(crate::worktree_plan::Blocker::DestinationNotIgnored { first, gitignore }) => {
+            return emit_err(
+                command,
+                id,
+                &format!("{command}.destination_invalid"),
+                format!(
+                    "the configured destination is inside the primary worktree but is not ignored; add '/{first}/' to {}",
+                    gitignore.display()
+                ),
+            );
+        }
+        Err(crate::worktree_plan::Blocker::IrrelevantRemote) => {
+            return emit_err(
+                command,
+                id,
+                &format!("{command}.irrelevant_remote"),
+                "remote does not apply to the resolved branch",
+            );
+        }
+        Err(crate::worktree_plan::Blocker::UnknownRemote) => {
+            return emit_err(
+                command,
+                id,
+                &format!("{command}.unknown_remote"),
+                "remote does not match an available fetched branch",
             );
         }
     };
     debug_assert_eq!(shared_plan.intent, intent);
     debug_assert_eq!(shared_plan.branch, branch);
     let destination = shared_plan.destination.clone();
+    if let crate::worktree_plan::Source::Registered(worktree) = &shared_plan.source {
+        return emit(
+            protocol::success(
+                command,
+                id,
+                json!({"outcome":"existing","branch":branch,"destination":BytePath::path(&worktree.path),"dry_run":input.dry_run}),
+                json!({}),
+                vec![],
+            ),
+            false,
+        );
+    }
+    let selected_remote = match &shared_plan.source {
+        crate::worktree_plan::Source::Remote { reference, .. } => Some(reference.clone()),
+        _ => None,
+    };
     let new_base = match &shared_plan.source {
         crate::worktree_plan::Source::New { base } => Some(base.clone()),
         _ => None,
     };
     if let (Intent::Switch, Some(base)) = (intent, new_base.as_ref()) {
-        let mut effects = Vec::new();
-        if input.fetch {
-            effects.push(fetch_effect(base, false));
+        if !input.dry_run {
+            return emit_err(
+                "switch",
+                id,
+                "switch.approval_required",
+                "creating a genuinely new branch requires a manual human invocation",
+            );
         }
-        effects.push(Effect {
-            action: "create_branch".into(),
-            attempted: false,
-            completed: false,
-            details: None,
-        });
-        effects.push(Effect {
-            action: "create_worktree".into(),
-            attempted: false,
-            completed: false,
-            details: None,
-        });
+        let effects = crate::worktree_plan::planned_effects(&shared_plan);
         let mut result = json!({"outcome":"creation_plan","kind":"new","branch":branch,"destination":BytePath::path(&destination),"start_point":base.commit,"approval_required":true});
         if let Some(base_ref) = &base.base_ref {
             result["base_ref"] = json!(base_ref.reference());
@@ -646,167 +536,8 @@ fn resolve(
         if let crate::setup::HookOutput::Captured(output) = hook_output {
             push_hook_diagnostics(&mut response, output);
         }
-        return emit(response, false);
+        emit(response, false)
     }
-    #[allow(unreachable_code)]
-    let mut effects = Vec::new();
-    if let Some(base) = &new_base {
-        if input.fetch {
-            effects.push(fetch_effect(base, !input.dry_run));
-        }
-        let mut details = json!({"branch":branch,"start_point":base.commit});
-        if let Some(base_ref) = &base.base_ref {
-            details["base_ref"] = json!(base_ref.reference());
-        }
-        effects.push(Effect {
-            action: "create_branch".into(),
-            attempted: !input.dry_run,
-            completed: !input.dry_run,
-            details: Some(details),
-        });
-    }
-    effects.push(Effect {
-        action: "create_worktree".into(),
-        attempted: !input.dry_run,
-        completed: !input.dry_run,
-        details: Some(json!({"destination":BytePath::path(&destination)})),
-    });
-    let description_effect = input.description.as_ref().map(|description| {
-        let index = effects.len();
-        effects.push(Effect {
-            action: "set_branch_description".into(),
-            attempted: false,
-            completed: false,
-            details: Some(json!({"branch":branch,"description":description})),
-        });
-        index
-    });
-    let mut diagnostics = Vec::new();
-    if !input.dry_run {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let pending = if config.post_create.is_empty() {
-            None
-        } else {
-            Some(crate::setup::prepare(
-                &repo.common_dir,
-                &branch,
-                &destination,
-            )?)
-        };
-        let creation = if let Some(base) = new_base.as_ref() {
-            git::add_new_worktree(primary, &destination, &branch, &base.commit)
-        } else if local {
-            git::add_existing_worktree(primary, &destination, &branch)
-        } else {
-            git::add_tracking_worktree(
-                primary,
-                &destination,
-                &branch,
-                selected_remote
-                    .as_deref()
-                    .context("remote resolution failed")?,
-            )
-        };
-        if let Err(error) = creation {
-            if let Some(pending) = pending {
-                pending.cancel()?;
-            }
-            return emit_err(
-                command,
-                id,
-                &format!("{command}.creation_failed"),
-                format!("{error:#}"),
-            );
-        }
-        let identity = git::worktree_identity(&destination)?;
-        if let Some(pending) = pending {
-            pending.commit(&repo.common_dir, &identity)?;
-        }
-        if let (Some(description), Some(effect_index)) =
-            (input.description.as_deref(), description_effect)
-        {
-            effects[effect_index].attempted = true;
-            if let Err(error) =
-                git::set_branch_description(&repo.current().path, &branch, description)
-            {
-                let mut response = protocol::failure(
-                    command,
-                    id,
-                    "create.description_failed",
-                    format!(
-                        "the worktree was created, but its branch description could not be set: {error:#}"
-                    ),
-                );
-                response.context =
-                    json!({"branch":branch,"destination":BytePath::path(&destination)});
-                response.effects = effects;
-                response.next_steps.push(protocol::NextStep {
-                    action: "git.set_branch_description".into(),
-                    description: "Set the requested branch description in repository-local Git configuration".into(),
-                    mutation: "config".into(),
-                    requires_human_approval: false,
-                    invocation: json!({
-                        "argv":["git","config","--local","--replace-all",format!("branch.{branch}.description"),description],
-                        "stdin":null,
-                        "working_directory":BytePath::path(&repo.current().path)
-                    }),
-                });
-                if !config.post_create.is_empty() {
-                    response.next_steps.push(protocol::NextStep {
-                        action: format!("{command}.recover_setup"),
-                        description: "After setting the description, retry or explicitly complete setup interactively".into(),
-                        mutation: "setup".into(),
-                        requires_human_approval: true,
-                        invocation: json!({"argv":["pando","switch",branch],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}),
-                    });
-                }
-                return emit(response, true);
-            }
-            effects[effect_index].completed = true;
-        }
-        if !config.post_create.is_empty() {
-            let execution = crate::setup::execute(
-                HookPhase::PostCreate,
-                &config.post_create,
-                &destination,
-                crate::setup::OutputPolicy::Captured,
-            )?;
-            let crate::setup::HookOutput::Captured(output) = execution.output else {
-                unreachable!("captured policy always returns captured output");
-            };
-            diagnostics = output;
-            if execution.outcome != crate::setup::HookOutcome::Success {
-                let mut response = protocol::failure(
-                    command,
-                    id,
-                    &format!("{command}.setup_failed"),
-                    format!(
-                        "post-create hook outcome: {:?}; setup remains incomplete",
-                        execution.outcome
-                    ),
-                );
-                response.context = json!({"branch":branch,"destination":BytePath::path(&destination),"setup":"incomplete"});
-                response.effects = effects;
-                push_hook_diagnostics(&mut response, diagnostics);
-                response.next_steps.push(protocol::NextStep { action:format!("{command}.recover_setup"), description:"Inspect the worktree and retry or explicitly complete setup interactively".into(), mutation:"setup".into(), requires_human_approval:true, invocation:json!({"argv":["pando","switch",branch],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}) });
-                return emit(response, true);
-            }
-            crate::setup::clear(&repo.common_dir, &identity, Some(&branch))?;
-        }
-    }
-    let mut result = json!({"outcome":if input.dry_run{"creation_plan"}else{"created"},"branch":branch,"destination":BytePath::path(&destination),"remote":selected_remote});
-    if let Some(base) = new_base {
-        result["kind"] = json!("new");
-        result["start_point"] = json!(base.commit);
-        if let Some(base_ref) = &base.base_ref {
-            result["base_ref"] = json!(base_ref.reference());
-        }
-    }
-    let mut response = protocol::success(command, id, result, json!({}), effects);
-    push_hook_diagnostics(&mut response, diagnostics);
-    emit(response, false)
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
