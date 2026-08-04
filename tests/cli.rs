@@ -6558,6 +6558,12 @@ fn json_merge_dry_run_reports_policy_and_never_mutates_refs_or_worktrees() {
     git(&repo.main, ["commit", "-m", "configure target"]);
     let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
     let topic_before = git_output(&repo.linked, ["rev-parse", "HEAD"]);
+    let common_dir = PathBuf::from(git_output(
+        &repo.linked,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ));
+    let journal_dir = common_dir.join("pando-state/lifecycle");
+    assert!(!journal_dir.exists());
     let output = json_command(
         &repo.linked,
         &["merge", "--no-remove", "--dry-run", "--output", "json"],
@@ -6571,12 +6577,32 @@ fn json_merge_dry_run_reports_policy_and_never_mutates_refs_or_worktrees() {
     let value = assert_json_pure(&output);
     assert_eq!(value["result"]["outcome"], "dry_run");
     assert_eq!(value["result"]["policy"]["no_remove"], true);
-    assert!(
-        value["effects"]
-            .as_array()
-            .unwrap()
+    assert!(value["context"]["repository_identity"].is_object());
+    assert!(value["context"]["topic_worktree"].is_object());
+    assert!(value["context"]["primary_worktree"].is_object());
+    assert!(value["context"]["source_commit"].is_string());
+    assert!(value["context"]["target_commit"].is_string());
+    let effects = value["effects"].as_array().unwrap();
+    assert_eq!(
+        effects
             .iter()
-            .all(|e| e["attempted"] == false)
+            .map(|effect| effect["action"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "journal",
+            "rebase",
+            "squash",
+            "pre_merge_hooks",
+            "fast_forward_merge",
+            "pre_remove_hooks",
+            "remove_worktree",
+            "destination",
+        ]
+    );
+    assert!(
+        effects
+            .iter()
+            .all(|effect| { effect["attempted"] == false && effect["completed"] == false })
     );
     assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), main_before);
     assert_eq!(
@@ -6584,6 +6610,25 @@ fn json_merge_dry_run_reports_policy_and_never_mutates_refs_or_worktrees() {
         topic_before
     );
     assert!(repo.linked.exists());
+    assert!(!journal_dir.exists());
+
+    let human = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove", "--dry-run"])
+        .current_dir(&repo.linked)
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    assert!(human.stdout.is_empty(), "dry run emitted a destination");
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(stderr.contains("Would merge feature into main"), "{stderr}");
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), main_before);
+    assert_eq!(
+        git_output(&repo.linked, ["rev-parse", "HEAD"]),
+        topic_before
+    );
+    assert!(repo.linked.exists());
+    assert!(!journal_dir.exists());
 }
 
 /// Adds a local bare repository as `origin`, publishes `main`, and records

@@ -15,7 +15,7 @@ use crate::{
     config::{EffectiveConfig, HookPhase},
     git::{self, Repository},
     hash, hook_approval,
-    protocol::BytePath,
+    protocol::{BytePath, Effect},
     render,
     setup::{self, HookOutcome},
     squash, trust, ui,
@@ -25,6 +25,8 @@ use crate::{
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 #[allow(clippy::struct_excessive_bools)] // Protocol facts are intentionally explicit, not state switches.
 pub struct MergeContext {
+    /// Stable Git worktree identity used to bind a plan to its journal.
+    pub repository_identity: BytePath,
     pub source_branch: String,
     pub target_branch: String,
     pub phase: MergePhase,
@@ -69,6 +71,22 @@ pub struct MergePolicy {
     pub no_squash: bool,
 }
 
+impl MergePolicy {
+    #[must_use]
+    pub const fn new(no_rebase: bool, no_remove: bool, no_squash: bool) -> Self {
+        Self {
+            no_rebase,
+            no_remove,
+            no_squash,
+        }
+    }
+
+    #[must_use]
+    pub const fn removes_topic(self, in_place: bool) -> bool {
+        !self.no_remove && !in_place
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum PreflightFailureKind {
     DuplicateTarget,
@@ -111,7 +129,7 @@ fn preflight(kind: PreflightFailureKind, message: impl Into<String>) -> Prefligh
 }
 type PreflightResult<T> = std::result::Result<T, PreflightFailure>;
 
-/// Read-only plan. It deliberately contains no journal path or identity.
+/// Validated, read-only merge plan shared by command adapters.
 #[derive(Debug)]
 pub struct MergePlan {
     pub repository: Repository,
@@ -119,6 +137,8 @@ pub struct MergePlan {
     pub config: EffectiveConfig,
     pub needs_rebase: bool,
     pub squash: squash::SquashPlan,
+    /// Ordered lifecycle effects. Planning never attempts or completes one.
+    pub effects: Vec<Effect>,
 }
 
 /// Performs all lifecycle checks without changing Git, trust, hooks, or the journal.
@@ -126,7 +146,7 @@ pub struct MergePlan {
 /// # Errors
 /// Returns an error for an invalid or blocked lifecycle state.
 #[allow(clippy::too_many_lines)]
-pub fn plan_merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> PreflightResult<MergePlan> {
+pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = git::repository(&cwd)?;
     let primary = repository
@@ -147,9 +167,9 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Prefligh
             )
             .into());
         }
-        if state.no_rebase != no_rebase
-            || state.no_remove != no_remove
-            || state.no_squash != no_squash
+        if state.no_rebase != policy.no_rebase
+            || state.no_remove != policy.no_remove
+            || state.no_squash != policy.no_squash
         {
             return Err(preflight(
                 PreflightFailureKind::PolicyConflict,
@@ -203,7 +223,7 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Prefligh
     let needs_rebase = !cleanup_pending
         && !rebase_active
         && !git::is_ancestor(&repository.current().path, &target, &source)?;
-    if needs_rebase && no_rebase {
+    if needs_rebase && policy.no_rebase {
         return Err(preflight(
             PreflightFailureKind::NotFastForwardable,
             format!(
@@ -213,8 +233,9 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Prefligh
     }
     // Squashing is off the table once the branch has already been collapsed,
     // and during cleanup the integration is behind us entirely.
-    let squash_enabled =
-        !no_squash && !cleanup_pending && !journal.as_ref().is_some_and(|state| state.squashed);
+    let squash_enabled = !policy.no_squash
+        && !cleanup_pending
+        && !journal.as_ref().is_some_and(|state| state.squashed);
     let squash = squash::plan(
         &repository,
         &config,
@@ -254,14 +275,11 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Prefligh
         )
     };
     let context = MergeContext {
+        repository_identity: BytePath::path(&identity),
         source_branch: source,
         target_branch: target,
         phase,
-        policy: MergePolicy {
-            no_rebase,
-            no_remove,
-            no_squash,
-        },
+        policy,
         source_commit,
         target_commit,
         topic_worktree: BytePath::path(&repository.current().path),
@@ -277,13 +295,61 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Prefligh
         pre_merge_hooks_trusted,
         pre_remove_hooks_trusted,
     };
+    let removes = policy.removes_topic(in_place);
+    let effects = planned_merge_effects(&context, &config, needs_rebase, removes);
     Ok(MergePlan {
         repository,
         context,
         config,
         needs_rebase,
         squash,
+        effects,
     })
+}
+
+fn planned_merge_effects(
+    context: &MergeContext,
+    config: &EffectiveConfig,
+    needs_rebase: bool,
+    removes: bool,
+) -> Vec<Effect> {
+    let effect = |action: &str, details| Effect {
+        action: action.into(),
+        attempted: false,
+        completed: false,
+        details: Some(details),
+    };
+    vec![
+        effect(
+            "journal",
+            serde_json::json!({"applicable":!context.journaled}),
+        ),
+        effect(
+            "rebase",
+            serde_json::json!({"applicable":needs_rebase || context.rebase_active}),
+        ),
+        effect(
+            "squash",
+            serde_json::json!({"applicable":context.squashes,"commits":context.squash_commits,"trusted":context.squash_generator_trusted}),
+        ),
+        effect(
+            "pre_merge_hooks",
+            serde_json::json!({"configured":!config.pre_merge.is_empty(),"trusted":context.pre_merge_hooks_trusted}),
+        ),
+        effect(
+            "fast_forward_merge",
+            serde_json::json!({"applicable":!context.cleanup_pending}),
+        ),
+        effect(
+            "pre_remove_hooks",
+            serde_json::json!({"applicable":removes,"trusted":context.pre_remove_hooks_trusted}),
+        ),
+        effect("remove_worktree", serde_json::json!({"applicable":removes})),
+        effect(
+            "destination",
+            serde_json::json!({"applicable":removes,"path":context.primary_worktree}),
+        ),
+    ]
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -423,7 +489,7 @@ pub fn remove_dry_run(branches: &[String], force: bool) -> Result<()> {
 /// # Errors
 /// Returns an error when merge preflight fails or output cannot be rendered.
 pub fn merge_dry_run(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
-    let plan = plan_merge(no_rebase, no_remove, no_squash)?;
+    let plan = plan_merge(MergePolicy::new(no_rebase, no_remove, no_squash))?;
     if plan.squash.applicable {
         ui::info(if plan.squash.commit_count == 0 {
             format!(
@@ -442,7 +508,7 @@ pub fn merge_dry_run(no_rebase: bool, no_remove: bool, no_squash: bool) -> Resul
             " and switch the primary worktree to {}",
             plan.context.target_branch
         )
-    } else if no_remove {
+    } else if plan.context.policy.no_remove {
         " and retain the topic worktree".to_owned()
     } else {
         " and remove the topic worktree".to_owned()
@@ -459,7 +525,10 @@ pub fn merge_dry_run(no_rebase: bool, no_remove: bool, no_squash: bool) -> Resul
 ///
 /// Returns an error when merge preconditions, hooks, Git execution, or cleanup fails.
 pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
-    merge_inner(no_rebase, no_remove, no_squash, MergeIntent::Normal)
+    merge_inner(
+        MergePolicy::new(no_rebase, no_remove, no_squash),
+        MergeIntent::Normal,
+    )
 }
 
 /// Integrates local changes directly into one generated squash commit.
@@ -468,16 +537,14 @@ pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
 ///
 /// Returns an error when merge preconditions, hooks, Git execution, or cleanup fails.
 pub fn merge_yolo(no_rebase: bool, no_remove: bool) -> Result<()> {
-    merge_inner(no_rebase, no_remove, false, MergeIntent::StageAll)
+    merge_inner(
+        MergePolicy::new(no_rebase, no_remove, false),
+        MergeIntent::StageAll,
+    )
 }
 
 #[allow(clippy::too_many_lines)] // This is the explicit lifecycle state-machine boundary.
-fn merge_inner(
-    no_rebase: bool,
-    no_remove: bool,
-    no_squash: bool,
-    intent: MergeIntent,
-) -> Result<()> {
+fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     let yolo_stage_all = matches!(intent, MergeIntent::StageAll);
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = git::repository(&cwd)?;
@@ -510,9 +577,9 @@ fn merge_inner(
                 "a different lifecycle operation is recorded for this topic worktree; inspect its journal before retrying"
             );
         }
-        if existing.no_rebase != no_rebase
-            || existing.no_remove != no_remove
-            || existing.no_squash != no_squash
+        if existing.no_rebase != policy.no_rebase
+            || existing.no_remove != policy.no_remove
+            || existing.no_squash != policy.no_squash
             || existing.yolo_stage_all != yolo_stage_all
         {
             bail!(
@@ -544,7 +611,7 @@ fn merge_inner(
     // Refuse an impossible squash before the journal, the rebase, or any other
     // mutation. Discovering a missing or untrusted generator only after the
     // rebase has landed would leave work to recover for no reason.
-    if !no_squash && !journal.as_ref().is_some_and(|state| state.squashed) {
+    if !policy.no_squash && !journal.as_ref().is_some_and(|state| state.squashed) {
         squash::ensure_ready(
             &repository,
             &config,
@@ -563,9 +630,9 @@ fn merge_inner(
             topic_identity: identity,
             source_branch: source.clone(),
             target_branch: target.clone(),
-            no_rebase,
-            no_remove,
-            no_squash,
+            no_rebase: policy.no_rebase,
+            no_remove: policy.no_remove,
+            no_squash: policy.no_squash,
             yolo_stage_all,
             squashed: false,
             cleanup_pending: false,
@@ -599,7 +666,7 @@ fn merge_inner(
         )?)?;
     }
     if !git::is_ancestor(&repository.current().path, &target, &source)? {
-        if no_rebase {
+        if policy.no_rebase {
             bail!(
                 "the topic is not fast-forwardable onto {target:?}; rerun without --no-rebase to rebase it"
             );
@@ -676,7 +743,7 @@ fn merge_inner(
             );
         }
         if git::head_commit(&repository.current().path)? != refreshed {
-            return merge_inner(no_rebase, no_remove, no_squash, intent);
+            return merge_inner(policy, intent);
         }
         state.validated_source = Some(refreshed.clone());
         state.validated_target = Some(target_commit);

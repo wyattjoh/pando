@@ -1622,8 +1622,9 @@ pub fn merge(
             },
         )
     };
-    let plan = match crate::lifecycle::plan_merge(input.no_rebase, input.no_remove, input.no_squash)
-    {
+    let policy =
+        crate::lifecycle::MergePolicy::new(input.no_rebase, input.no_remove, input.no_squash);
+    let plan = match crate::lifecycle::plan_merge(policy) {
         Ok(plan) => plan,
         Err(e) => {
             let message = e.to_string();
@@ -1673,62 +1674,7 @@ pub fn merge(
             "identity": candidate.identity(),
         });
     }
-    let mut effects = vec![
-        Effect {
-            action: "journal".into(),
-            attempted: false,
-            completed: false,
-            details: Some(json!({"applicable":!plan.context.journaled})),
-        },
-        Effect {
-            action: "rebase".into(),
-            attempted: false,
-            completed: false,
-            details: Some(json!({"applicable":plan.needs_rebase || plan.context.rebase_active})),
-        },
-        Effect {
-            action: "squash".into(),
-            attempted: false,
-            completed: false,
-            details: Some(
-                json!({"applicable":plan.context.squashes,"commits":plan.context.squash_commits,"trusted":plan.context.squash_generator_trusted}),
-            ),
-        },
-        Effect {
-            action: "pre_merge_hooks".into(),
-            attempted: false,
-            completed: false,
-            details: Some(
-                json!({"configured":!plan.config.pre_merge.is_empty(),"trusted":plan.context.pre_merge_hooks_trusted}),
-            ),
-        },
-        Effect {
-            action: "fast_forward_merge".into(),
-            attempted: false,
-            completed: false,
-            details: Some(json!({"applicable":!plan.context.cleanup_pending})),
-        },
-        Effect {
-            action: "pre_remove_hooks".into(),
-            attempted: false,
-            completed: false,
-            details: Some(
-                json!({"applicable":removes,"trusted":plan.context.pre_remove_hooks_trusted}),
-            ),
-        },
-        Effect {
-            action: "remove_worktree".into(),
-            attempted: false,
-            completed: false,
-            details: Some(json!({"applicable":removes})),
-        },
-        Effect {
-            action: "destination".into(),
-            attempted: false,
-            completed: false,
-            details: Some(json!({"applicable":removes,"path":plan.context.primary_worktree})),
-        },
-    ];
+    let mut effects = plan.effects.clone();
     let approval_blocked = if plan.context.cleanup_pending {
         !plan.context.pre_remove_hooks_trusted
     } else {
@@ -1789,8 +1735,7 @@ pub fn merge(
     }
     let output = command.output()?;
     // The human lifecycle remains the single crash-recovery engine; its streams are captured here.
-    let after =
-        crate::lifecycle::plan_merge(input.no_rebase, input.no_remove, input.no_squash).ok();
+    let after = crate::lifecycle::plan_merge(policy).ok();
     let succeeded = output.status.success();
     let after_cleanup = after.as_ref().is_some_and(|p| p.context.cleanup_pending);
     let after_journaled = after.as_ref().is_some_and(|p| p.context.journaled);
