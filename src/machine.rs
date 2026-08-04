@@ -1374,7 +1374,7 @@ pub fn merge(
             protocol::success(
                 "merge",
                 id,
-                json!({"outcome":"retained","destination":outcome.destination}),
+                json!({"outcome":if plan.context.in_place{"in_place"}else{"retained"},"destination":outcome.destination}),
                 json!({"initial":plan.context,"phase":outcome.context.phase}),
                 outcome.effects.clone(),
             )

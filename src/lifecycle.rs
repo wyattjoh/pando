@@ -152,10 +152,11 @@ impl MergePlan {
         self.is_retained_execution() && !self.context.rebase_active && !self.needs_rebase
     }
 
-    /// Whether the shared executor can run this retained-topic lifecycle.
+    /// Whether the shared executor can run this integration lifecycle without
+    /// removing a worktree.
     #[must_use]
     pub const fn is_retained_execution(&self) -> bool {
-        self.context.policy.no_remove && !self.context.in_place && !self.context.cleanup_pending
+        (self.context.policy.no_remove || self.context.in_place) && !self.context.cleanup_pending
     }
 }
 
@@ -1166,7 +1167,8 @@ fn execution_failure(
     }
 }
 
-/// Executes an already validated retained-topic plan, including rebase recovery.
+/// Executes an already validated non-removing plan, including in-place merges
+/// and rebase recovery.
 ///
 /// The journal is established before the first Git mutation, and effects are
 /// updated beside their transitions so adapters never infer progress.
@@ -1186,7 +1188,7 @@ pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> Mer
             diagnostics,
             MergePhase::Planned,
             MergeExecutionFailureKind::StalePlan,
-            "the validated plan is not a retained-topic lifecycle supported by this executor",
+            "the validated plan is not a non-removing lifecycle supported by this executor",
         );
     }
     let current = plan.repository.current();
@@ -1612,8 +1614,11 @@ pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> Mer
     }
 
     if !git::head_commit(&current.path).is_ok_and(|head| head == candidate)
+        || !git::branch_commit(primary, &plan.context.source_branch)
+            .is_ok_and(|head| head == candidate)
         || !git::branch_commit(primary, &plan.context.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
+        || !git::is_ancestor(primary, &plan.context.target_branch, &candidate).unwrap_or(false)
     {
         return execution_failure(
             plan,
@@ -1622,6 +1627,66 @@ pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> Mer
             MergePhase::Validation,
             MergeExecutionFailureKind::StalePlan,
             "repository state changed after validation; retry before fast-forwarding",
+        );
+    }
+    if plan.context.in_place {
+        let switch_result = match mode {
+            MergeExecutionMode::Human => ui::run_timed(
+                true,
+                &format!("Switching to {}...", state.target_branch),
+                &format!("Switched to {}", state.target_branch),
+                &format!("Failed to switch to {}", state.target_branch),
+                |animated| git::switch_branch(primary, &state.target_branch, !animated),
+            )
+            .and_then(|transcript| {
+                report(&transcript)?;
+                Ok(())
+            }),
+            MergeExecutionMode::Captured => {
+                git::switch_branch(primary, &state.target_branch, false).map(|_| ())
+            }
+        };
+        if let Err(error) = switch_result {
+            return execution_failure(
+                plan,
+                effects,
+                diagnostics,
+                MergePhase::Integration,
+                MergeExecutionFailureKind::Integration,
+                error,
+            );
+        }
+    }
+    let refreshed_repository = match git::repository(primary) {
+        Ok(repository) => repository,
+        Err(error) => {
+            return execution_failure(
+                plan,
+                effects,
+                diagnostics,
+                MergePhase::Integration,
+                MergeExecutionFailureKind::StalePlan,
+                error,
+            );
+        }
+    };
+    if !refreshed_repository
+        .worktrees
+        .iter()
+        .any(|worktree| worktree.path == current.path)
+        || git::current_branch(&refreshed_repository).ok() != Some(state.target_branch.as_str())
+        || !git::branch_commit(primary, &state.source_branch).is_ok_and(|head| head == candidate)
+        || !git::branch_commit(primary, &state.target_branch)
+            .is_ok_and(|head| head == plan.context.target_commit)
+        || !git::is_ancestor(primary, &state.target_branch, &candidate).unwrap_or(false)
+    {
+        return execution_failure(
+            plan,
+            effects,
+            diagnostics,
+            MergePhase::Integration,
+            MergeExecutionFailureKind::StalePlan,
+            "source, target, checkout, ancestry, or worktree registration changed before integration; retry",
         );
     }
     mark_effect(&mut effects, "fast_forward_merge", true, false);
@@ -1737,7 +1802,11 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
                 &plan.context.source_branch,
                 &plan.context.target_branch,
                 squashed,
-                "; worktree retained.",
+                if plan.context.in_place {
+                    "; primary worktree switched to target."
+                } else {
+                    "; worktree retained."
+                },
             ));
         }
     }

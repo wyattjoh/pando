@@ -1825,6 +1825,54 @@ fn merge_from_the_primary_worktree_switches_it_back_to_the_target() {
 }
 
 #[test]
+fn json_merge_from_the_primary_worktree_switches_and_retains_the_topic() {
+    let repo = Repository::new();
+    git(&repo.main, ["switch", "-c", "inline-topic"]);
+    fs::write(repo.main.join("inline.txt"), "inline\n").unwrap();
+    git(&repo.main, ["add", "inline.txt"]);
+    git(&repo.main, ["commit", "-m", "inline change"]);
+
+    let output = json_command(
+        &repo.main,
+        &["merge", "--no-squash", "--output", "json"],
+        None,
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = assert_json_pure(&output);
+    assert_eq!(value["result"]["outcome"], "in_place");
+    assert_eq!(value["result"]["destination"], serde_json::Value::Null);
+    for action in ["journal", "pre_merge_hooks", "fast_forward_merge"] {
+        let effect = value["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|effect| effect["action"] == action)
+            .unwrap_or_else(|| panic!("missing {action} effect"));
+        assert_eq!(effect["attempted"], true, "{action}");
+        assert_eq!(effect["completed"], true, "{action}");
+    }
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "--abbrev-ref", "HEAD"]),
+        "main"
+    );
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "inline-topic"]),
+        git_output(&repo.main, ["rev-parse", "main"])
+    );
+    assert_eq!(
+        fs::read_dir(repo.main.join(".git/pando-state/lifecycle"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn merge_from_the_primary_worktree_refuses_on_the_target_branch() {
     let repo = Repository::new();
 
