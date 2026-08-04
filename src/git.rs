@@ -91,6 +91,99 @@ impl GitProcess {
     }
 }
 
+/// Controls whether a lifecycle operation is rendered directly or captured
+/// for an owning adapter. The operation still chooses stdin and environment
+/// policy, so callers cannot accidentally inherit an editor or prompt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LifecycleOutput {
+    Captured,
+    Displayed,
+}
+
+/// Concrete mutation interface for Git operations that change branch history
+/// or the index during commit and merge lifecycles.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LifecycleMutation<'cwd> {
+    cwd: &'cwd Path,
+}
+
+impl<'cwd> LifecycleMutation<'cwd> {
+    #[must_use]
+    pub(crate) fn new(cwd: &'cwd Path) -> Self {
+        Self { cwd }
+    }
+
+    fn run(self, args: &[&str], operation: &str, output: LifecycleOutput) -> Result<String> {
+        run_lifecycle_git(self.cwd, args, operation, output)
+    }
+
+    pub(crate) fn switch_branch(self, branch: &str, output: LifecycleOutput) -> Result<String> {
+        self.run(&["switch", branch], "switch branch", output)
+    }
+
+    pub(crate) fn fast_forward(self, branch: &str, output: LifecycleOutput) -> Result<String> {
+        self.run(
+            &["merge", "--ff-only", branch],
+            "fast-forward merge",
+            output,
+        )
+    }
+
+    pub(crate) fn rebase_onto(self, target: &str, output: LifecycleOutput) -> Result<String> {
+        self.run(&["rebase", target], "rebase", output)
+    }
+
+    pub(crate) fn rebase_onto_autostash(
+        self,
+        target: &str,
+        output: LifecycleOutput,
+    ) -> Result<String> {
+        self.run(&["rebase", "--autostash", target], "rebase", output)
+    }
+
+    pub(crate) fn continue_rebase(self, output: LifecycleOutput) -> Result<String> {
+        self.run(&["rebase", "--continue"], "continue rebase", output)
+    }
+
+    pub(crate) fn rebase_in_progress(self) -> Result<bool> {
+        let git_dir = worktree_identity(self.cwd)
+            .with_context(|| format!("failed to inspect rebase state in {}", self.cwd.display()))?;
+        Ok(git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists())
+    }
+
+    pub(crate) fn stage_all(self) -> Result<()> {
+        let output = run_git(self.cwd, ["add", "--all"])
+            .with_context(|| format!("failed to start git add --all in {}", self.cwd.display()))?;
+        ensure_success(&output, "git add --all")
+            .with_context(|| format!("failed to stage changes in {}", self.cwd.display()))
+    }
+
+    pub(crate) fn reset_soft(self, commit: &str) -> Result<String> {
+        self.run(
+            &["reset", "--soft", commit],
+            "soft reset",
+            LifecycleOutput::Captured,
+        )
+    }
+
+    pub(crate) fn commit_message(self, message: &str) -> Result<String> {
+        commit_message_stdin_impl(self.cwd, message)
+            .with_context(|| format!("failed to create commit in {}", self.cwd.display()))
+    }
+
+    pub(crate) fn commit(self, message: &str) -> Result<()> {
+        commit_impl(self.cwd, message)
+            .with_context(|| format!("failed to create commit in {}", self.cwd.display()))
+    }
+
+    pub(crate) fn commit_captured(self, message: &str) -> Result<Output> {
+        GitProcess::new(self.cwd, ["commit", "-m", message])
+            .disable_terminal_prompt()
+            .captured()
+            .with_context(|| format!("failed to start git commit in {}", self.cwd.display()))
+    }
+}
+
 #[derive(Debug)]
 pub struct Discovery {
     pub worktrees: Vec<Worktree>,
@@ -1020,7 +1113,7 @@ fn fetch_base_ref(cwd: &Path, base: &BaseRef) -> Result<String> {
         cwd,
         &["fetch", &base.remote, &refspec],
         &format!("fetch of {}", base.reference()),
-        false,
+        LifecycleOutput::Captured,
     )
 }
 
@@ -1127,61 +1220,6 @@ fn branch_commit_observed(cwd: &Path, branch: &str) -> Result<String> {
     .with_context(|| format!("failed to resolve branch {branch:?}"))
 }
 
-/// Checks out an existing branch, returning Git's captured output.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot switch to the branch.
-pub fn switch_branch(cwd: &Path, branch: &str, inherit: bool) -> Result<String> {
-    run_lifecycle_git(cwd, &["switch", branch], "branch switch", inherit)
-}
-
-/// Runs a fast-forward-only merge, returning Git's captured output.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot execute the merge.
-pub fn merge_ff_only(cwd: &Path, branch: &str, inherit: bool) -> Result<String> {
-    run_lifecycle_git(
-        cwd,
-        &["merge", "--ff-only", branch],
-        "fast-forward merge",
-        inherit,
-    )
-}
-
-/// Rebases the current branch onto `target`, returning Git's captured output.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot execute the rebase.
-pub fn rebase_onto(cwd: &Path, target: &str, inherit: bool) -> Result<String> {
-    run_lifecycle_git(cwd, &["rebase", target], "rebase", inherit)
-}
-
-/// Rebases the current branch onto `target`, restoring staged changes afterwards.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot execute the rebase or restore its autostash.
-pub fn rebase_onto_autostash(cwd: &Path, target: &str, inherit: bool) -> Result<String> {
-    run_lifecycle_git(cwd, &["rebase", "--autostash", target], "rebase", inherit)
-}
-
-/// Continues an already active rebase, returning Git's captured output.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot continue the rebase.
-pub fn rebase_continue(cwd: &Path, inherit: bool) -> Result<String> {
-    run_lifecycle_git(
-        cwd,
-        &["rebase", "--continue"],
-        "rebase continuation",
-        inherit,
-    )
-}
-
 /// Runs a lifecycle Git operation, capturing its output unless `inherit` is set.
 ///
 /// Captured output is returned on success and folded into the error on failure,
@@ -1190,24 +1228,39 @@ pub fn rebase_continue(cwd: &Path, inherit: bool) -> Result<String> {
 /// outranks `core.editor`, and an inherited `EDITOR=nvim` would otherwise leave
 /// `rebase --continue` drawing a full-screen editor into a pipe. Continuation
 /// therefore reuses the commit message Git already recorded.
-fn run_lifecycle_git(cwd: &Path, args: &[&str], operation: &str, inherit: bool) -> Result<String> {
-    if inherit {
+fn run_lifecycle_git(
+    cwd: &Path,
+    args: &[&str],
+    operation: &str,
+    output: LifecycleOutput,
+) -> Result<String> {
+    if output == LifecycleOutput::Displayed {
         return run_git_inherit(cwd, args, operation).map(|()| String::new());
     }
     let output = GitProcess::new(cwd, args)
         .suppress_editor()
         .captured()
-        .with_context(|| format!("failed to start git {operation}"))?;
+        .with_context(|| {
+            format!(
+                "failed to start git {operation} in repository {}",
+                cwd.display()
+            )
+        })?;
     let transcript = combined_output(&output);
     if output.status.success() {
         return Ok(transcript);
     }
     if transcript.is_empty() {
-        bail!("git {operation} failed with {}", output.status);
+        bail!(
+            "git {operation} failed with {} in repository {}",
+            output.status,
+            cwd.display()
+        );
     }
     bail!(
-        "git {operation} failed with {}\n{transcript}",
-        output.status
+        "git {operation} failed with {} in repository {}\n{transcript}",
+        output.status,
+        cwd.display()
     );
 }
 
@@ -1289,31 +1342,11 @@ fn ancestry_observed(cwd: &Path, ancestor: &str, descendant: &str) -> Result<boo
     }
 }
 
-/// Reports whether a Git rebase is active in this worktree.
-///
-/// # Errors
-///
-/// Returns an error when Git state cannot be inspected.
-pub fn rebase_in_progress(cwd: &Path) -> Result<bool> {
-    let git_dir = worktree_identity(cwd)?;
-    Ok(git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists())
-}
-
 /// Reports whether the invoking worktree has staged, unstaged, or untracked changes.
 ///
 /// # Errors
 ///
 /// Returns an error when Git cannot inspect status.
-/// Stages every tracked and untracked change in the worktree.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot stage the worktree changes.
-pub fn stage_all(cwd: &Path) -> Result<()> {
-    let output = run_git(cwd, ["add", "--all"]).context("failed to start git add --all")?;
-    ensure_success(&output, "git add --all")
-}
-
 /// Reports whether the Git index contains changes relative to `HEAD`.
 ///
 /// # Errors
@@ -1523,10 +1556,6 @@ fn range_patch(
 /// # Errors
 ///
 /// Returns an error when Git cannot move the branch.
-pub fn reset_soft(cwd: &Path, commit: &str, inherit: bool) -> Result<String> {
-    run_lifecycle_git(cwd, &["reset", "--soft", commit], "soft reset", inherit)
-}
-
 /// Creates a commit from the current index, returning Git's captured output.
 ///
 /// Unlike [`commit`], the message arrives on stdin rather than the command
@@ -1540,7 +1569,7 @@ pub fn reset_soft(cwd: &Path, commit: &str, inherit: bool) -> Result<String> {
 ///
 /// Panics if the child's piped stdin is unavailable, which cannot happen for a
 /// process spawned with `Stdio::piped`.
-pub fn commit_message_stdin(cwd: &Path, message: &str) -> Result<String> {
+fn commit_message_stdin_impl(cwd: &Path, message: &str) -> Result<String> {
     let output = GitProcess::new(cwd, ["commit", "--file", "-"])
         .suppress_editor()
         .piped(
@@ -1593,7 +1622,7 @@ fn recent_subjects_observed(cwd: &Path) -> Result<Vec<String>> {
 /// # Errors
 ///
 /// Returns an error when Git cannot create the commit.
-pub fn commit(cwd: &Path, message: &str) -> Result<()> {
+fn commit_impl(cwd: &Path, message: &str) -> Result<()> {
     let output = GitProcess::new(cwd, ["commit", "-m", message])
         .captured_inheriting_stdin()
         .context("failed to start git commit")?;
@@ -1609,13 +1638,6 @@ pub fn commit(cwd: &Path, message: &str) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error only when Git cannot be started.
-pub fn commit_captured(cwd: &Path, message: &str) -> Result<Output> {
-    GitProcess::new(cwd, ["commit", "-m", message])
-        .disable_terminal_prompt()
-        .captured()
-        .context("failed to start git commit")
-}
-
 /// Returns the byte-safe porcelain status used by machine commit planning.
 ///
 /// # Errors
@@ -1835,13 +1857,19 @@ fn open_stderr() -> Result<fs::File> {
 }
 
 fn run_git_inherit(cwd: &Path, args: &[&str], operation: &str) -> Result<()> {
-    let status = GitProcess::new(cwd, args)
-        .displayed()
-        .with_context(|| format!("failed to start git {operation}"))?;
+    let status = GitProcess::new(cwd, args).displayed().with_context(|| {
+        format!(
+            "failed to start git {operation} in repository {}",
+            cwd.display()
+        )
+    })?;
     if status.success() {
         Ok(())
     } else {
-        bail!("git {operation} failed with {status}")
+        bail!(
+            "git {operation} failed with {status} in repository {}",
+            cwd.display()
+        )
     }
 }
 

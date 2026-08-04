@@ -17,7 +17,7 @@ use minijinja::{Environment, context};
 use crate::{
     WorktreeKind,
     config::{EffectiveConfig, EffectiveGeneration, GenerationSource},
-    git::{self, Repository},
+    git::{self, LifecycleMutation, Repository},
     trust,
 };
 
@@ -170,8 +170,8 @@ pub fn ensure_ready(
 /// Returns an error when Git cannot rewrite the branch.
 pub fn collapse(repository: &Repository, target: &str, message: &str) -> Result<()> {
     let cwd = &repository.current().path;
-    git::reset_soft(cwd, target, false)?;
-    git::commit_message_stdin(cwd, message)?;
+    LifecycleMutation::new(cwd).reset_soft(target)?;
+    LifecycleMutation::new(cwd).commit_message(message)?;
     Ok(())
 }
 

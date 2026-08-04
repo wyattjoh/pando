@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use crate::{
     WorktreeKind,
     config::{EffectiveConfig, GenerationSource},
-    git::{self, Repository},
+    git::{self, LifecycleMutation, Repository},
     protocol::{self, Diagnostic, Effect, ErrorBody, NextStep, Response},
     render, trust, ui,
 };
@@ -258,7 +258,7 @@ fn run_human(invocation: &Invocation, source: &MessageSource) -> Result<()> {
             "Staging all changes...",
             "Staged all changes",
             "Failed to stage changes",
-            |_| git::stage_all(&repository.current().path),
+            |_| LifecycleMutation::new(&repository.current().path).stage_all(),
         )?;
     }
     ensure_staged(&repository)?;
@@ -269,7 +269,7 @@ fn run_human(invocation: &Invocation, source: &MessageSource) -> Result<()> {
         "Creating commit...",
         "Created commit",
         "Failed to create commit",
-        |_| git::commit(&repository.current().path, &message.value),
+        |_| LifecycleMutation::new(&repository.current().path).commit(&message.value),
     )?;
     let hash = git::head_commit(&repository.current().path)?;
     let rendered_message = render::commit_message(&message.value);
@@ -378,7 +378,7 @@ fn execute_json(
     }
     if invocation.stage_all {
         outcome.effects.push(effect("git.stage_all", true));
-        if let Err(error) = git::stage_all(&repository.current().path) {
+        if let Err(error) = LifecycleMutation::new(&repository.current().path).stage_all() {
             outcome.result = Err(commit_error("commit.staging_failed", format!("{error:#}")));
             outcome.context = context_for(&repository);
             return outcome;
@@ -642,7 +642,7 @@ fn validate_message(message: &str) -> Result<String> {
 }
 
 fn git_commit_captured(cwd: &Path, message: &str) -> Result<Output> {
-    git::commit_captured(cwd, message)
+    LifecycleMutation::new(cwd).commit_captured(message)
 }
 
 fn diagnostics_for(source: &str, output: &Output) -> Vec<Diagnostic> {

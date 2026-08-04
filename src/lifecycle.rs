@@ -14,7 +14,7 @@ use crate::{
     Condition, Worktree, WorktreeKind,
     branch::Resolver,
     config::{EffectiveConfig, HookPhase},
-    git::{self, Repository},
+    git::{self, LifecycleMutation, LifecycleOutput, Repository},
     hash, hook_approval,
     protocol::{
         self, BytePath, Diagnostic, Effect, ErrorBody, MutationClass, RecoveryAction,
@@ -332,6 +332,14 @@ pub enum MergeExecutionMode {
     Captured,
 }
 
+fn output_for(animated: bool) -> LifecycleOutput {
+    if animated {
+        LifecycleOutput::Captured
+    } else {
+        LifecycleOutput::Displayed
+    }
+}
+
 /// One diagnostic produced by a lifecycle phase.
 #[derive(Clone, Debug)]
 pub struct MergeDiagnostic {
@@ -634,7 +642,7 @@ pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
     let in_place = repository.current().path == *primary;
     let identity = git::worktree_identity(&repository.current().path)?;
     let journal = read_journal(&repository.common_dir, &identity)?;
-    let rebase_active = git::rebase_in_progress(&repository.current().path)?;
+    let rebase_active = LifecycleMutation::new(&repository.current().path).rebase_in_progress()?;
     if rebase_active && journal.is_none() {
         return Err(preflight(
             PreflightFailureKind::LifecycleActive,
@@ -1807,7 +1815,9 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                 "Continuing rebase...",
                 "Continued rebase",
                 "Failed to continue the rebase",
-                |animated| git::rebase_continue(&current.path, !animated),
+                |animated| {
+                    LifecycleMutation::new(&current.path).continue_rebase(output_for(animated))
+                },
             )
             .and_then(|transcript| {
                 report(&transcript)?;
@@ -1818,16 +1828,20 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                 &format!("Rebasing onto {}...", state.target_branch),
                 &format!("Rebased onto {}", state.target_branch),
                 &format!("Failed to rebase onto {}", state.target_branch),
-                |animated| git::rebase_onto(&current.path, &state.target_branch, !animated),
+                |animated| {
+                    LifecycleMutation::new(&current.path)
+                        .rebase_onto(&state.target_branch, output_for(animated))
+                },
             )
             .and_then(|transcript| {
                 report(&transcript)?;
                 Ok(transcript)
             }),
-            (MergeExecutionMode::Captured, true) => git::rebase_continue(&current.path, false),
-            (MergeExecutionMode::Captured, false) => {
-                git::rebase_onto(&current.path, &state.target_branch, false)
+            (MergeExecutionMode::Captured, true) => {
+                LifecycleMutation::new(&current.path).continue_rebase(LifecycleOutput::Captured)
             }
+            (MergeExecutionMode::Captured, false) => LifecycleMutation::new(&current.path)
+                .rebase_onto(&state.target_branch, LifecycleOutput::Captured),
         };
         match rebase_result {
             Ok(transcript) => {
@@ -2130,15 +2144,18 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                 &format!("Switching to {}...", state.target_branch),
                 &format!("Switched to {}", state.target_branch),
                 &format!("Failed to switch to {}", state.target_branch),
-                |animated| git::switch_branch(primary, &state.target_branch, !animated),
+                |animated| {
+                    LifecycleMutation::new(primary)
+                        .switch_branch(&state.target_branch, output_for(animated))
+                },
             )
             .and_then(|transcript| {
                 report(&transcript)?;
                 Ok(())
             }),
-            MergeExecutionMode::Captured => {
-                git::switch_branch(primary, &state.target_branch, false).map(|_| ())
-            }
+            MergeExecutionMode::Captured => LifecycleMutation::new(primary)
+                .switch_branch(&state.target_branch, LifecycleOutput::Captured)
+                .map(|_| ()),
         };
         if let Err(error) = switch_result {
             return execution_failure(
@@ -2190,13 +2207,17 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
             &format!("Merging into {}...", state.target_branch),
             &format!("Merged into {}", state.target_branch),
             &format!("Failed to merge into {}", state.target_branch),
-            |animated| git::merge_ff_only(primary, &state.source_branch, !animated),
+            |animated| {
+                LifecycleMutation::new(primary)
+                    .fast_forward(&state.source_branch, output_for(animated))
+            },
         )
         .and_then(|transcript| {
             report(&transcript)?;
             Ok(transcript)
         }),
-        MergeExecutionMode::Captured => git::merge_ff_only(primary, &state.source_branch, false),
+        MergeExecutionMode::Captured => LifecycleMutation::new(primary)
+            .fast_forward(&state.source_branch, LifecycleOutput::Captured),
     };
     let transcript = match merge_result {
         Ok(transcript) => transcript,
@@ -2509,7 +2530,7 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     let in_place = repository.current().path == *primary;
     let identity = git::worktree_identity(&repository.current().path)?;
     let mut journal = read_journal(&repository.common_dir, &identity)?;
-    let rebase_active = git::rebase_in_progress(&repository.current().path)?;
+    let rebase_active = LifecycleMutation::new(&repository.current().path).rebase_in_progress()?;
     let source = match &journal {
         Some(state) => state.source_branch.clone(),
         None => repository.current_branch()?.to_owned(),
@@ -2608,7 +2629,7 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             "Staging all changes...",
             "Staged all changes",
             "Failed to stage changes",
-            |_| git::stage_all(&repository.current().path),
+            |_| LifecycleMutation::new(&repository.current().path).stage_all(),
         )?;
     }
     if rebase_active {
@@ -2617,7 +2638,10 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             "Continuing rebase...",
             "Continued rebase",
             "Failed to continue the rebase",
-            |animated| git::rebase_continue(&repository.current().path, !animated),
+            |animated| {
+                LifecycleMutation::new(&repository.current().path)
+                    .continue_rebase(output_for(animated))
+            },
         )?)?;
     }
     if !git::is_ancestor(&repository.current().path, &target, &source)? {
@@ -2633,9 +2657,11 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             &format!("Failed to rebase onto {target}"),
             |animated| {
                 if yolo_stage_all {
-                    git::rebase_onto_autostash(&repository.current().path, &target, !animated)
+                    LifecycleMutation::new(&repository.current().path)
+                        .rebase_onto_autostash(&target, output_for(animated))
                 } else {
-                    git::rebase_onto(&repository.current().path, &target, !animated)
+                    LifecycleMutation::new(&repository.current().path)
+                        .rebase_onto(&target, output_for(animated))
                 }
             },
         )?)?;
@@ -2649,7 +2675,7 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             "Staging all changes...",
             "Staged all changes",
             "Failed to stage changes",
-            |_| git::stage_all(&repository.current().path),
+            |_| LifecycleMutation::new(&repository.current().path).stage_all(),
         )?;
     }
     let mut state = journal.context("lifecycle journal was not recorded before integration")?;
@@ -2718,7 +2744,7 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             &format!("Switching to {target}..."),
             &format!("Switched to {target}"),
             &format!("Failed to switch to {target}"),
-            |animated| git::switch_branch(primary, &target, !animated),
+            |animated| LifecycleMutation::new(primary).switch_branch(&target, output_for(animated)),
         )?)?;
     }
     report(&ui::run_timed(
@@ -2726,7 +2752,7 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
         &format!("Merging into {target}..."),
         &format!("Merged into {target}"),
         &format!("Failed to merge into {target}"),
-        |animated| git::merge_ff_only(primary, &source, !animated),
+        |animated| LifecycleMutation::new(primary).fast_forward(&source, output_for(animated)),
     )?)?;
     if in_place {
         remove_journal(&repository.common_dir, &state.topic_identity)?;
@@ -2972,7 +2998,7 @@ fn inspect_removal_state(repository: &Repository, target: &Worktree) -> Result<O
         )
         .into());
     }
-    if state.cleanup_pending || git::rebase_in_progress(&target.path)? {
+    if state.cleanup_pending || LifecycleMutation::new(&target.path).rebase_in_progress()? {
         return Err(preflight(PreflightFailureKind::LifecycleActive, format!("worktree {} has an active lifecycle operation; rerun pando merge to recover it before removal", target.path.display())).into());
     }
     Ok(Some(journal_path(&repository.common_dir, &identity)))
