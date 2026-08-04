@@ -20,7 +20,7 @@ use crate::{
     config::{EffectiveConfig, HookPhase},
     git::{self, Repository},
     hook_approval, render,
-    setup::{self, HookOutcome},
+    setup::{self, HookOutcome, HookOutput, OutputPolicy},
     sorted_row_indices, trust, ui,
 };
 
@@ -1609,7 +1609,14 @@ fn finish_setup(
     branch: Option<&str>,
     destination: &Path,
 ) -> Result<()> {
-    match setup::run_steps(HookPhase::PostCreate, &config.post_create, destination)? {
+    let execution = setup::execute(
+        HookPhase::PostCreate,
+        &config.post_create,
+        destination,
+        OutputPolicy::Streamed,
+    )?;
+    debug_assert_eq!(execution.output, HookOutput::Streamed);
+    match execution.outcome {
         HookOutcome::Success => {
             setup::clear(&repository.common_dir, worktree_identity, branch)?;
             // Creation was a mid-rail step so hook output could follow it; this

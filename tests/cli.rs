@@ -3835,6 +3835,101 @@ fn create_runs_post_create_hooks_like_switch() {
 }
 
 #[test]
+fn human_post_create_hooks_stream_live_and_keep_stdin_interactive() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+    fs::write(
+        repo.main.join(".pando.yaml"),
+        "hooks:\n  post-create:\n    - name: interactive\n      command: 'printf hook-ready; while IFS= read -r value && [ -z \"$value\" ]; do :; done; printf %s \"$value\" > hook-input; pwd -P > hook-cwd'\n",
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["create", "interactive"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let window = Winsize {
+        ws_row: 24,
+        ws_col: 600,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let PtySession {
+        mut child,
+        mut master_writer,
+        mut master_reader,
+    } = start_pty_command(command, window);
+    let (chunks_sender, chunks_receiver) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 1024];
+        loop {
+            match master_reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    let chunk = buffer[..read].to_vec();
+                    bytes.extend_from_slice(&chunk);
+                    let _ = chunks_sender.send(chunk);
+                }
+            }
+        }
+        bytes
+    });
+
+    master_writer.write_all(b"y\r").unwrap();
+    master_writer.flush().unwrap();
+    let mut live_stderr = Vec::new();
+    while !live_stderr
+        .windows(b"hook-ready".len())
+        .any(|bytes| bytes == b"hook-ready")
+    {
+        live_stderr.extend(
+            chunks_receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("hook output was not streamed before it requested input"),
+        );
+    }
+    assert!(child.try_wait().unwrap().is_none());
+    master_writer.write_all(b"typed-value\r").unwrap();
+    master_writer.flush().unwrap();
+    drop(master_writer);
+
+    let output = finish_pty_command(child, reader);
+    let destination = root.join("interactive").canonicalize().unwrap();
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(output.stdout, format!("{}\n", destination.display()));
+    assert_eq!(
+        fs::read_to_string(destination.join("hook-input")).unwrap(),
+        "typed-value"
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("hook-cwd")).unwrap(),
+        format!("{}\n", destination.display())
+    );
+    assert_eq!(
+        output
+            .stderr
+            .matches("Running post-create interactive:")
+            .count(),
+        1,
+        "{}",
+        output.stderr
+    );
+    let approval = output
+        .stderr
+        .find("Trust and run these commands for this repository?")
+        .unwrap();
+    let execution = output
+        .stderr
+        .find("Running post-create interactive:")
+        .unwrap();
+    assert!(approval < execution, "{}", output.stderr);
+}
+
+#[test]
 fn create_refuses_post_create_hooks_without_a_terminal() {
     let repo = Repository::new();
     let root = repo.temp.path().join("created");
