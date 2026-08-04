@@ -447,6 +447,27 @@ struct MergeJournal {
     validated_target: Option<String>,
 }
 
+/// Adapter-neutral facts captured by removal preflight.
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct RemovalContext {
+    pub primary_worktree: BytePath,
+    pub current_worktree: BytePath,
+    pub force: bool,
+    pub targets: Vec<RemovalTargetContext>,
+    pub destination: Option<BytePath>,
+}
+
+/// Stable facts about one ordered removal target.
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct RemovalTargetContext {
+    pub branch: String,
+    pub path: BytePath,
+    pub branch_retained: bool,
+    pub current: bool,
+    pub force: bool,
+    pub pre_remove_hooks: usize,
+}
+
 /// A fully validated, read-only removal plan shared by human and JSON adapters.
 #[derive(Debug)]
 pub struct RemovalPlan {
@@ -455,6 +476,9 @@ pub struct RemovalPlan {
     pub current: PathBuf,
     pub targets: Vec<RemovalTarget>,
     pub force: bool,
+    pub context: RemovalContext,
+    /// Ordered hook, removal, and destination effects. Planning never attempts them.
+    pub effects: Vec<Effect>,
 }
 
 /// One target and the configuration captured during removal preflight.
@@ -463,6 +487,267 @@ pub struct RemovalTarget {
     pub worktree: Worktree,
     pub config: EffectiveConfig,
     pub stale_journal: Option<PathBuf>,
+}
+
+/// Execution state of one ordered target.
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemovalTargetStatus {
+    Completed,
+    Failed,
+    Pending,
+}
+
+/// One target's state after execution stops or completes.
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct RemovalTargetOutcome {
+    pub target: RemovalTargetContext,
+    pub status: RemovalTargetStatus,
+}
+
+/// Typed removal failure at the plan-to-execution seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemovalFailureKind {
+    ApprovalRequired,
+    HookStart,
+    Hook,
+    JournalCleanup,
+    GitStart,
+    Git,
+}
+
+/// Captured output from removal hooks or Git.
+#[derive(Clone, Debug)]
+pub struct RemovalDiagnostic {
+    pub source: &'static str,
+    pub stream: &'static str,
+    pub content: Vec<u8>,
+    pub original_size: usize,
+    pub truncated: bool,
+}
+
+/// Adapter-neutral result of executing a removal plan.
+#[derive(Debug)]
+pub struct RemovalExecutionOutcome {
+    pub context: RemovalContext,
+    pub targets: Vec<RemovalTargetOutcome>,
+    pub effects: Vec<Effect>,
+    pub diagnostics: Vec<RemovalDiagnostic>,
+    pub failure: Option<(RemovalFailureKind, String)>,
+}
+
+impl RemovalExecutionOutcome {
+    #[must_use]
+    pub const fn succeeded(&self) -> bool {
+        self.failure.is_none()
+    }
+}
+
+/// Executes a validated removal plan with bounded captured output.
+///
+/// Approval is evaluated for every target before any hook, journal, or Git
+/// mutation. Execution stops at the first failure and reports completed,
+/// failed, and still-pending targets for a reproducible retry.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn execute_removal(plan: &RemovalPlan) -> RemovalExecutionOutcome {
+    let mut effects = plan.effects.clone();
+    let mut diagnostics = Vec::new();
+    let mut targets = plan
+        .context
+        .targets
+        .iter()
+        .cloned()
+        .map(|target| RemovalTargetOutcome {
+            target,
+            status: RemovalTargetStatus::Pending,
+        })
+        .collect::<Vec<_>>();
+
+    for (index, target) in plan.targets.iter().enumerate() {
+        match hook_approval::evaluate(
+            &plan.repository,
+            HookPhase::PreRemove,
+            &target.config.pre_remove,
+        ) {
+            Ok(hook_approval::Evaluation::ApprovalRequired(_)) => {
+                targets[index].status = RemovalTargetStatus::Failed;
+                return removal_failure(
+                    plan,
+                    targets,
+                    effects,
+                    diagnostics,
+                    RemovalFailureKind::ApprovalRequired,
+                    format!(
+                        "pre-remove hooks for {} require approval",
+                        target.worktree.branch_label()
+                    ),
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                targets[index].status = RemovalTargetStatus::Failed;
+                return removal_failure(
+                    plan,
+                    targets,
+                    effects,
+                    diagnostics,
+                    RemovalFailureKind::ApprovalRequired,
+                    error,
+                );
+            }
+        }
+    }
+
+    for (index, target) in plan.targets.iter().enumerate() {
+        let hook_effect = index * 2;
+        if target.config.pre_remove.is_empty() {
+            effects[hook_effect].completed = true;
+        } else {
+            effects[hook_effect].attempted = true;
+            let execution = match setup::execute(
+                HookPhase::PreRemove,
+                &target.config.pre_remove,
+                &target.worktree.path,
+                setup::OutputPolicy::Captured,
+            ) {
+                Ok(execution) => execution,
+                Err(error) => {
+                    targets[index].status = RemovalTargetStatus::Failed;
+                    return removal_failure(
+                        plan,
+                        targets,
+                        effects,
+                        diagnostics,
+                        RemovalFailureKind::HookStart,
+                        error,
+                    );
+                }
+            };
+            if let setup::HookOutput::Captured(output) = execution.output {
+                for step in output {
+                    for (stream, captured) in [("stdout", step.stdout), ("stderr", step.stderr)] {
+                        if captured.original_size > 0 {
+                            diagnostics.push(RemovalDiagnostic {
+                                source: "hook",
+                                stream,
+                                content: captured.content,
+                                original_size: captured.original_size,
+                                truncated: captured.truncated,
+                            });
+                        }
+                    }
+                }
+            }
+            if execution.outcome != HookOutcome::Success {
+                targets[index].status = RemovalTargetStatus::Failed;
+                return removal_failure(
+                    plan,
+                    targets,
+                    effects,
+                    diagnostics,
+                    RemovalFailureKind::Hook,
+                    format!("pre-remove hook outcome: {:?}", execution.outcome),
+                );
+            }
+            effects[hook_effect].completed = true;
+        }
+
+        if let Some(path) = &target.stale_journal
+            && let Err(error) = fs::remove_file(path)
+        {
+            targets[index].status = RemovalTargetStatus::Failed;
+            return removal_failure(
+                plan,
+                targets,
+                effects,
+                diagnostics,
+                RemovalFailureKind::JournalCleanup,
+                error,
+            );
+        }
+
+        let remove_effect = hook_effect + 1;
+        effects[remove_effect].attempted = true;
+        let output =
+            match git::remove_worktree_captured(&plan.primary, &target.worktree.path, plan.force) {
+                Ok(output) => output,
+                Err(error) => {
+                    targets[index].status = RemovalTargetStatus::Failed;
+                    return removal_failure(
+                        plan,
+                        targets,
+                        effects,
+                        diagnostics,
+                        RemovalFailureKind::GitStart,
+                        error,
+                    );
+                }
+            };
+        push_removal_git_diagnostic(&mut diagnostics, "stdout", &output.stdout);
+        push_removal_git_diagnostic(&mut diagnostics, "stderr", &output.stderr);
+        if !output.status.success() {
+            targets[index].status = RemovalTargetStatus::Failed;
+            return removal_failure(
+                plan,
+                targets,
+                effects,
+                diagnostics,
+                RemovalFailureKind::Git,
+                format!("git worktree remove failed with {}", output.status),
+            );
+        }
+        effects[remove_effect].completed = true;
+        targets[index].status = RemovalTargetStatus::Completed;
+    }
+
+    if plan.context.destination.is_some() {
+        let destination = effects.len() - 1;
+        effects[destination].attempted = true;
+        effects[destination].completed = true;
+    }
+    RemovalExecutionOutcome {
+        context: plan.context.clone(),
+        targets,
+        effects,
+        diagnostics,
+        failure: None,
+    }
+}
+
+fn removal_failure(
+    plan: &RemovalPlan,
+    targets: Vec<RemovalTargetOutcome>,
+    effects: Vec<Effect>,
+    diagnostics: Vec<RemovalDiagnostic>,
+    kind: RemovalFailureKind,
+    error: impl std::fmt::Display,
+) -> RemovalExecutionOutcome {
+    RemovalExecutionOutcome {
+        context: plan.context.clone(),
+        targets,
+        effects,
+        diagnostics,
+        failure: Some((kind, error.to_string())),
+    }
+}
+
+fn push_removal_git_diagnostic(
+    diagnostics: &mut Vec<RemovalDiagnostic>,
+    stream: &'static str,
+    bytes: &[u8],
+) {
+    const LIMIT: usize = 16 * 1024;
+    if bytes.is_empty() {
+        return;
+    }
+    diagnostics.push(RemovalDiagnostic {
+        source: "git",
+        stream,
+        content: bytes[..bytes.len().min(LIMIT)].to_vec(),
+        original_size: bytes.len(),
+        truncated: bytes.len() > LIMIT,
+    });
 }
 
 #[derive(Clone, Copy)]
@@ -1330,12 +1615,64 @@ pub fn plan_remove(branches: &[String], force: bool) -> PreflightResult<RemovalP
     }
     targets.sort_by_key(|target| target.worktree.path == repository.current().path);
     let current = repository.current().path.clone();
+    let target_context = targets
+        .iter()
+        .map(|target| RemovalTargetContext {
+            branch: target.worktree.branch_label().to_owned(),
+            path: BytePath::path(&target.worktree.path),
+            branch_retained: true,
+            current: target.worktree.path == current,
+            force,
+            pre_remove_hooks: target.config.pre_remove.len(),
+        })
+        .collect::<Vec<_>>();
+    let destination = target_context
+        .iter()
+        .any(|target| target.current)
+        .then(|| BytePath::path(&primary));
+    let mut effects = Vec::with_capacity(targets.len() * 2 + usize::from(destination.is_some()));
+    for target in &target_context {
+        let details = Some(serde_json::json!({
+            "branch": target.branch,
+            "path": target.path,
+            "branch_retained": target.branch_retained,
+        }));
+        effects.push(Effect {
+            action: "pre_remove_hooks".into(),
+            attempted: false,
+            completed: false,
+            details: details.clone(),
+        });
+        effects.push(Effect {
+            action: "remove_worktree".into(),
+            attempted: false,
+            completed: false,
+            details,
+        });
+    }
+    if let Some(destination) = &destination {
+        effects.push(Effect {
+            action: "destination".into(),
+            attempted: false,
+            completed: false,
+            details: Some(serde_json::json!({"path": destination})),
+        });
+    }
+    let context = RemovalContext {
+        primary_worktree: BytePath::path(&primary),
+        current_worktree: BytePath::path(&current),
+        force,
+        targets: target_context,
+        destination,
+    };
     Ok(RemovalPlan {
         repository,
         primary,
         current,
         targets,
         force,
+        context,
+        effects,
     })
 }
 
