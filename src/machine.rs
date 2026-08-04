@@ -1,5 +1,5 @@
 use crate::{
-    BaseMode, Condition, Row, Worktree, WorktreeKind,
+    Condition, Row, Worktree, WorktreeKind,
     branch::{self, Classification},
     config::{EffectiveConfig, HookPhase},
     git, hook_approval, install,
@@ -452,7 +452,6 @@ fn resolve(
             format!("{error:#}"),
         );
     }
-    let mut new_base: Option<git::NewBranchBase> = None;
     let selected_remote = if local {
         if input.remote.is_some() {
             return emit_err(
@@ -472,17 +471,6 @@ fn resolve(
                 "remote does not match a fetched remote-tracking branch",
             );
         }
-        if let Err(error) = git::reject_fetch(
-            input.fetch && config.base == BaseMode::Head,
-            git::FETCH_HEAD_BASE,
-        ) {
-            return emit_err(
-                command,
-                id,
-                &format!("{command}.fetch_not_applicable"),
-                format!("{error:#}"),
-            );
-        }
         if intent == Intent::Switch && !input.dry_run {
             return emit_err(
                 "switch",
@@ -491,50 +479,6 @@ fn resolve(
                 "creating a genuinely new branch requires a manual human invocation",
             );
         }
-        // A dry run resolves the same base the real run would, but never fetches.
-        let base = match git::plan_new_branch_base(
-            &repo.current().path,
-            config.base,
-            config.target_branch.as_deref(),
-            input.fetch && !input.dry_run,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                return emit_err(
-                    command,
-                    id,
-                    &format!("{command}.base_unavailable"),
-                    format!("{error:#}"),
-                );
-            }
-        };
-        if intent == Intent::Switch {
-            let mut effects = Vec::new();
-            if input.fetch {
-                effects.push(fetch_effect(&base, false));
-            }
-            effects.push(Effect {
-                action: "create_branch".into(),
-                attempted: false,
-                completed: false,
-                details: None,
-            });
-            effects.push(Effect {
-                action: "create_worktree".into(),
-                attempted: false,
-                completed: false,
-                details: None,
-            });
-            let mut result = json!({"outcome":"creation_plan","kind":"new","branch":branch,"destination":BytePath::path(&destination),"start_point":base.commit,"approval_required":true});
-            if let Some(base_ref) = &base.base_ref {
-                result["base_ref"] = json!(base_ref.reference());
-            }
-            return emit(
-                protocol::success("switch", id, result, json!({}), effects),
-                false,
-            );
-        }
-        new_base = Some(base);
         None
     } else {
         match input.remote {
@@ -588,8 +532,25 @@ fn resolve(
         }
     };
     let selected = selected_remote.as_deref();
-    let shared_plan = match crate::worktree_plan::plan(&repo, intent, &branch, selected)? {
+    let shared_plan = match crate::worktree_plan::plan(
+        &repo,
+        intent,
+        &branch,
+        selected,
+        crate::worktree_plan::FetchIntent::new(input.fetch, input.dry_run),
+    )? {
         Ok(plan) => plan,
+        Err(crate::worktree_plan::Blocker::FetchNotApplicable { message }) => {
+            return emit_err(
+                command,
+                id,
+                &format!("{command}.fetch_not_applicable"),
+                message,
+            );
+        }
+        Err(crate::worktree_plan::Blocker::BaseUnavailable { message }) => {
+            return emit_err(command, id, &format!("{command}.base_unavailable"), message);
+        }
         Err(blocker) => {
             return emit_err(
                 command,
@@ -602,6 +563,36 @@ fn resolve(
     debug_assert_eq!(shared_plan.intent, intent);
     debug_assert_eq!(shared_plan.branch, branch);
     let destination = shared_plan.destination;
+    let new_base = match &shared_plan.source {
+        crate::worktree_plan::Source::New { base } => Some(base.clone()),
+        _ => None,
+    };
+    if let (Intent::Switch, Some(base)) = (intent, new_base.as_ref()) {
+        let mut effects = Vec::new();
+        if input.fetch {
+            effects.push(fetch_effect(base, false));
+        }
+        effects.push(Effect {
+            action: "create_branch".into(),
+            attempted: false,
+            completed: false,
+            details: None,
+        });
+        effects.push(Effect {
+            action: "create_worktree".into(),
+            attempted: false,
+            completed: false,
+            details: None,
+        });
+        let mut result = json!({"outcome":"creation_plan","kind":"new","branch":branch,"destination":BytePath::path(&destination),"start_point":base.commit,"approval_required":true});
+        if let Some(base_ref) = &base.base_ref {
+            result["base_ref"] = json!(base_ref.reference());
+        }
+        return emit(
+            protocol::success("switch", id, result, json!({}), effects),
+            false,
+        );
+    }
     if let hook_approval::Evaluation::ApprovalRequired(candidate) =
         hook_approval::evaluate(&repo, HookPhase::PostCreate, &config.post_create)?
     {

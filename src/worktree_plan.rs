@@ -33,7 +33,33 @@ pub(crate) enum Source {
     Registered(Worktree),
     Local,
     Remote(String),
-    New,
+    New { base: git::NewBranchBase },
+}
+
+/// Whether the caller requested the only network mutation supported by planning.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FetchIntent {
+    None,
+    Refresh,
+    Preview,
+}
+
+impl FetchIntent {
+    pub(crate) const fn new(fetch: bool, dry_run: bool) -> Self {
+        match (fetch, dry_run) {
+            (false, _) => Self::None,
+            (true, false) => Self::Refresh,
+            (true, true) => Self::Preview,
+        }
+    }
+
+    pub(crate) const fn requested(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    const fn refreshes(self) -> bool {
+        matches!(self, Self::Refresh)
+    }
 }
 
 /// A deterministic plan with no terminal or JSON representation concerns.
@@ -59,6 +85,8 @@ pub(crate) enum Blocker {
     IrrelevantRemote,
     UnknownRemote,
     RemoteSelectionRequired { remotes: Vec<String> },
+    FetchNotApplicable { message: String },
+    BaseUnavailable { message: String },
 }
 
 /// Plans the selected source and byte-preserving destination.
@@ -74,9 +102,15 @@ pub(crate) fn plan(
     intent: Intent,
     branch: &str,
     remote: Option<&str>,
+    fetch: FetchIntent,
 ) -> Result<Result<Plan, Blocker>> {
     let classification = branch::classify(repository, branch)?;
     if let Classification::Registered(worktree) = classification {
+        if let Err(error) = git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE) {
+            return Ok(Err(Blocker::FetchNotApplicable {
+                message: format!("{error:#}"),
+            }));
+        }
         if remote.is_some() {
             return Ok(Err(Blocker::IrrelevantRemote));
         }
@@ -131,38 +165,9 @@ pub(crate) fn plan(
         }));
     }
 
-    let source = match classification {
-        Classification::Registered(_) => unreachable!("registered classification returned above"),
-        Classification::Local => {
-            if remote.is_some() {
-                return Ok(Err(Blocker::IrrelevantRemote));
-            }
-            Source::Local
-        }
-        Classification::New => {
-            if remote.is_some() {
-                return Ok(Err(Blocker::UnknownRemote));
-            }
-            Source::New
-        }
-        Classification::Remotes(remotes) => {
-            let selected = match remote {
-                Some(remote) => remotes
-                    .iter()
-                    .find(|candidate| {
-                        candidate.as_str() == remote
-                            || candidate.as_str() == format!("{remote}/{branch}")
-                    })
-                    .cloned()
-                    .ok_or(Blocker::UnknownRemote),
-                None if remotes.len() == 1 => Ok(remotes[0].clone()),
-                None => Err(Blocker::RemoteSelectionRequired { remotes }),
-            };
-            match selected {
-                Ok(remote) => Source::Remote(remote),
-                Err(blocker) => return Ok(Err(blocker)),
-            }
-        }
+    let source = match plan_source(repository, classification, branch, remote, &config, fetch) {
+        Ok(source) => source,
+        Err(blocker) => return Ok(Err(*blocker)),
     };
 
     Ok(Ok(Plan {
@@ -172,4 +177,66 @@ pub(crate) fn plan(
         source,
         config: Some(config),
     }))
+}
+
+fn plan_source(
+    repository: &Repository,
+    classification: Classification,
+    branch: &str,
+    remote: Option<&str>,
+    config: &EffectiveConfig,
+    fetch: FetchIntent,
+) -> Result<Source, Box<Blocker>> {
+    match classification {
+        Classification::Registered(_) => unreachable!("registered classification returned above"),
+        Classification::Local => {
+            reject_fetch(fetch, git::FETCH_LOCAL_BRANCH)?;
+            if remote.is_some() {
+                return Err(Box::new(Blocker::IrrelevantRemote));
+            }
+            Ok(Source::Local)
+        }
+        Classification::New => {
+            if remote.is_some() {
+                return Err(Box::new(Blocker::UnknownRemote));
+            }
+            if fetch.requested() && config.base == crate::BaseMode::Head {
+                reject_fetch(fetch, git::FETCH_HEAD_BASE)?;
+            }
+            git::plan_new_branch_base(
+                &repository.current().path,
+                config.base,
+                config.target_branch.as_deref(),
+                fetch.refreshes(),
+            )
+            .map(|base| Source::New { base })
+            .map_err(|error| {
+                Box::new(Blocker::BaseUnavailable {
+                    message: format!("{error:#}"),
+                })
+            })
+        }
+        Classification::Remotes(remotes) => {
+            reject_fetch(fetch, git::FETCH_REMOTE_BRANCH)?;
+            match remote {
+                Some(remote) => remotes
+                    .into_iter()
+                    .find(|candidate| {
+                        candidate == remote || candidate == &format!("{remote}/{branch}")
+                    })
+                    .map(Source::Remote)
+                    .ok_or_else(|| Box::new(Blocker::UnknownRemote)),
+                None if remotes.len() == 1 => Ok(Source::Remote(remotes[0].clone())),
+                None => Err(Box::new(Blocker::RemoteSelectionRequired { remotes })),
+            }
+        }
+    }
+}
+
+fn reject_fetch(fetch: FetchIntent, because: &str) -> Result<(), Box<Blocker>> {
+    git::reject_fetch(fetch.requested(), because).map_err(|error| {
+        Box::new(Blocker::FetchNotApplicable {
+            message: format!("{error:#}"),
+        })
+    })
 }
