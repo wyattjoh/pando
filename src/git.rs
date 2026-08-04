@@ -459,8 +459,8 @@ impl<'cwd> HistoryObservation<'cwd> {
         head_commit_observed(self.cwd)
     }
 
-    fn branch_commit(self, branch: &str) -> Result<String> {
-        branch_commit_observed(self.cwd, branch)
+    pub(crate) fn commit(self, reference: &str) -> Result<String> {
+        branch_commit_observed(self.cwd, reference)
     }
 
     fn is_ancestor(self, ancestor: &str, descendant: &str) -> Result<bool> {
@@ -571,8 +571,21 @@ impl<'cwd> RepositoryObservation<'cwd> {
         repository_with_branches_observed(self.cwd)
     }
 
+    /// Resolves a worktree's stable administrative identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git cannot resolve the worktree's administrative directory.
+    pub(crate) fn worktree_identity(self) -> Result<PathBuf> {
+        worktree_identity(self.cwd)
+    }
+
     pub(crate) fn is_ignored(self, path: &Path) -> Result<bool> {
         is_ignored(self.cwd, path)
+    }
+
+    pub(crate) fn would_be_ignored(self, path: &Path) -> Result<bool> {
+        would_be_ignored(self.cwd, path)
     }
 
     pub(crate) fn resolve_path(path: &Path) -> Result<PathBuf> {
@@ -1430,7 +1443,7 @@ fn head_commit_observed(cwd: &Path) -> Result<String> {
 ///
 /// Returns an error when Git cannot resolve the branch.
 pub fn branch_commit(cwd: &Path, branch: &str) -> Result<String> {
-    HistoryObservation::new(cwd).branch_commit(branch)
+    HistoryObservation::new(cwd).commit(branch)
 }
 
 fn branch_commit_observed(cwd: &Path, branch: &str) -> Result<String> {

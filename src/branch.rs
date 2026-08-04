@@ -154,6 +154,10 @@ impl<'repository> Resolver<'repository> {
         git::validate_branch(self.cwd(), branch)
     }
 
+    pub(crate) fn reject_registered_fetch(requested: bool) -> Result<()> {
+        reject_fetch(requested, FETCH_REGISTERED_WORKTREE)
+    }
+
     pub(crate) fn classify(self, branch: &str) -> Result<Classification> {
         classify(self.repository, branch)
     }

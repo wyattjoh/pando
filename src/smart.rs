@@ -15,9 +15,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     Row, SortMode, Worktree, WorktreeKind,
-    branch::{self, FETCH_REGISTERED_WORKTREE, Resolver},
+    branch::Resolver,
     config::{EffectiveConfig, HookPhase},
-    git::{self, Repository, RepositoryObservation},
+    git::{self, HistoryObservation, Repository, RepositoryObservation},
     hook_approval,
     read_only::{self, PropertyValue},
     render,
@@ -488,12 +488,11 @@ fn pick_and_switch(
     match selection {
         PickerChoice::Worktree(identity) => {
             let chosen = choices[identity];
-            let branch = match &chosen.kind {
-                WorktreeKind::Branch(branch) => Some(branch.as_str()),
-                _ => None,
-            };
-            branch::reject_fetch(fetch.requested(), FETCH_REGISTERED_WORKTREE)?;
-            enter_existing(repository, &chosen.path, branch)
+            if let WorktreeKind::Branch(branch) = &chosen.kind {
+                return resolve_and_switch(repository, branch, Intent::Switch, fetch);
+            }
+            Resolver::reject_registered_fetch(fetch.requested())?;
+            enter_existing(repository, &chosen.path, None)
         }
         PickerChoice::Branch(branch) => {
             resolve_and_switch(repository, &branch, Intent::Switch, fetch)
@@ -1302,13 +1301,6 @@ fn resolve_and_switch(
             Err(PlanBlocker::ApprovalRequired { candidate, .. }) => {
                 approve_planned_hooks(repository, &candidate)?;
             }
-            Err(
-                blocker @ (PlanBlocker::RegisteredForCreate { .. }
-                | PlanBlocker::DestinationUnavailable { .. }),
-            ) => {
-                branch::reject_fetch(fetch.requested(), FETCH_REGISTERED_WORKTREE)?;
-                return Err(render_plan_blocker(branch, blocker));
-            }
             Err(blocker) => return Err(render_plan_blocker(branch, blocker)),
         }
     };
@@ -1499,7 +1491,10 @@ fn new_branch_source(repository: &Repository, base: &git::NewBranchBase) -> Stri
 }
 
 fn warn_dirty_source(repository: &Repository) -> Result<()> {
-    if git::is_dirty(&repository.current().path)? {
+    if HistoryObservation::new(&repository.current().path)
+        .status()?
+        .is_dirty()
+    {
         ui::warning("Staged, unstaged, and untracked changes remain in the source worktree.")?;
     }
     Ok(())
@@ -1507,7 +1502,7 @@ fn warn_dirty_source(repository: &Repository) -> Result<()> {
 
 fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&str>) -> Result<()> {
     let destination = resolved_path(destination)?;
-    let worktree_identity = git::worktree_identity(&destination)?;
+    let worktree_identity = RepositoryObservation::new(&destination).worktree_identity()?;
     if !setup::is_incomplete(&repository.common_dir, &worktree_identity, branch)? {
         return write_destination(&destination);
     }

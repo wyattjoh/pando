@@ -19,7 +19,7 @@ use crate::{
         FETCH_REMOTE_BRANCH, Resolver,
     },
     config::EffectiveConfig,
-    git::{self, Repository},
+    git::{self, HistoryObservation, Repository, RepositoryObservation},
     hook_approval,
     setup::{self, HookOutcome, HookOutput, OutputPolicy},
 };
@@ -427,10 +427,11 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
             );
         }
     };
+    let observation = RepositoryObservation::new(&current_dir);
     let repository = match if input.branch.is_none() && intent == Intent::Switch {
-        git::repository_with_metadata(&current_dir)
+        observation.repository_with_metadata()
     } else {
-        git::repository(&current_dir)
+        observation.repository()
     } {
         Ok(repository) => repository,
         Err(error) => return failure("repository.invalid", format!("{error:#}")),
@@ -832,7 +833,7 @@ pub(crate) fn plan(
             }));
         }
     };
-    let destination = match git::canonical_or_normalized(&root.join(branch)) {
+    let destination = match RepositoryObservation::resolve_path(&root.join(branch)) {
         Ok(destination) => destination,
         Err(error) => {
             return Ok(Err(Blocker::DestinationInvalid {
@@ -843,7 +844,9 @@ pub(crate) fn plan(
     if destination.exists() || repository.worktrees.iter().any(|w| w.path == destination) {
         return Ok(Err(Blocker::DestinationCollision));
     }
-    if destination.starts_with(primary) && !git::would_be_ignored(primary, &destination)? {
+    if destination.starts_with(primary)
+        && !RepositoryObservation::new(primary).would_be_ignored(&destination)?
+    {
         let relative = destination.strip_prefix(primary).unwrap_or(&destination);
         let first = relative
             .components()
@@ -937,7 +940,8 @@ fn plan_source(
                 return Err(Box::new(Blocker::IrrelevantRemote));
             }
             Ok(Source::Local {
-                commit: git::branch_commit(&repository.current().path, branch)
+                commit: HistoryObservation::new(&repository.current().path)
+                    .commit(branch)
                     .expect("classified local branch must remain resolvable while planning"),
             })
         }
@@ -970,13 +974,15 @@ fn plan_source(
                         candidate == remote || candidate == &format!("{remote}/{branch}")
                     })
                     .map(|reference| Source::Remote {
-                        commit: git::branch_commit(&repository.current().path, &reference)
+                        commit: HistoryObservation::new(&repository.current().path)
+                            .commit(&reference)
                             .expect("classified remote ref must remain resolvable while planning"),
                         reference,
                     })
                     .ok_or_else(|| Box::new(Blocker::UnknownRemote)),
                 None if remotes.len() == 1 => Ok(Source::Remote {
-                    commit: git::branch_commit(&repository.current().path, &remotes[0])
+                    commit: HistoryObservation::new(&repository.current().path)
+                        .commit(&remotes[0])
                         .expect("classified remote ref must remain resolvable while planning"),
                     reference: remotes[0].clone(),
                 }),
@@ -1084,7 +1090,8 @@ pub(crate) fn execute(
         effects[index].completed = true;
     }
     let identity = if let Some(pending) = pending {
-        let identity = git::worktree_identity(&plan.destination)
+        let identity = RepositoryObservation::new(&plan.destination)
+            .worktree_identity()
             .map_err(|error| failure("setup_failed", error, effects.clone(), true, true))?;
         pending
             .commit(&repository.common_dir, &identity)
@@ -1173,7 +1180,7 @@ fn revalidate(repository: &Repository, plan: &Plan) -> Result<()> {
         Source::New { base } => return revalidate_new(repository, base),
         Source::Registered(_) => return Ok(()),
     };
-    let actual = git::branch_commit(&repository.current().path, reference)?;
+    let actual = HistoryObservation::new(&repository.current().path).commit(reference)?;
     if actual != *expected {
         bail!("planned source {reference:?} moved from {expected} to {actual}");
     }
@@ -1183,7 +1190,7 @@ fn revalidate(repository: &Repository, plan: &Plan) -> Result<()> {
 fn revalidate_new(repository: &Repository, base: &git::NewBranchBase) -> Result<()> {
     let actual = match &base.base_ref {
         Some(base_ref) => Resolver::new(repository).base_commit(base_ref)?,
-        None => git::head_commit(&repository.current().path)?,
+        None => HistoryObservation::new(&repository.current().path).head_commit()?,
     };
     if actual != base.commit {
         bail!(
