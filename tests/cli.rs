@@ -8277,7 +8277,7 @@ fn stray_complete_env_var_does_not_trigger_completion() {
 /// Drives the `_PANDO_COMPLETE=zsh` protocol and returns candidate values
 /// with any `:help` suffix stripped. The final entry of `words` is the word
 /// being completed, matching how zsh passes `${words[@]}`.
-fn complete(dir: &Path, words: &[&str]) -> Vec<String> {
+fn complete_lines(dir: &Path, words: &[&str]) -> Vec<String> {
     let index = words.len() - 1;
     let mut command = Command::cargo_bin("pando").unwrap();
     let output = command
@@ -8298,10 +8298,16 @@ fn complete(dir: &Path, words: &[&str]) -> Vec<String> {
         .unwrap()
         .lines()
         .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn complete(dir: &Path, words: &[&str]) -> Vec<String> {
+    complete_lines(dir, words)
+        .into_iter()
         .map(|line| {
             line.split_once(':')
-                .map_or(line, |(value, _)| value)
-                .to_owned()
+                .map_or(line.clone(), |(value, _)| value.to_owned())
         })
         .collect()
 }
@@ -8365,6 +8371,13 @@ fn switch_deduplicates_a_short_name_offered_by_multiple_remotes() {
         candidates.iter().filter(|value| *value == "shared").count(),
         1,
         "a branch offered by two remotes must appear once: {candidates:?}"
+    );
+    let lines = complete_lines(&repo.main, &["pando", "switch", ""]);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "shared:remote branch (origin, upstream)"),
+        "the deduplicated candidate must retain every matching remote: {lines:?}"
     );
 }
 
@@ -8484,6 +8497,52 @@ fn branch_completion_filters_by_prefix() {
 
     assert!(candidates.iter().any(|value| value == "feat-a"));
     assert!(!candidates.iter().any(|value| value == "other"));
+}
+
+#[test]
+fn branch_completion_discovery_failure_is_silent_and_read_only() {
+    let repo = Repository::new();
+    let fake_bin = repo.temp.path().join("completion-bin");
+    let call_log = repo.temp.path().join("completion-calls");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALL_LOG\"\ncase \"$*\" in\n  *refs/remotes*) exit 71 ;;\nesac\nexec \"$REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .env("_PANDO_COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .env("PATH", &fake_bin)
+        .env("REAL_GIT", find_executable("git"))
+        .env("CALL_LOG", &call_log)
+        .arg("--")
+        .args(["pando", "create", ""])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !stdout.lines().any(|line| matches!(
+            line.split_once(':').map_or(line, |(value, _)| value),
+            "main" | "feature"
+        )),
+        "branch facts must be all-or-nothing after discovery fails: {stdout}"
+    );
+    assert!(output.stderr.is_empty());
+    let calls = fs::read_to_string(call_log).unwrap();
+    for mutation in ["fetch", "worktree add", "config", "reset", "checkout"] {
+        assert!(
+            !calls.lines().any(|call| call.starts_with(mutation)),
+            "completion invoked mutation {mutation:?}: {calls}"
+        );
+    }
 }
 
 #[test]

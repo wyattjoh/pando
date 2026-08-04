@@ -5,15 +5,11 @@
 //! malformed ref must yield an empty list rather than an error or any output on
 //! stderr.
 
-use std::{
-    collections::{HashMap, HashSet},
-    env,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashSet, env, path::PathBuf};
 
 use clap_complete::CompletionCandidate;
 
-use crate::{WorktreeKind, git};
+use crate::{WorktreeKind, branch::Facts, git};
 
 /// Branches `switch` accepts: every local branch, plus remote-tracking refs that
 /// no local branch already shadows.
@@ -22,9 +18,14 @@ pub fn switch_candidates() -> Vec<CompletionCandidate> {
     let Some(cwd) = cwd() else {
         return Vec::new();
     };
-    let local = local_branches(&cwd);
-    let mut candidates: Vec<_> = local.iter().map(CompletionCandidate::new).collect();
-    candidates.extend(remote_candidates(&cwd, &local));
+    let Ok(repository) = git::repository(&cwd) else {
+        return Vec::new();
+    };
+    let Ok(facts) = Facts::discover(&repository) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<_> = facts.local().iter().map(CompletionCandidate::new).collect();
+    candidates.extend(remote_candidates(&facts));
     candidates
 }
 
@@ -35,17 +36,23 @@ pub fn create_candidates() -> Vec<CompletionCandidate> {
     let Some(cwd) = cwd() else {
         return Vec::new();
     };
-    let registered = registered_branches(&cwd);
-    let local = local_branches(&cwd);
-    let mut candidates: Vec<_> = local
+    let Ok(repository) = git::repository(&cwd) else {
+        return Vec::new();
+    };
+    let Ok(facts) = Facts::discover(&repository) else {
+        return Vec::new();
+    };
+    let registered = registered_branches(&facts);
+    let mut candidates: Vec<_> = facts
+        .local()
         .iter()
         .filter(|branch| !registered.contains(*branch))
         .map(CompletionCandidate::new)
         .collect();
     // Remote refs need no separate exclusion: a registered branch is always a
     // local branch, so `remote_candidates` has already dropped any remote ref
-    // shadowed by one. Note it is passed the unfiltered local list.
-    candidates.extend(remote_candidates(&cwd, &local));
+    // shadowed by one.
+    candidates.extend(remote_candidates(&facts));
     candidates
 }
 
@@ -82,28 +89,16 @@ fn cwd() -> Option<PathBuf> {
     env::current_dir().ok()
 }
 
-fn local_branches(cwd: &Path) -> Vec<String> {
-    git::discover_branches(cwd).map_or_else(
-        |_| Vec::new(),
-        |branches| branches.into_iter().map(|record| record.branch).collect(),
-    )
-}
-
 /// Every branch with a registered worktree, primary included.
-fn registered_branches(cwd: &Path) -> HashSet<String> {
-    git::repository(cwd).map_or_else(
-        |_| HashSet::new(),
-        |repository| {
-            repository
-                .worktrees
-                .iter()
-                .filter_map(|worktree| match &worktree.kind {
-                    WorktreeKind::Branch(branch) => Some(branch.clone()),
-                    _ => None,
-                })
-                .collect()
-        },
-    )
+fn registered_branches(facts: &Facts<'_>) -> HashSet<String> {
+    facts
+        .registered()
+        .iter()
+        .filter_map(|worktree| match &worktree.kind {
+            WorktreeKind::Branch(branch) => Some(branch.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Remote-tracking refs whose short name has no local branch of the same name.
@@ -119,34 +114,22 @@ fn registered_branches(cwd: &Path) -> HashSet<String> {
 /// The remote is surfaced in the help text instead; ambiguity across multiple
 /// remotes offering the same branch is already handled by the interactive
 /// `choose_remote` prompt in the resolver, so this only needs to dedupe.
-fn remote_candidates(cwd: &Path, local: &[String]) -> Vec<CompletionCandidate> {
-    let local: HashSet<&str> = local.iter().map(String::as_str).collect();
-    git::discover_remote_branches(cwd).map_or_else(
-        |_| Vec::new(),
-        |remotes| {
-            let mut remotes_by_short: HashMap<String, Vec<String>> = HashMap::new();
-            for remote in remotes {
-                let Some((remote_name, short)) = remote.split_once('/') else {
-                    continue;
-                };
-                if local.contains(short) {
-                    continue;
-                }
-                remotes_by_short
-                    .entry(short.to_string())
-                    .or_default()
-                    .push(remote_name.to_string());
-            }
-            let mut candidates: Vec<_> = remotes_by_short
-                .into_iter()
-                .map(|(short, mut remote_names)| {
-                    remote_names.sort();
-                    let help = format!("remote branch ({})", remote_names.join(", "));
-                    CompletionCandidate::new(short).help(Some(help.into()))
-                })
+fn remote_candidates(facts: &Facts<'_>) -> Vec<CompletionCandidate> {
+    let local: HashSet<&str> = facts.local().iter().map(String::as_str).collect();
+    let mut candidates: Vec<_> = facts
+        .remotes()
+        .iter()
+        .filter(|(short, _)| !local.contains(short.as_str()))
+        .map(|(short, remotes)| {
+            let mut remote_names: Vec<_> = remotes
+                .iter()
+                .filter_map(|remote| remote.split_once('/').map(|(name, _)| name))
                 .collect();
-            candidates.sort_by(|a, b| a.get_value().cmp(b.get_value()));
-            candidates
-        },
-    )
+            remote_names.sort_unstable();
+            let help = format!("remote branch ({})", remote_names.join(", "));
+            CompletionCandidate::new(short).help(Some(help.into()))
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.get_value().cmp(b.get_value()));
+    candidates
 }
