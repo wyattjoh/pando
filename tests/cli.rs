@@ -2995,6 +2995,33 @@ fn trust_json(repo: &Repository, xdg: &TempDir, subcommand: &str) -> std::proces
 }
 
 #[test]
+fn pr_request_mode_preserves_request_id_on_version_failure() {
+    let repo = Repository::new();
+    let mut child = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["pr", "create", "--input-output", "json"])
+        .current_dir(&repo.linked)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            br#"{"schema_version":2,"request_id":"pr-40","input":{"title":"T","description":"B"}}"#,
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    let response = assert_json_pure(&output);
+    assert_eq!(response["request_id"], "pr-40");
+    assert_eq!(response["error"]["code"], "json.unsupported_schema_version");
+}
+
+#[test]
 fn pr_missing_metadata_generator_fails_before_dirty_worktree_handling() {
     let repo = Repository::new();
     let xdg = tempfile::tempdir().unwrap();
@@ -3076,6 +3103,10 @@ case "$1" in
         fi
         ;;
       create)
+        if test -n "$TEA_FAIL_CREATE"; then
+          printf '%s\n' "$TEA_FAIL_CREATE" >&2
+          exit 1
+        fi
         touch "$TEA_CREATED"
         printf '# #42 Add tea provider (open)\n'
         ;;
@@ -3133,7 +3164,10 @@ fn pr_recovers_created_url_when_tea_does_not_print_it() {
     );
     assert_eq!(response["result"]["provider"], "tea");
     assert_eq!(response["result"]["draft"], true);
+    assert_eq!(response["effects"][0]["action"], "git.push");
     assert_eq!(response["effects"][0]["completed"], true);
+    assert_eq!(response["effects"][1]["action"], "provider.create");
+    assert_eq!(response["effects"][1]["completed"], true);
     assert_eq!(
         git_output(&bare, ["rev-parse", "refs/heads/feature"]),
         git_output(&repo.linked, ["rev-parse", "HEAD"])
@@ -3156,6 +3190,57 @@ fn pr_recovers_created_url_when_tea_does_not_print_it() {
             "pulls create --login forge --remote origin --base main --head feature --title WIP: Add tea provider --description Support Gitea and Forgejo."
         ),
         "{invocations}"
+    );
+}
+
+#[test]
+fn pr_provider_failure_reports_completed_push_and_bounded_diagnostic() {
+    let repo = Repository::new();
+    let bare = configure_test_forge_remote(&repo);
+    let (fake_bin, capture, created) = fake_tea_without_created_url(&repo);
+    let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
+    let xdg = tempfile::tempdir().unwrap();
+    let failure = "provider refused creation ".repeat(5_000);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args([
+            "--output",
+            "json",
+            "pr",
+            "create",
+            "--title",
+            "Typed outcome",
+            "--description",
+            "Exercise provider failure diagnostics.",
+        ])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("PATH", path)
+        .env("TEA_CAPTURE", &capture)
+        .env("TEA_CREATED", &created)
+        .env("TEA_FAIL_CREATE", failure)
+        .output()
+        .unwrap();
+
+    let response = assert_json_pure(&output);
+    assert_eq!(response["error"]["code"], "provider.creation_failed");
+    assert_eq!(response["effects"][0]["action"], "git.push");
+    assert_eq!(response["effects"][0]["completed"], true);
+    assert_eq!(response["effects"][1]["action"], "provider.create");
+    assert_eq!(response["effects"][1]["attempted"], true);
+    assert_eq!(response["effects"][1]["completed"], false);
+    assert_eq!(response["diagnostics"][0]["source"], "provider.create");
+    assert!(
+        response["diagnostics"][0]["original_size"]
+            .as_u64()
+            .unwrap()
+            > 64 * 1024
+    );
+    assert_eq!(response["diagnostics"][0]["truncated"], true);
+    assert_eq!(
+        git_output(&bare, ["rev-parse", "refs/heads/feature"]),
+        git_output(&repo.linked, ["rev-parse", "HEAD"])
     );
 }
 

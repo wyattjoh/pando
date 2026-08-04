@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use minijinja::{Environment, context};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     borrow::Cow,
     env, fs,
@@ -16,14 +17,18 @@ use console::{Key, Term};
 
 mod provider;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize, JsonSchema, Serialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
     #[default]
     Draft,
     Ready,
 }
-#[derive(Debug, Deserialize, Serialize)]
+pub type RequestEnvelope = crate::protocol::Request<Request>;
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     #[serde(default)]
@@ -39,6 +44,64 @@ pub struct Request {
     #[serde(default)]
     pub remote: Option<String>,
 }
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum PrResult {
+    DryRun {
+        provider: String,
+        base_repository: String,
+        base_branch: String,
+        head_repository: String,
+        head_branch: String,
+        remote: String,
+        draft: bool,
+        push: Value,
+    },
+    Created {
+        url: String,
+        provider: String,
+        base_repository: String,
+        base_branch: String,
+        head_repository: String,
+        head_branch: String,
+        remote: String,
+        draft: bool,
+    },
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct PrContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dirty: Option<bool>,
+}
+
+#[derive(Clone, Debug)]
+struct PrFailure {
+    code: &'static str,
+    message: String,
+}
+
+impl From<PrFailure> for crate::protocol::ErrorBody {
+    fn from(value: PrFailure) -> Self {
+        Self {
+            code: value.code.into(),
+            message: value.message,
+        }
+    }
+}
+
+struct PrOutcome {
+    result: std::result::Result<PrResult, PrFailure>,
+    context: PrContext,
+    effects: Vec<crate::protocol::Effect>,
+    diagnostics: Vec<crate::protocol::Diagnostic>,
+    recovery: Vec<crate::protocol::RecoveryAction<Value>>,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub struct Invocation {
     pub title: Option<String>,
@@ -63,54 +126,84 @@ pub fn run(inv: Invocation) -> Result<()> {
         );
     }
     if inv.yolo {
-        return execute(
-            inv.title,
-            body_optional(inv.description, inv.description_file)?,
-            Status::Ready,
+        return render_outcome(
+            execute(
+                inv.title,
+                body_optional(inv.description, inv.description_file)?,
+                Status::Ready,
+                false,
+                true,
+                true,
+                false,
+                inv.remote,
+            )?,
             false,
-            true,
-            true,
-            false,
-            inv.remote,
+            None,
         );
     }
     if inv.request_mode {
         if inv.title.is_some() || inv.description.is_some() || inv.description_file.is_some() {
             bail!("json.invalid_request: command options are forbidden with --input-output json");
         }
-        let mut input = String::new();
-        io::stdin().read_to_string(&mut input)?;
-        let r: Request = serde_json::from_str(&input).context("invalid JSON request")?;
+        let request: RequestEnvelope = crate::protocol::read_request()
+            .map_err(|message| anyhow::anyhow!("json.invalid_request: {message}"))?;
+        if request.schema_version != crate::protocol::SCHEMA_VERSION {
+            return render_failure(
+                "json.unsupported_schema_version",
+                &format!(
+                    "unsupported schema version {}; supported versions: [1]",
+                    request.schema_version
+                ),
+                request.request_id,
+            );
+        }
+        let r = request.input;
         if r.description_file.as_deref() == Some("-") {
-            bail!("stdin is not allowed as a description-file source");
+            return render_failure(
+                "json.invalid_request",
+                "stdin is not allowed as a description-file source",
+                request.request_id,
+            );
         }
         if r.description.is_some() && r.description_file.is_some() {
-            bail!("json.invalid_request: description conflicts with description_file");
+            return render_failure(
+                "json.invalid_request",
+                "description conflicts with description_file",
+                request.request_id,
+            );
         }
-        return execute(
-            r.title,
-            body_optional(r.description, r.description_file)?,
-            r.status,
-            r.dry_run,
-            inv.force,
-            false,
+        return render_outcome(
+            execute(
+                r.title,
+                body_optional(r.description, r.description_file)?,
+                r.status,
+                r.dry_run,
+                inv.force,
+                false,
+                true,
+                r.remote,
+            )?,
             true,
-            r.remote,
+            request.request_id,
         );
     }
     let title = inv.title;
     if inv.description.is_some() && inv.description_file.is_some() {
         bail!("--description conflicts with --description-file");
     }
-    execute(
-        title,
-        body_optional(inv.description, inv.description_file)?,
-        inv.status,
-        inv.dry_run,
-        inv.force,
-        false,
+    render_outcome(
+        execute(
+            title,
+            body_optional(inv.description, inv.description_file)?,
+            inv.status,
+            inv.dry_run,
+            inv.force,
+            false,
+            inv.json,
+            inv.remote,
+        )?,
         inv.json,
-        inv.remote,
+        None,
     )
 }
 fn body_optional(desc: Option<String>, file: Option<String>) -> Result<Option<String>> {
@@ -141,7 +234,7 @@ fn execute(
     yolo: bool,
     json_mode: bool,
     requested_remote: Option<String>,
-) -> Result<()> {
+) -> Result<PrOutcome> {
     let cwd = env::current_dir()?;
     let repo = crate::git::repository(&cwd)?;
     let config = crate::config::EffectiveConfig::load(&repo)?;
@@ -295,7 +388,7 @@ fn execute(
         }
     }
     if metadata_required && !dry {
-        let (generated_title, generated_body) = generate_metadata(
+        let (generated_title, generated_body) = match generate_metadata(
             &repo,
             &config,
             &base,
@@ -303,7 +396,25 @@ fn execute(
             title.as_deref(),
             body.as_deref(),
             json_mode,
-        )?;
+        ) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return Ok(PrOutcome {
+                    result: Err(PrFailure {
+                        code: "pr.generator_failed",
+                        message: format!("{error:#}"),
+                    }),
+                    context: PrContext {
+                        base: Some(base),
+                        head: Some(head),
+                        dirty: None,
+                    },
+                    effects: Vec::new(),
+                    diagnostics: diagnostic("pr.generator", &format!("{error:#}")),
+                    recovery: Vec::new(),
+                });
+            }
+        };
         if title.is_none() {
             title = Some(generated_title);
         }
@@ -339,12 +450,29 @@ fn execute(
         "completed": false,
     });
     if dry {
-        return output(
-            json_mode,
-            json!({"outcome":"dry_run","provider":provider_name,"base_repository":base_repo,"base_branch":base,"head_repository":head_owner,"head_branch":head,"remote":push_plan.remote,"draft":status==Status::Draft,"push":push_effect}),
-            None,
-            None,
-        );
+        return Ok(PrOutcome {
+            result: Ok(PrResult::DryRun {
+                provider: provider_name.into(),
+                base_repository: base_repo,
+                base_branch: base.clone(),
+                head_repository: head_owner,
+                head_branch: head.clone(),
+                remote: push_plan.remote,
+                draft: status == Status::Draft,
+                push: push_effect,
+            }),
+            context: PrContext {
+                base: Some(base),
+                head: Some(head),
+                dirty: None,
+            },
+            effects: vec![
+                effect("git.push", false, false, None),
+                effect("provider.create", false, false, None),
+            ],
+            diagnostics: Vec::new(),
+            recovery: Vec::new(),
+        });
     }
     let push = crate::ui::run_timed(
         !json_mode,
@@ -354,19 +482,20 @@ fn execute(
         |animated| crate::git::push(&repo.current().path, &push_plan, !json_mode && !animated),
     );
     if let Err(error) = push {
-        if json_mode {
-            crate::protocol::write(&crate::protocol::Response {
-                schema_version: crate::protocol::SCHEMA_VERSION,
-                request_id: None,
-                command: "pr.create".into(), status: "error", result: None,
-                error: Some(crate::protocol::ErrorBody { code: "git.push_failed".into(), message: format!("{error:#}") }),
-                context: json!({"base":base,"head":head}),
-                effects: vec![crate::protocol::Effect { action: "git.push".into(), attempted: true, completed: false, details: Some(push_effect) }],
-                diagnostics: vec![], next_steps: vec![crate::protocol::NextStep { action: "retry".into(), description: "Fix the remote or branch divergence, then retry PR creation. Do not force-push.".into(), mutation: "none".into(), requires_human_approval: true, invocation: json!({"command":"pando pr create"}) }],
-            })?;
-            return Ok(());
-        }
-        return fail(false, "git.push_failed", &format!("{error:#}"));
+        return Ok(PrOutcome {
+            result: Err(PrFailure {
+                code: "git.push_failed",
+                message: format!("{error:#}"),
+            }),
+            context: PrContext {
+                base: Some(base),
+                head: Some(head),
+                dirty: None,
+            },
+            effects: vec![effect("git.push", true, false, Some(push_effect))],
+            diagnostics: diagnostic("git.push", &format!("{error:#}")),
+            recovery: vec![retry_action()],
+        });
     }
     let create_request = provider::CreatePullRequest {
         target: pull_request_ref,
@@ -388,19 +517,49 @@ fn execute(
     );
     let url = match creation {
         Ok(url) => url,
-        Err(error) => return fail(json_mode, "provider.creation_failed", &format!("{error:#}")),
+        Err(error) => {
+            return Ok(PrOutcome {
+                result: Err(PrFailure {
+                    code: "provider.creation_failed",
+                    message: format!("{error:#}"),
+                }),
+                context: PrContext {
+                    base: Some(base),
+                    head: Some(head),
+                    dirty: None,
+                },
+                effects: vec![
+                    effect("git.push", true, true, Some(push_effect)),
+                    effect("provider.create", true, false, None),
+                ],
+                diagnostics: diagnostic("provider.create", &format!("{error:#}")),
+                recovery: vec![retry_action()],
+            });
+        }
     };
-    output(
-        json_mode,
-        json!({"outcome":"created","url":url,"provider":provider_name,"base_repository":base_repo,"base_branch":base,"head_repository":head_owner,"head_branch":head,"remote":push_plan.remote,"draft":status==Status::Draft}),
-        Some(url),
-        Some(crate::protocol::Effect {
-            action: "git.push".into(),
-            attempted: true,
-            completed: true,
-            details: Some(push_effect),
+    Ok(PrOutcome {
+        result: Ok(PrResult::Created {
+            url: url.clone(),
+            provider: provider_name.into(),
+            base_repository: base_repo,
+            base_branch: base.clone(),
+            head_repository: head_owner,
+            head_branch: head.clone(),
+            remote: push_plan.remote,
+            draft: status == Status::Draft,
         }),
-    )
+        context: PrContext {
+            base: Some(base),
+            head: Some(head),
+            dirty: None,
+        },
+        effects: vec![
+            effect("git.push", true, true, Some(push_effect)),
+            effect("provider.create", true, true, None),
+        ],
+        diagnostics: Vec::new(),
+        recovery: Vec::new(),
+    })
 }
 #[allow(clippy::too_many_arguments)]
 fn generate_metadata(
@@ -713,65 +872,116 @@ fn parse_metadata(value: &str) -> Result<(String, String)> {
     Ok((title.to_owned(), description))
 }
 
-fn output(
-    j: bool,
-    r: serde_json::Value,
-    h: Option<String>,
-    effect: Option<crate::protocol::Effect>,
-) -> Result<()> {
-    if j {
-        crate::protocol::write(&crate::protocol::success(
-            "pr.create",
-            None,
-            r,
-            json!({}),
-            effect.into_iter().collect(),
-        ))?;
-    } else {
-        crate::ui::finish(
-            crate::ui::success_style()
-                .apply_to(h.unwrap_or_else(|| "Pull request dry-run complete.".to_owned())),
-        )?;
-    }
-    Ok(())
-}
-fn fail_dirty(json_mode: bool) -> Result<()> {
-    let message = "topic worktree is dirty; commit changes first or retry with --yolo";
+fn render_outcome(outcome: PrOutcome, json_mode: bool, request_id: Option<String>) -> Result<()> {
     if json_mode {
-        crate::protocol::write(&crate::protocol::Response {
-            schema_version: crate::protocol::SCHEMA_VERSION,
-            request_id: None,
-            command: "pr.create".into(),
-            status: "error",
-            result: None,
-            error: Some(crate::protocol::ErrorBody {
-                code: "repository.dirty".into(),
-                message: message.into(),
-            }),
-            context: json!({"dirty": true}),
-            effects: vec![],
-            diagnostics: vec![],
-            next_steps: vec![crate::protocol::NextStep {
-                action: "retry".into(),
-                description:
-                    "Commit the changes, or retry with --yolo to commit them automatically.".into(),
-                mutation: "none".into(),
-                requires_human_approval: true,
-                invocation: json!({"command": "pando pr create --yolo"}),
-            }],
-        })?;
+        let response = crate::protocol::adapt(
+            "pr.create",
+            request_id,
+            outcome.result,
+            outcome.context,
+            outcome.effects,
+            outcome.diagnostics,
+            outcome.recovery,
+        )?;
+        crate::protocol::write(&response)?;
         return Ok(());
     }
-    bail!("repository.dirty: {message}")
+    match outcome.result {
+        Ok(PrResult::Created { url, .. }) => {
+            crate::ui::finish(crate::ui::success_style().apply_to(url))
+        }
+        Ok(PrResult::DryRun { .. }) => {
+            crate::ui::finish(crate::ui::success_style().apply_to("Pull request dry-run complete."))
+        }
+        Err(error) => bail!("{}: {}", error.code, error.message),
+    }
 }
 
-fn fail(j: bool, c: &str, m: &str) -> Result<()> {
-    if j {
-        crate::protocol::write(&crate::protocol::failure("pr.create", None, c, m))?;
-        Ok(())
-    } else {
-        bail!("{c}: {m}")
+fn render_failure(code: &'static str, message: &str, request_id: Option<String>) -> Result<()> {
+    render_outcome(
+        failure(code, message, PrContext::default()),
+        true,
+        request_id,
+    )
+}
+
+fn effect(
+    action: &str,
+    attempted: bool,
+    completed: bool,
+    details: Option<Value>,
+) -> crate::protocol::Effect {
+    crate::protocol::Effect {
+        action: action.into(),
+        attempted,
+        completed,
+        details,
     }
+}
+
+fn diagnostic(source: &str, content: &str) -> Vec<crate::protocol::Diagnostic> {
+    const LIMIT: usize = 64 * 1024;
+    let bytes = content.as_bytes();
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    vec![crate::protocol::Diagnostic {
+        source: source.into(),
+        stream: "stderr".into(),
+        content: String::from_utf8_lossy(&bytes[..bytes.len().min(LIMIT)]).into_owned(),
+        original_size: bytes.len(),
+        truncated: bytes.len() > LIMIT,
+    }]
+}
+
+fn retry_action() -> crate::protocol::RecoveryAction<Value> {
+    crate::protocol::RecoveryAction {
+        action: "retry".into(),
+        description: "Fix the failed publication step, then retry PR creation. Do not force-push."
+            .into(),
+        mutation: crate::protocol::MutationClass::None,
+        requires_human_approval: true,
+        invocation: crate::protocol::RecoveryInvocation {
+            argv: vec!["pando".into(), "pr".into(), "create".into()],
+            stdin: None,
+            working_directory: None,
+        },
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn fail_dirty(_json_mode: bool) -> Result<PrOutcome> {
+    Ok(PrOutcome {
+        result: Err(PrFailure {
+            code: "repository.dirty",
+            message: "topic worktree is dirty; commit changes first or retry with --yolo".into(),
+        }),
+        context: PrContext {
+            dirty: Some(true),
+            ..PrContext::default()
+        },
+        effects: Vec::new(),
+        diagnostics: Vec::new(),
+        recovery: vec![retry_action()],
+    })
+}
+
+fn failure(code: &'static str, message: &str, context: PrContext) -> PrOutcome {
+    PrOutcome {
+        result: Err(PrFailure {
+            code,
+            message: message.into(),
+        }),
+        context,
+        effects: Vec::new(),
+        diagnostics: Vec::new(),
+        recovery: Vec::new(),
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn fail(_json_mode: bool, code: &'static str, message: &str) -> Result<PrOutcome> {
+    Ok(failure(code, message, PrContext::default()))
 }
 
 #[cfg(test)]
