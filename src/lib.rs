@@ -16,6 +16,7 @@ pub mod smart;
 pub mod squash;
 pub mod trust;
 pub mod ui;
+pub(crate) mod worktree_plan;
 
 use std::{cmp::Ordering, os::unix::ffi::OsStrExt, path::PathBuf};
 

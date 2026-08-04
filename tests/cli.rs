@@ -6713,6 +6713,15 @@ fn json_create_classifies_local_remote_ambiguous_and_new_branches() {
         value["context"]["remotes"],
         serde_json::json!(["origin/ambiguous", "upstream/ambiguous"])
     );
+    assert_eq!(value["next_steps"][0]["action"], "retry_with_remote");
+    assert_eq!(
+        value["next_steps"][0]["invocation"]["stdin"]["input"]["remote"],
+        "origin/ambiguous"
+    );
+    assert_eq!(
+        value["next_steps"][1]["invocation"]["stdin"]["input"]["remote"],
+        "upstream/ambiguous"
+    );
 }
 
 #[test]

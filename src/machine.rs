@@ -6,6 +6,7 @@ use crate::{
     protocol::{self, BytePath, Effect, EmptyInput},
     setup::{self, HookOutput, OutputPolicy},
     smart, trust,
+    worktree_plan::Intent,
 };
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
@@ -206,24 +207,6 @@ fn fetch_effect(base: &git::NewBranchBase, attempted: bool) -> Effect {
             .base_ref
             .as_ref()
             .map(|base_ref| json!({"ref": base_ref.reference()})),
-    }
-}
-
-/// Distinguishes the two JSON entry points that share worktree resolution.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Intent {
-    /// Enter an existing worktree; refuse to create a genuinely new branch.
-    Switch,
-    /// Refuse an existing worktree; create a genuinely new branch unattended.
-    Create,
-}
-
-impl Intent {
-    const fn id(self) -> &'static str {
-        match self {
-            Self::Switch => "switch",
-            Self::Create => "create",
-        }
     }
 }
 
@@ -582,10 +565,43 @@ fn resolve(
                     "multiple fetched remotes match this branch",
                 );
                 response.context = json!({"branch":branch,"remotes":remotes});
+                for remote in &remotes {
+                    response.next_steps.push(protocol::NextStep {
+                        action: "retry_with_remote".into(),
+                        description: format!("Retry with {remote} as the selected source"),
+                        mutation: "none".into(),
+                        requires_human_approval: false,
+                        invocation: json!({
+                            "argv": ["pando", "--input-output", "json", command],
+                            "stdin": {"schema_version": 1, "input": {
+                                "branch": branch,
+                                "remote": remote,
+                                "fetch": input.fetch,
+                                "dry_run": input.dry_run,
+                            }},
+                            "working_directory": BytePath::path(&repo.current().path),
+                        }),
+                    });
+                }
                 return emit(response, true);
             }
         }
     };
+    let selected = selected_remote.as_deref();
+    let shared_plan = match crate::worktree_plan::plan(&repo, intent, &branch, selected)? {
+        Ok(plan) => plan,
+        Err(blocker) => {
+            return emit_err(
+                command,
+                id,
+                &format!("{command}.destination_invalid"),
+                format!("worktree plan blocked: {blocker:?}"),
+            );
+        }
+    };
+    debug_assert_eq!(shared_plan.intent, intent);
+    debug_assert_eq!(shared_plan.branch, branch);
+    let destination = shared_plan.destination;
     if let hook_approval::Evaluation::ApprovalRequired(candidate) =
         hook_approval::evaluate(&repo, HookPhase::PostCreate, &config.post_create)?
     {
