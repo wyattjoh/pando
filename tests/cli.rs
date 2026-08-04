@@ -1671,6 +1671,37 @@ fn merge_reports_a_rebase_conflict_and_resumes_without_an_editor() {
 }
 
 #[test]
+fn json_merge_executes_the_lifecycle_without_a_nested_pando_process() {
+    let repo = Repository::new();
+    commit_three_on_topic(&repo);
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        "merge:\n  generation:\n    command: 'pid=$PPID; count=0; while [ \"$pid\" != \"$PANDO_TEST_CALLER_PID\" ] && [ \"$pid\" -gt 1 ]; do case \"$(ps -o comm= -p $pid)\" in *pando*) count=$((count + 1));; esac; pid=$(ps -o ppid= -p $pid | tr -d '' ''); done; [ \"$count\" -eq 1 ] || exit 97; printf \"feat: squash topic\\n\"'\n",
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--output", "json"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .env("PANDO_TEST_CALLER_PID", std::process::id().to_string());
+    let output = command.output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value = assert_json_pure(&output);
+    assert_eq!(value["result"]["outcome"], "removed");
+    assert!(!repo.linked.exists());
+}
+
+#[test]
 fn json_merge_reports_incomplete_rebase_effect_and_resumes_pinned_journal() {
     let repo = Repository::new();
     fs::write(repo.main.join("README.md"), "main version\n").unwrap();

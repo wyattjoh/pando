@@ -1034,7 +1034,7 @@ pub fn merge(
             "identity": candidate.identity(),
         });
     }
-    let mut effects = plan.effects.clone();
+    let effects = plan.effects.clone();
     let approval_blocked = if plan.context.cleanup_pending {
         !plan.context.pre_remove_hooks_trusted
     } else {
@@ -1079,152 +1079,48 @@ pub fn merge(
         });
         return emit(response, true);
     }
-    if plan.is_retained_execution() {
-        let outcome =
-            crate::lifecycle::execute_merge(&plan, crate::lifecycle::MergeExecutionMode::Captured);
-        let mut response = if let Some((kind, message)) = &outcome.failure {
-            let code = match kind {
-                crate::lifecycle::MergeExecutionFailureKind::StalePlan => "merge.stale_plan",
-                crate::lifecycle::MergeExecutionFailureKind::Rebase => "merge.rebase_conflict",
-                crate::lifecycle::MergeExecutionFailureKind::Squash
-                | crate::lifecycle::MergeExecutionFailureKind::Integration => {
-                    "merge.execution_failed"
-                }
-                crate::lifecycle::MergeExecutionFailureKind::Validation => {
-                    "merge.validation_failed"
-                }
-                crate::lifecycle::MergeExecutionFailureKind::Cleanup => "merge.cleanup_failed",
-                crate::lifecycle::MergeExecutionFailureKind::Removal => "merge.remove_failed",
-                crate::lifecycle::MergeExecutionFailureKind::Journal
-                | crate::lifecycle::MergeExecutionFailureKind::JournalCleanup => {
-                    "merge.journal_failed"
-                }
-            };
-            protocol::failure("merge", id, code, message)
-        } else {
-            protocol::success(
-                "merge",
-                id,
-                json!({"outcome":if plan.context.in_place{"in_place"}else{"retained"},"destination":outcome.destination}),
-                json!({"initial":plan.context,"phase":outcome.context.phase}),
-                outcome.effects.clone(),
-            )
+    let outcome =
+        crate::lifecycle::execute_merge(&plan, crate::lifecycle::MergeExecutionMode::Captured);
+    let failed = outcome.failure.is_some();
+    let mut response = if let Some((kind, message)) = &outcome.failure {
+        let code = match kind {
+            crate::lifecycle::MergeExecutionFailureKind::StalePlan => "merge.stale_plan",
+            crate::lifecycle::MergeExecutionFailureKind::Rebase => "merge.rebase_conflict",
+            crate::lifecycle::MergeExecutionFailureKind::Squash
+            | crate::lifecycle::MergeExecutionFailureKind::Integration => "merge.execution_failed",
+            crate::lifecycle::MergeExecutionFailureKind::Validation => "merge.validation_failed",
+            crate::lifecycle::MergeExecutionFailureKind::Cleanup => "merge.cleanup_failed",
+            crate::lifecycle::MergeExecutionFailureKind::Removal => "merge.remove_failed",
+            crate::lifecycle::MergeExecutionFailureKind::Journal
+            | crate::lifecycle::MergeExecutionFailureKind::JournalCleanup => "merge.journal_failed",
         };
-        if outcome.failure.is_some() {
-            response.context = serde_json::to_value(&outcome.context)?;
-            response.effects = outcome.effects;
-            response.next_steps.push(protocol::NextStep { action:"merge.retry".into(), description:"Resolve the reported blocker and retry the journaled lifecycle with its pinned policy".into(), mutation:"repository".into(), requires_human_approval:false, invocation:json!({"argv":["pando","merge","--input-output","json"],"stdin":{"schema_version":1,"input":input},"working_directory":plan.context.topic_worktree}) });
-        }
-        for diagnostic in outcome.diagnostics {
-            push_diagnostic(
-                &mut response,
-                diagnostic.phase,
-                diagnostic.stream,
-                &diagnostic.content,
-            );
-        }
-        let failed = outcome.failure.is_some();
-        return emit(response, failed);
-    }
-    let mut command = std::process::Command::new(std::env::current_exe()?);
-    command
-        .arg("merge")
-        .current_dir(&plan.repository.current().path)
-        .stdin(std::process::Stdio::null());
-    if input.no_rebase {
-        command.arg("--no-rebase");
-    }
-    if input.no_remove {
-        command.arg("--no-remove");
-    }
-    if input.no_squash {
-        command.arg("--no-squash");
-    }
-    let output = command.output()?;
-    // The human lifecycle remains the single crash-recovery engine; its streams are captured here.
-    let after = crate::lifecycle::plan_merge(policy).ok();
-    let succeeded = output.status.success();
-    let after_cleanup = after.as_ref().is_some_and(|p| p.context.cleanup_pending);
-    let after_journaled = after.as_ref().is_some_and(|p| p.context.journaled);
-    let after_rebase = after.as_ref().is_some_and(|p| p.context.rebase_active);
-    // Record only phases proven by the journal/repository state. A subprocess failure
-    // must never make later lifecycle phases look attempted merely because it exited.
-    // The topic no longer needs squashing once it has been collapsed, so a
-    // replanned context that dropped the flag proves the phase ran.
-    let after_squashed = after.as_ref().is_some_and(|p| !p.context.squashes);
-    let rebase_applicable = plan.needs_rebase || plan.context.rebase_active;
-    let integration_attempted = !plan.context.cleanup_pending && !after_rebase;
-    let cleanup_attempted = removes && (plan.context.cleanup_pending || after_cleanup || succeeded);
-    // Address effects by action rather than index; the phase list grows.
-    let mut record = |action: &str, attempted: bool, completed: bool| {
-        let effect = effects
-            .iter_mut()
-            .find(|effect| effect.action == action)
-            .expect("every recorded phase is planned above");
-        effect.attempted = attempted;
-        effect.completed = completed;
-    };
-    record(
-        "journal",
-        !plan.context.journaled,
-        plan.context.journaled || after_journaled || succeeded,
-    );
-    record(
-        "rebase",
-        rebase_applicable,
-        rebase_applicable && !after_rebase && (after_cleanup || succeeded),
-    );
-    record(
-        "squash",
-        plan.context.squashes && integration_attempted,
-        plan.context.squashes && (after_squashed || after_cleanup || succeeded),
-    );
-    record(
-        "pre_merge_hooks",
-        integration_attempted,
-        after_cleanup || succeeded,
-    );
-    record(
-        "fast_forward_merge",
-        integration_attempted,
-        after_cleanup || succeeded,
-    );
-    record("pre_remove_hooks", cleanup_attempted, removes && succeeded);
-    record("remove_worktree", cleanup_attempted, removes && succeeded);
-    record("destination", removes && succeeded, removes && succeeded);
-    let mut response = if succeeded {
+        let mut response = protocol::failure("merge", id, code, message);
+        response.context = serde_json::to_value(&outcome.context)?;
+        response.effects.clone_from(&outcome.effects);
+        let working_directory = outcome
+            .destination
+            .as_ref()
+            .unwrap_or(&plan.context.topic_worktree);
+        response.next_steps.push(protocol::NextStep { action:"merge.retry".into(), description:"Resolve the reported blocker and retry the journaled lifecycle with its pinned policy".into(), mutation:"repository".into(), requires_human_approval:false, invocation:json!({"argv":["pando","merge","--input-output","json"],"stdin":{"schema_version":1,"input":input},"working_directory":working_directory}) });
+        response
+    } else {
         protocol::success(
             "merge",
             id,
-            json!({"outcome":if removes{"removed"}else{"retained"},"destination":if removes{Some(&plan.context.primary_worktree)}else{None}}),
-            json!({"initial":plan.context,"phase":"complete"}),
-            effects,
+            json!({"outcome":if plan.context.in_place{"in_place"}else if removes{"removed"}else{"retained"},"destination":outcome.destination}),
+            json!({"initial":plan.context,"phase":outcome.context.phase}),
+            outcome.effects.clone(),
         )
-    } else {
-        let mut r = protocol::failure(
-            "merge",
-            id,
-            if after.as_ref().is_some_and(|p| p.context.rebase_active) {
-                "merge.rebase_conflict"
-            } else if after.as_ref().is_some_and(|p| p.context.cleanup_pending) {
-                "merge.cleanup_failed"
-            } else {
-                "merge.execution_failed"
-            },
-            "merge lifecycle did not complete",
-        );
-        r.context = after.as_ref().map_or(context, |p| {
-            serde_json::to_value(&p.context).unwrap_or_default()
-        });
-        r.effects = effects;
-        r
     };
-    push_diagnostic(&mut response, "merge", "stdout", &output.stdout);
-    push_diagnostic(&mut response, "merge", "stderr", &output.stderr);
-    if !output.status.success() {
-        response.next_steps.push(protocol::NextStep { action:"merge.retry".into(), description:"Resolve the reported blocker and retry the journaled lifecycle with its pinned policy".into(), mutation:"repository".into(), requires_human_approval:false, invocation:json!({"argv":["pando","merge","--input-output","json"],"stdin":{"schema_version":1,"input":input},"working_directory":plan.context.topic_worktree}) });
+    for diagnostic in outcome.diagnostics {
+        push_diagnostic(
+            &mut response,
+            diagnostic.phase,
+            diagnostic.stream,
+            &diagnostic.content,
+        );
     }
-    emit(response, !output.status.success())
+    emit(response, failed)
 }
 
 /// Emits a structured installation plan or approval requirement.
