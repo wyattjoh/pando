@@ -5997,6 +5997,70 @@ fn json_create_refuses_a_registered_branch_and_points_at_switch() {
 }
 
 #[test]
+fn json_create_classifies_local_remote_ambiguous_and_new_branches() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("topics");
+    let xdg = config_home_with_root(&root);
+    git(&repo.main, ["branch", "local-only"]);
+    git(&repo.main, ["remote", "add", "origin", "unused-origin"]);
+    git(&repo.main, ["remote", "add", "upstream", "unused-upstream"]);
+    git(
+        &repo.main,
+        ["update-ref", "refs/remotes/origin/remote-only", "HEAD"],
+    );
+    git(
+        &repo.main,
+        ["update-ref", "refs/remotes/origin/ambiguous", "HEAD"],
+    );
+    git(
+        &repo.main,
+        ["update-ref", "refs/remotes/upstream/ambiguous", "HEAD"],
+    );
+
+    let local = create_command(
+        &repo,
+        &xdg,
+        &["create", "local-only", "--dry-run", "--output", "json"],
+    );
+    assert!(local.status.success());
+    let value = assert_json_pure(&local);
+    assert_eq!(value["result"]["outcome"], "creation_plan");
+    assert_eq!(value["result"]["remote"], serde_json::Value::Null);
+
+    let remote = create_command(
+        &repo,
+        &xdg,
+        &["create", "remote-only", "--dry-run", "--output", "json"],
+    );
+    assert!(remote.status.success());
+    let value = assert_json_pure(&remote);
+    assert_eq!(value["result"]["outcome"], "creation_plan");
+    assert_eq!(value["result"]["remote"], "origin/remote-only");
+
+    let new = create_command(
+        &repo,
+        &xdg,
+        &["create", "brand-new", "--dry-run", "--output", "json"],
+    );
+    assert!(new.status.success());
+    let value = assert_json_pure(&new);
+    assert_eq!(value["result"]["kind"], "new");
+
+    let ambiguous = create_command(
+        &repo,
+        &xdg,
+        &["create", "ambiguous", "--dry-run", "--output", "json"],
+    );
+    assert!(!ambiguous.status.success());
+    let value = assert_json_pure(&ambiguous);
+    assert_eq!(value["error"]["code"], "create.remote_selection_required");
+    assert_eq!(
+        value["context"]["remotes"],
+        serde_json::json!(["origin/ambiguous", "upstream/ambiguous"])
+    );
+}
+
+#[test]
 fn json_create_request_mode_requires_a_branch() {
     let repo = Repository::new();
     let request = serde_json::json!({"schema_version":1,"request_id":"create-1","input":{}});

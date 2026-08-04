@@ -1,5 +1,6 @@
 use crate::{
     BaseMode, Condition, Row, Worktree, WorktreeKind,
+    branch::{self, Classification},
     config::{EffectiveConfig, HookPhase},
     git, hook_approval, install,
     protocol::{self, BytePath, Effect, EmptyInput},
@@ -342,11 +343,8 @@ fn resolve(
             format!("{error:#}"),
         );
     }
-    if let Some(worktree) = repo
-        .worktrees
-        .iter()
-        .find(|w| matches!(&w.kind, WorktreeKind::Branch(value) if value == &branch))
-    {
+    let classification = branch::classify(&repo, &branch)?;
+    if let Classification::Registered(worktree) = &classification {
         if input.remote.is_some() {
             return emit_err(
                 command,
@@ -449,11 +447,11 @@ fn resolve(
             "the configured destination already exists or is registered",
         );
     }
-    let local = git::local_branch_exists(&repo.current().path, &branch)?;
-    let remotes = if local {
-        vec![]
-    } else {
-        git::remote_matches(&repo.current().path, &branch)?
+    let (local, remotes) = match &classification {
+        Classification::Registered(_) => unreachable!("registered branches return above"),
+        Classification::Local => (true, Vec::new()),
+        Classification::Remotes(remotes) => (false, remotes.clone()),
+        Classification::New => (false, Vec::new()),
     };
     if let Err(error) = git::reject_fetch(
         input.fetch && (local || !remotes.is_empty()),

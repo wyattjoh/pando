@@ -1,3 +1,4 @@
+pub(crate) mod branch;
 pub mod commit;
 pub mod completion;
 pub mod config;

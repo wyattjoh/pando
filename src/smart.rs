@@ -16,6 +16,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     BaseMode, Row, SortMode, Worktree, WorktreeKind,
+    branch::{self, Classification},
     config::{EffectiveConfig, HookPhase},
     git::{self, Repository},
     hook_approval, render,
@@ -170,11 +171,8 @@ fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> 
     let repository =
         git::repository(&env::current_dir().context("failed to read the current directory")?)?;
     git::validate_branch(&repository.current().path, branch)?;
-    if let Some(existing) = repository
-        .worktrees
-        .iter()
-        .find(|w| matches!(&w.kind, WorktreeKind::Branch(value) if value == branch))
-    {
+    let classification = branch::classify(&repository, branch)?;
+    if let Classification::Registered(existing) = &classification {
         git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE)?;
         if intent == Intent::Create {
             return Err(already_registered(branch, &existing.path));
@@ -191,12 +189,24 @@ fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> 
     }
     // A dry run never resolves a remote choice: the existing arms already
     // preview identically, and only the new-branch arm depends on the base.
-    let Resolution::New = classify(&repository, branch, fetch)? else {
-        return ui::finish(format!(
-            "Would create a worktree for {branch} at {}; no changes made.",
-            destination.display()
-        ));
-    };
+    match classification {
+        Classification::Registered(_) => unreachable!("registered branches return above"),
+        Classification::Local => {
+            git::reject_fetch(fetch.requested(), git::FETCH_LOCAL_BRANCH)?;
+            return ui::finish(format!(
+                "Would create a worktree for {branch} at {}; no changes made.",
+                destination.display()
+            ));
+        }
+        Classification::Remotes(_) => {
+            git::reject_fetch(fetch.requested(), git::FETCH_REMOTE_BRANCH)?;
+            return ui::finish(format!(
+                "Would create a worktree for {branch} at {}; no changes made.",
+                destination.display()
+            ));
+        }
+        Classification::New => {}
+    }
     // Resolve the same start point the real run would, but never fetch: a dry
     // run reports the refresh as something it would have done.
     let base = plan_new_branch(&repository, &config, fetch)?;
@@ -1233,11 +1243,8 @@ fn resolve_and_switch(
     fetch: FetchIntent,
 ) -> Result<()> {
     git::validate_branch(&repository.current().path, branch)?;
-    if let Some(worktree) = repository
-        .worktrees
-        .iter()
-        .find(|worktree| matches!(&worktree.kind, WorktreeKind::Branch(name) if name == branch))
-    {
+    let classification = branch::classify(repository, branch)?;
+    if let Classification::Registered(worktree) = classification {
         git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE)?;
         if !worktree.navigable() {
             bail!(
@@ -1257,14 +1264,21 @@ fn resolve_and_switch(
     }
 
     let config = EffectiveConfig::load(repository)?;
-    let plan = match classify(repository, branch, fetch)? {
-        Resolution::Local => CreationKind::Local,
-        Resolution::Remotes(remotes) => CreationKind::Remote(if remotes.len() == 1 {
-            remotes.into_iter().next().expect("one remote match")
-        } else {
-            choose_remote(&remotes, branch)?
-        }),
-        Resolution::New => CreationKind::New {
+    let plan = match classification {
+        Classification::Registered(_) => unreachable!("registered branches return above"),
+        Classification::Local => {
+            git::reject_fetch(fetch.requested(), git::FETCH_LOCAL_BRANCH)?;
+            CreationKind::Local
+        }
+        Classification::Remotes(remotes) => {
+            git::reject_fetch(fetch.requested(), git::FETCH_REMOTE_BRANCH)?;
+            CreationKind::Remote(if remotes.len() == 1 {
+                remotes.into_iter().next().expect("one remote match")
+            } else {
+                choose_remote(&remotes, branch)?
+            })
+        }
+        Classification::New => CreationKind::New {
             base: plan_new_branch(repository, &config, fetch)?,
         },
     };
@@ -1299,34 +1313,6 @@ impl FetchIntent {
     const fn refreshes(self) -> bool {
         matches!(self, Self::Refresh)
     }
-}
-
-/// Which arm of the resolution order a branch with no registered worktree falls into.
-///
-/// Classification runs no prompt and resolves no start point, so a dry run can
-/// share it with a real run without either resolving a remote choice.
-enum Resolution {
-    Local,
-    Remotes(Vec<String>),
-    New,
-}
-
-/// Classifies a branch and rejects a `--fetch` that could not apply to it.
-///
-/// The order — existing local branch, fetched remote matches, then a genuinely
-/// new branch — is fixed; only the new-branch arm's start point is configurable.
-fn classify(repository: &Repository, branch: &str, fetch: FetchIntent) -> Result<Resolution> {
-    let cwd = &repository.current().path;
-    if git::local_branch_exists(cwd, branch)? {
-        git::reject_fetch(fetch.requested(), git::FETCH_LOCAL_BRANCH)?;
-        return Ok(Resolution::Local);
-    }
-    let remotes = git::remote_matches(cwd, branch)?;
-    if remotes.is_empty() {
-        return Ok(Resolution::New);
-    }
-    git::reject_fetch(fetch.requested(), git::FETCH_REMOTE_BRANCH)?;
-    Ok(Resolution::Remotes(remotes))
 }
 
 /// Resolves the start point for a genuinely new branch, refreshing it when asked.
