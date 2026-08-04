@@ -8031,6 +8031,7 @@ fn json_merge_dry_run_reports_policy_and_never_mutates_refs_or_worktrees() {
             "pre_remove_hooks",
             "remove_worktree",
             "destination",
+            "journal_cleanup",
         ]
     );
     assert!(

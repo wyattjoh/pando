@@ -1080,10 +1080,8 @@ pub fn merge(
         return emit(response, true);
     }
     if plan.is_retained_execution() {
-        let outcome = crate::lifecycle::execute_retained_merge(
-            &plan,
-            crate::lifecycle::MergeExecutionMode::Captured,
-        );
+        let outcome =
+            crate::lifecycle::execute_merge(&plan, crate::lifecycle::MergeExecutionMode::Captured);
         let mut response = if let Some((kind, message)) = &outcome.failure {
             let code = match kind {
                 crate::lifecycle::MergeExecutionFailureKind::StalePlan => "merge.stale_plan",
@@ -1095,6 +1093,8 @@ pub fn merge(
                 crate::lifecycle::MergeExecutionFailureKind::Validation => {
                     "merge.validation_failed"
                 }
+                crate::lifecycle::MergeExecutionFailureKind::Cleanup => "merge.cleanup_failed",
+                crate::lifecycle::MergeExecutionFailureKind::Removal => "merge.remove_failed",
                 crate::lifecycle::MergeExecutionFailureKind::Journal
                 | crate::lifecycle::MergeExecutionFailureKind::JournalCleanup => {
                     "merge.journal_failed"

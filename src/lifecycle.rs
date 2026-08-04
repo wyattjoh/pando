@@ -185,6 +185,8 @@ pub enum MergeExecutionFailureKind {
     Squash,
     Validation,
     Integration,
+    Cleanup,
+    Removal,
     JournalCleanup,
 }
 
@@ -419,6 +421,7 @@ fn planned_merge_effects(
             "destination",
             serde_json::json!({"applicable":removes,"path":context.primary_worktree}),
         ),
+        effect("journal_cleanup", serde_json::json!({"applicable":true})),
     ]
 }
 
@@ -1167,8 +1170,7 @@ fn execution_failure(
     }
 }
 
-/// Executes an already validated non-removing plan, including in-place merges
-/// and rebase recovery.
+/// Executes an already validated merge plan, including cleanup-only recovery.
 ///
 /// The journal is established before the first Git mutation, and effects are
 /// updated beside their transitions so adapters never infer progress.
@@ -1178,19 +1180,9 @@ fn execution_failure(
 /// effect, both of which are planner invariants.
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecutionOutcome {
+pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecutionOutcome {
     let mut effects = plan.effects.clone();
     let mut diagnostics = Vec::new();
-    if !plan.is_retained_execution() {
-        return execution_failure(
-            plan,
-            effects,
-            diagnostics,
-            MergePhase::Planned,
-            MergeExecutionFailureKind::StalePlan,
-            "the validated plan is not a non-removing lifecycle supported by this executor",
-        );
-    }
     let current = plan.repository.current();
     let primary = plan
         .repository
@@ -1265,6 +1257,9 @@ pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> Mer
             validated_target: None,
         }
     };
+    if plan.context.cleanup_pending {
+        return execute_merge_cleanup(plan, &state, effects, diagnostics, mode);
+    }
     if !plan.context.journaled {
         mark_effect(&mut effects, "journal", true, false);
         if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
@@ -1725,6 +1720,21 @@ pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> Mer
         });
     }
     mark_effect(&mut effects, "fast_forward_merge", true, true);
+    if plan.context.policy.removes_topic(plan.context.in_place) {
+        state.cleanup_pending = true;
+        if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
+            return execution_failure(
+                plan,
+                effects,
+                diagnostics,
+                MergePhase::Integration,
+                MergeExecutionFailureKind::Journal,
+                error,
+            );
+        }
+        return execute_merge_cleanup(plan, &state, effects, diagnostics, mode);
+    }
+    mark_effect(&mut effects, "journal_cleanup", true, false);
     if let Err(error) = remove_journal(&plan.repository.common_dir, &state.topic_identity) {
         return execution_failure(
             plan,
@@ -1735,6 +1745,7 @@ pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> Mer
             error,
         );
     }
+    mark_effect(&mut effects, "journal_cleanup", true, true);
     let mut context = plan.context.clone();
     context.phase = MergePhase::Complete;
     context.journaled = false;
@@ -1743,6 +1754,156 @@ pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> Mer
         effects,
         diagnostics,
         destination: None,
+        failure: None,
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Cleanup records each transition beside its failure.
+fn execute_merge_cleanup(
+    plan: &MergePlan,
+    state: &MergeJournal,
+    mut effects: Vec<Effect>,
+    mut diagnostics: Vec<MergeDiagnostic>,
+    mode: MergeExecutionMode,
+) -> MergeExecutionOutcome {
+    let failure = |effects, diagnostics, kind, error: anyhow::Error| {
+        execution_failure(plan, effects, diagnostics, MergePhase::Cleanup, kind, error)
+    };
+    match hook_approval::evaluate(
+        &plan.repository,
+        HookPhase::PreRemove,
+        &plan.config.pre_remove,
+    ) {
+        Ok(hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted { .. }) => {}
+        Ok(hook_approval::Evaluation::ApprovalRequired(_)) => {
+            return failure(
+                effects,
+                diagnostics,
+                MergeExecutionFailureKind::StalePlan,
+                anyhow::anyhow!(
+                    "pre-remove hook trust changed before cleanup; retry after approving the current commands"
+                ),
+            );
+        }
+        Err(error) => {
+            return failure(
+                effects,
+                diagnostics,
+                MergeExecutionFailureKind::Cleanup,
+                error,
+            );
+        }
+    }
+    mark_effect(&mut effects, "pre_remove_hooks", true, false);
+    let hook_result = match mode {
+        MergeExecutionMode::Human => run_hooks(
+            HookPhase::PreRemove,
+            &plan.config.pre_remove,
+            &state.topic_path,
+        ),
+        MergeExecutionMode::Captured => {
+            match setup::run_steps_captured(&plan.config.pre_remove, &state.topic_path) {
+                Ok((outcome, output)) => {
+                    for (stdout, stderr) in output {
+                        push_merge_diagnostic(&mut diagnostics, "cleanup", "stdout", &stdout);
+                        push_merge_diagnostic(&mut diagnostics, "cleanup", "stderr", &stderr);
+                    }
+                    match outcome {
+                        HookOutcome::Success => Ok(()),
+                        HookOutcome::Failed(status) => Err(anyhow::anyhow!(
+                            "pre-remove hook failed with status {status}"
+                        )),
+                        HookOutcome::Interrupted => {
+                            Err(anyhow::anyhow!("pre-remove hook interrupted"))
+                        }
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        }
+    };
+    if let Err(error) = hook_result {
+        push_merge_diagnostic(
+            &mut diagnostics,
+            "cleanup",
+            "stderr",
+            error.to_string().as_bytes(),
+        );
+        return failure(
+            effects,
+            diagnostics,
+            MergeExecutionFailureKind::Cleanup,
+            error,
+        );
+    }
+    mark_effect(&mut effects, "pre_remove_hooks", true, true);
+
+    let Some(worktree) = plan
+        .repository
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.path == state.topic_path)
+    else {
+        return failure(
+            effects,
+            diagnostics,
+            MergeExecutionFailureKind::Removal,
+            anyhow::anyhow!("journaled topic worktree is no longer registered"),
+        );
+    };
+    if let Err(error) = check_removable(worktree, false) {
+        return failure(
+            effects,
+            diagnostics,
+            MergeExecutionFailureKind::Removal,
+            error,
+        );
+    }
+    let primary = plan
+        .repository
+        .primary
+        .as_ref()
+        .expect("a merge plan always has a primary worktree");
+    mark_effect(&mut effects, "remove_worktree", true, false);
+    if let Err(error) = git::remove_worktree(primary, &state.topic_path, false) {
+        push_merge_diagnostic(
+            &mut diagnostics,
+            "cleanup",
+            "stderr",
+            error.to_string().as_bytes(),
+        );
+        return failure(
+            effects,
+            diagnostics,
+            MergeExecutionFailureKind::Removal,
+            error,
+        );
+    }
+    mark_effect(&mut effects, "remove_worktree", true, true);
+    mark_effect(&mut effects, "destination", true, true);
+    let destination = Some(BytePath::path(primary));
+
+    mark_effect(&mut effects, "journal_cleanup", true, false);
+    if let Err(error) = remove_journal(&plan.repository.common_dir, &state.topic_identity) {
+        let mut outcome = failure(
+            effects,
+            diagnostics,
+            MergeExecutionFailureKind::JournalCleanup,
+            error,
+        );
+        outcome.destination = destination;
+        return outcome;
+    }
+    mark_effect(&mut effects, "journal_cleanup", true, true);
+    let mut context = plan.context.clone();
+    context.phase = MergePhase::Complete;
+    context.cleanup_pending = false;
+    context.journaled = false;
+    MergeExecutionOutcome {
+        context,
+        effects,
+        diagnostics,
+        destination,
         failure: None,
     }
 }
@@ -1775,40 +1936,58 @@ pub fn merge_yolo(no_rebase: bool, no_remove: bool) -> Result<()> {
 fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     if matches!(intent, MergeIntent::Normal) {
         let plan = plan_merge(policy)?;
-        if plan.is_retained_execution() {
-            if plan.squash.approval_required() {
-                bail!(
-                    "shared squash message generator approval is required; run pando trust merge-approve, or rerun with --no-squash"
-                );
-            }
+        if !plan.context.cleanup_pending && plan.squash.approval_required() {
+            bail!(
+                "shared squash message generator approval is required; run pando trust merge-approve, or rerun with --no-squash"
+            );
+        }
+        if !plan.context.cleanup_pending {
             hook_approval::approve_interactively(
                 &plan.repository,
                 HookPhase::PreMerge,
                 &plan.config.pre_merge,
             )?;
-            // Approval changes trust state, so execution consumes a fresh
-            // validated plan rather than the pre-approval snapshot.
-            let plan = plan_merge(policy)?;
-            let outcome = execute_retained_merge(&plan, MergeExecutionMode::Human);
-            if let Some((_, message)) = outcome.failure {
-                bail!(message);
-            }
-            let squashed = outcome
-                .effects
-                .iter()
-                .find(|effect| effect.action == "squash")
-                .is_some_and(|effect| effect.completed);
-            return ui::finish(styled_merge_summary(
-                &plan.context.source_branch,
-                &plan.context.target_branch,
-                squashed,
-                if plan.context.in_place {
-                    "; primary worktree switched to target."
-                } else {
-                    "; worktree retained."
-                },
-            ));
         }
+        if plan.context.cleanup_pending || policy.removes_topic(plan.context.in_place) {
+            hook_approval::approve_interactively(
+                &plan.repository,
+                HookPhase::PreRemove,
+                &plan.config.pre_remove,
+            )?;
+        }
+        // Approval changes trust state, so execution consumes a fresh
+        // validated plan rather than the pre-approval snapshot.
+        let plan = plan_merge(policy)?;
+        let outcome = execute_merge(&plan, MergeExecutionMode::Human);
+        if outcome.destination.is_some() {
+            write_destination(
+                plan.repository
+                    .primary
+                    .as_ref()
+                    .expect("a merge plan always has a primary worktree"),
+            )?;
+        }
+        if let Some((_, message)) = outcome.failure {
+            bail!(message);
+        }
+        let squashed = outcome
+            .effects
+            .iter()
+            .find(|effect| effect.action == "squash")
+            .is_some_and(|effect| effect.completed);
+        let epilogue = if plan.context.in_place {
+            "; primary worktree switched to target."
+        } else if plan.context.policy.no_remove {
+            "; worktree retained."
+        } else {
+            "; worktree removed."
+        };
+        return ui::finish(styled_merge_summary(
+            &plan.context.source_branch,
+            &plan.context.target_branch,
+            squashed,
+            epilogue,
+        ));
     }
     let yolo_stage_all = matches!(intent, MergeIntent::StageAll);
     let cwd = env::current_dir().context("failed to read the current directory")?;
