@@ -1,13 +1,16 @@
 //! Shared destination and source planning for worktree navigation and creation.
 
-use std::{fs, path::PathBuf};
+use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::protocol::{BytePath, Effect};
+use crate::protocol::{
+    self, BytePath, Diagnostic, Effect, ErrorBody, MutationClass, RecoveryAction,
+    RecoveryInvocation,
+};
 
 use crate::{
     Worktree,
@@ -89,6 +92,40 @@ pub(crate) struct CreateInput {
     pub(crate) dry_run: bool,
     #[serde(default)]
     pub(crate) description: Option<String>,
+}
+
+/// Adapter-neutral input shared by the switch and create operation boundary.
+#[derive(Debug)]
+pub(crate) struct OperationInput {
+    pub(crate) branch: Option<String>,
+    pub(crate) remote: Option<String>,
+    pub(crate) fetch: bool,
+    pub(crate) dry_run: bool,
+    pub(crate) description: Option<String>,
+}
+
+impl From<SwitchInput> for OperationInput {
+    fn from(input: SwitchInput) -> Self {
+        Self {
+            branch: input.branch,
+            remote: input.remote,
+            fetch: input.fetch,
+            dry_run: input.dry_run,
+            description: None,
+        }
+    }
+}
+
+impl From<CreateInput> for OperationInput {
+    fn from(input: CreateInput) -> Self {
+        Self {
+            branch: input.branch,
+            remote: input.remote,
+            fetch: input.fetch,
+            dry_run: input.dry_run,
+            description: input.description,
+        }
+    }
 }
 
 /// Version 1 success variants shared by switch and create adapters.
@@ -218,6 +255,107 @@ pub(crate) struct ExecutionFailure {
     pub(crate) hook_output: HookOutput,
 }
 
+/// Complete command-owned outcome for a switch or create request.
+#[derive(Debug)]
+pub(crate) struct OperationOutcome {
+    pub(crate) result: std::result::Result<OperationResult, OperationFailure>,
+    pub(crate) context: OperationContext,
+    pub(crate) effects: Vec<Effect>,
+    pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) recovery: Vec<RecoveryAction<protocol::Request<RetryInput>>>,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+pub(crate) struct OperationFailure {
+    code: String,
+    message: String,
+}
+
+impl From<OperationFailure> for ErrorBody {
+    fn from(value: OperationFailure) -> Self {
+        Self {
+            code: value.code,
+            message: value.message,
+        }
+    }
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(untagged)]
+pub(crate) enum OperationContext {
+    Empty {},
+    Selection(SwitchSelectionContext),
+    Branch(BranchContext),
+    Approval(ApprovalContext),
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+pub(crate) struct SwitchSelectionContext {
+    choices: Vec<SwitchChoice>,
+    unregistered_branch: SelectionHint,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+struct SwitchChoice {
+    branch: Option<String>,
+    destination: BytePath,
+    current: bool,
+    last_commit_at: Option<String>,
+    retry: RecoveryInvocation<protocol::Request<RetryInput>>,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+struct SelectionHint {
+    description: &'static str,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+pub(crate) struct BranchContext {
+    branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destination: Option<BytePath>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hook_outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remotes: Option<Vec<String>>,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+pub(crate) struct ApprovalContext {
+    approval: HookApprovalContext,
+    branch: String,
+    destination: BytePath,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+struct HookApprovalContext {
+    phase: String,
+    commands: Vec<HookApprovalCommand>,
+    repository: String,
+    identity: String,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+struct HookApprovalCommand {
+    name: Option<String>,
+    command: String,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub(crate) struct RetryInput {
+    branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fetch: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dry_run: Option<bool>,
+}
+
 /// A caller decision or safety condition that prevents an executable plan.
 #[derive(Debug)]
 pub(crate) enum Blocker {
@@ -261,6 +399,363 @@ pub(crate) enum Blocker {
         candidate: hook_approval::Candidate,
         destination: PathBuf,
     },
+}
+
+/// Runs the complete noninteractive worktree operation and returns typed protocol data.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutcome {
+    let command = intent.id();
+    let failure = |code: &str, message: String| OperationOutcome {
+        result: Err(OperationFailure {
+            code: code.into(),
+            message,
+        }),
+        context: OperationContext::Empty {},
+        effects: Vec::new(),
+        diagnostics: Vec::new(),
+        recovery: Vec::new(),
+    };
+    let current_dir = match env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            return failure(
+                "repository.invalid",
+                format!("failed to read current directory: {error}"),
+            );
+        }
+    };
+    let repository = match if input.branch.is_none() && intent == Intent::Switch {
+        git::repository_with_metadata(&current_dir)
+    } else {
+        git::repository(&current_dir)
+    } {
+        Ok(repository) => repository,
+        Err(error) => return failure("repository.invalid", format!("{error:#}")),
+    };
+    let working_directory = BytePath::path(&repository.current().path);
+    let Some(branch) = input.branch.clone() else {
+        if intent == Intent::Create {
+            return failure(
+                "create.branch_required",
+                "create requires a branch name in input.branch".into(),
+            );
+        }
+        let choices = repository
+            .worktrees
+            .iter()
+            .filter(|worktree| worktree.navigable())
+            .map(|worktree| {
+                let branch = match &worktree.kind {
+                    crate::WorktreeKind::Branch(value) => Some(value.clone()),
+                    _ => None,
+                };
+                SwitchChoice {
+                    retry: RecoveryInvocation {
+                        argv: vec![
+                            "pando".into(),
+                            "--input-output".into(),
+                            "json".into(),
+                            "switch".into(),
+                        ],
+                        stdin: Some(protocol::Request {
+                            schema_version: protocol::SCHEMA_VERSION,
+                            request_id: None,
+                            input: RetryInput {
+                                branch: branch.clone(),
+                                remote: None,
+                                fetch: None,
+                                dry_run: None,
+                            },
+                        }),
+                        working_directory: Some(working_directory.clone()),
+                    },
+                    branch,
+                    destination: BytePath::path(&worktree.path),
+                    current: worktree.current,
+                    last_commit_at: worktree.machine_last_commit_at(),
+                }
+            })
+            .collect();
+        let diagnostics = repository
+            .metadata_warning
+            .as_ref()
+            .map_or_else(Vec::new, |warning| {
+                vec![bounded_diagnostic(
+                    "git.commit_metadata",
+                    "metadata",
+                    warning.as_bytes(),
+                )]
+            });
+        return OperationOutcome {
+            result: Err(OperationFailure {
+                code: "switch.selection_required".into(),
+                message:
+                    "select a registered worktree, or provide a branch name to resolve or create"
+                        .into(),
+            }),
+            context: OperationContext::Selection(SwitchSelectionContext {
+                choices,
+                unregistered_branch: SelectionHint {
+                    description: "provide input.branch with a branch name not shown above",
+                },
+            }),
+            effects: Vec::new(),
+            diagnostics,
+            recovery: Vec::new(),
+        };
+    };
+    let plan = match plan(
+        &repository,
+        intent,
+        &branch,
+        input.remote.as_deref(),
+        FetchIntent::new(input.fetch, input.dry_run),
+        input.description.clone(),
+        input.dry_run,
+    ) {
+        Ok(Ok(plan)) => plan,
+        Ok(Err(blocker)) => {
+            return blocker_outcome(intent, blocker, &branch, input, working_directory);
+        }
+        Err(error) => return failure("repository.invalid", format!("{error:#}")),
+    };
+    if let Source::Registered(worktree) = &plan.source {
+        return OperationOutcome {
+            result: Ok(OperationResult::Existing {
+                branch,
+                destination: BytePath::path(&worktree.path),
+                dry_run: input.dry_run,
+            }),
+            context: OperationContext::Empty {},
+            effects: Vec::new(),
+            diagnostics: Vec::new(),
+            recovery: Vec::new(),
+        };
+    }
+    let destination = BytePath::path(&plan.destination);
+    let new_base = match &plan.source {
+        Source::New { base } => Some(base.clone()),
+        _ => None,
+    };
+    if intent == Intent::Switch
+        && let Some(base) = new_base.clone()
+    {
+        if !input.dry_run {
+            return OperationOutcome {
+                result: Err(OperationFailure {
+                    code: "switch.approval_required".into(),
+                    message: "creating a genuinely new branch requires a manual human invocation"
+                        .into(),
+                }),
+                context: OperationContext::Empty {},
+                effects: Vec::new(),
+                diagnostics: Vec::new(),
+                recovery: Vec::new(),
+            };
+        }
+        return OperationOutcome {
+            result: Ok(OperationResult::NewBranchApproval {
+                branch,
+                destination,
+                kind: "new",
+                start_point: base.commit,
+                base_ref: base.base_ref.as_ref().map(git::BaseRef::reference),
+                approval_required: true,
+            }),
+            context: OperationContext::Empty {},
+            effects: planned_effects(&plan),
+            diagnostics: Vec::new(),
+            recovery: Vec::new(),
+        };
+    }
+    match execute(&repository, &plan, OutputPolicy::Captured, || Ok(())) {
+        Ok(execution) => {
+            let (kind, start_point, base_ref) = new_base.map_or((None, None, None), |base| {
+                (
+                    Some("new"),
+                    Some(base.commit),
+                    base.base_ref.map(|reference| reference.reference()),
+                )
+            });
+            let result = if input.dry_run {
+                OperationResult::CreationPlan {
+                    branch,
+                    destination,
+                    kind,
+                    start_point,
+                    base_ref,
+                    remote: source_remote(&plan.source),
+                }
+            } else {
+                OperationResult::Created {
+                    branch,
+                    destination,
+                    kind,
+                    start_point,
+                    base_ref,
+                    remote: source_remote(&plan.source),
+                }
+            };
+            OperationOutcome {
+                result: Ok(result),
+                context: OperationContext::Empty {},
+                effects: execution.effects,
+                diagnostics: hook_diagnostics(execution.hook_output),
+                recovery: Vec::new(),
+            }
+        }
+        Err(execution) => execution_failure_outcome(
+            command,
+            branch,
+            input,
+            working_directory,
+            destination,
+            execution,
+        ),
+    }
+}
+
+fn source_remote(source: &Source) -> Option<String> {
+    match source {
+        Source::Remote { reference, .. } => Some(reference.clone()),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn blocker_outcome(
+    intent: Intent,
+    blocker: Blocker,
+    branch: &str,
+    input: &OperationInput,
+    working_directory: BytePath,
+) -> OperationOutcome {
+    let command = intent.id();
+    let simple = |code: String, message: String| OperationOutcome {
+        result: Err(OperationFailure { code, message }),
+        context: OperationContext::Empty {},
+        effects: Vec::new(),
+        diagnostics: Vec::new(),
+        recovery: Vec::new(),
+    };
+    match blocker {
+        Blocker::InvalidBranch { message } => simple(format!("{command}.invalid_branch"), message),
+        Blocker::ConfigInvalid { message } => simple(format!("{command}.config_invalid"), message),
+        Blocker::FetchNotApplicable { message } => simple(format!("{command}.fetch_not_applicable"), message),
+        Blocker::BaseUnavailable { message } => simple(format!("{command}.base_unavailable"), message),
+        Blocker::DestinationUnavailable { worktree } => simple(format!("{command}.destination_unavailable"), format!("registered destination is {}", worktree.state_label())),
+        Blocker::PrimaryUnavailable => simple("repository.primary_unavailable".into(), "a bare repository cannot create a worktree".into()),
+        Blocker::RootUnavailable { message } => simple("repository.root_unavailable".into(), message),
+        Blocker::DestinationInvalid { message } => simple(format!("{command}.destination_invalid"), message),
+        Blocker::DestinationCollision => simple(format!("{command}.destination_collision"), "the configured destination already exists or is registered".into()),
+        Blocker::DestinationNotIgnored { first, gitignore } => simple(format!("{command}.destination_invalid"), format!("the configured destination is inside the primary worktree but is not ignored; add '/{first}/' to {}", gitignore.display())),
+        Blocker::IrrelevantRemote => simple(format!("{command}.irrelevant_remote"), "remote does not apply to the resolved branch".into()),
+        Blocker::UnknownRemote => simple(format!("{command}.unknown_remote"), "remote does not match an available fetched branch".into()),
+        Blocker::RegisteredForCreate { worktree } => OperationOutcome { result: Err(OperationFailure { code: "create.branch_registered".into(), message: "the branch already has a registered worktree; create will not adopt or replace it".into() }), context: OperationContext::Branch(BranchContext { branch: branch.into(), destination: Some(BytePath::path(&worktree.path)), created: None, setup: None, hook_outcome: None, remotes: None }), effects: Vec::new(), diagnostics: Vec::new(), recovery: vec![RecoveryAction { action: "switch".into(), description: "Enter the registered worktree instead of creating one".into(), mutation: MutationClass::None, requires_human_approval: false, invocation: RecoveryInvocation { argv: vec!["pando".into(), "--input-output".into(), "json".into(), "switch".into()], stdin: Some(protocol::Request { schema_version: protocol::SCHEMA_VERSION, request_id: None, input: RetryInput { branch: Some(branch.into()), remote: None, fetch: None, dry_run: None } }), working_directory: Some(working_directory) } }] },
+        Blocker::RemoteSelectionRequired { remotes, .. } => { let recovery = remotes.iter().map(|remote| RecoveryAction { action: "retry_with_remote".into(), description: format!("Retry with {remote} as the selected source"), mutation: MutationClass::None, requires_human_approval: false, invocation: RecoveryInvocation { argv: vec!["pando".into(), "--input-output".into(), "json".into(), command.into()], stdin: Some(protocol::Request { schema_version: protocol::SCHEMA_VERSION, request_id: None, input: RetryInput { branch: Some(branch.into()), remote: Some(remote.clone()), fetch: Some(input.fetch), dry_run: Some(input.dry_run) } }), working_directory: Some(working_directory.clone()) } }).collect(); OperationOutcome { result: Err(OperationFailure { code: format!("{command}.remote_selection_required"), message: "multiple fetched remotes match this branch".into() }), context: OperationContext::Branch(BranchContext { branch: branch.into(), destination: None, created: None, setup: None, hook_outcome: None, remotes: Some(remotes) }), effects: Vec::new(), diagnostics: Vec::new(), recovery } }
+        Blocker::ApprovalRequired { candidate, destination } => OperationOutcome { result: Err(OperationFailure { code: "trust.approval_required".into(), message: "post-create hooks require manual review and approval before mutation".into() }), context: OperationContext::Approval(ApprovalContext { approval: HookApprovalContext { phase: candidate.phase().key().into(), commands: candidate.commands().iter().map(|step| HookApprovalCommand { name: step.name.clone(), command: step.command.clone() }).collect(), repository: candidate.repository().into(), identity: candidate.identity().into() }, branch: branch.into(), destination: BytePath::path(&destination) }), effects: Vec::new(), diagnostics: Vec::new(), recovery: vec![RecoveryAction { action: "trust.approve_hooks".into(), description: "Review and approve post-create hooks interactively".into(), mutation: MutationClass::Trust, requires_human_approval: true, invocation: RecoveryInvocation { argv: vec!["pando".into(), command.into(), branch.into()], stdin: None, working_directory: Some(working_directory) } }] },
+    }
+}
+
+fn execution_failure_outcome(
+    command: &str,
+    branch: String,
+    input: &OperationInput,
+    working_directory: BytePath,
+    destination: BytePath,
+    failure: ExecutionFailure,
+) -> OperationOutcome {
+    let code = match failure.code {
+        "description_failed" => "create.description_failed".into(),
+        "setup_failed" => format!("{command}.setup_failed"),
+        "plan_stale" => format!("{command}.plan_stale"),
+        _ => format!("{command}.creation_failed"),
+    };
+    let mut recovery = Vec::new();
+    if code == "create.description_failed"
+        && let Some(description) = input.description.as_deref()
+    {
+        recovery.push(RecoveryAction {
+            action: "git.set_branch_description".into(),
+            description:
+                "Set the requested branch description in repository-local Git configuration".into(),
+            mutation: MutationClass::Config,
+            requires_human_approval: false,
+            invocation: RecoveryInvocation {
+                argv: vec![
+                    "git".into(),
+                    "config".into(),
+                    "--local".into(),
+                    "--replace-all".into(),
+                    format!("branch.{branch}.description"),
+                    description.into(),
+                ],
+                stdin: None,
+                working_directory: Some(working_directory.clone()),
+            },
+        });
+    }
+    if failure.setup_incomplete {
+        recovery.push(RecoveryAction {
+            action: format!("{command}.recover_setup"),
+            description:
+                "Inspect the worktree and retry or explicitly complete setup interactively".into(),
+            mutation: MutationClass::Setup,
+            requires_human_approval: true,
+            invocation: RecoveryInvocation {
+                argv: vec!["pando".into(), "switch".into(), branch.clone()],
+                stdin: None,
+                working_directory: Some(working_directory),
+            },
+        });
+    }
+    OperationOutcome {
+        result: Err(OperationFailure {
+            code,
+            message: format!("{:#}", failure.error),
+        }),
+        context: OperationContext::Branch(BranchContext {
+            branch,
+            destination: Some(destination),
+            created: Some(failure.created),
+            setup: failure.setup_incomplete.then_some("incomplete"),
+            hook_outcome: failure.hook_outcome.map(|outcome| format!("{outcome:?}")),
+            remotes: None,
+        }),
+        effects: failure.effects,
+        diagnostics: hook_diagnostics(failure.hook_output),
+        recovery,
+    }
+}
+
+fn hook_diagnostics(output: HookOutput) -> Vec<Diagnostic> {
+    match output {
+        HookOutput::Streamed => Vec::new(),
+        HookOutput::Captured(steps) => steps
+            .into_iter()
+            .flat_map(|step| [("stdout", step.stdout), ("stderr", step.stderr)])
+            .filter(|(_, captured)| captured.original_size > 0)
+            .map(|(stream, captured)| Diagnostic {
+                source: "hook".into(),
+                stream: stream.into(),
+                content: String::from_utf8_lossy(&captured.content).into_owned(),
+                original_size: captured.original_size,
+                truncated: captured.truncated,
+            })
+            .collect(),
+    }
+}
+
+fn bounded_diagnostic(source: &str, stream: &str, bytes: &[u8]) -> Diagnostic {
+    const LIMIT: usize = 16 * 1024;
+    let kept = &bytes[..bytes.len().min(LIMIT)];
+    Diagnostic {
+        source: source.into(),
+        stream: stream.into(),
+        content: String::from_utf8_lossy(kept).into_owned(),
+        original_size: bytes.len(),
+        truncated: bytes.len() > LIMIT,
+    }
 }
 
 /// Plans the selected source and byte-preserving destination.
@@ -747,4 +1242,26 @@ fn reject_fetch(fetch: FetchIntent, because: &str) -> Result<(), Box<Blocker>> {
             message: format!("{error:#}"),
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::RetryInput;
+
+    #[test]
+    fn selection_retry_preserves_the_version_one_minimal_input_shape() {
+        let retry = RetryInput {
+            branch: Some("topic".into()),
+            remote: None,
+            fetch: None,
+            dry_run: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(retry).unwrap(),
+            json!({"branch": "topic"})
+        );
+    }
 }
