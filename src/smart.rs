@@ -264,14 +264,16 @@ pub fn trust_command(command: TrustCommand) -> Result<()> {
         TrustCommand::Status => {
             let config = EffectiveConfig::load(&repository)?;
             for phase in HookPhase::all() {
-                let steps = config.hooks(phase);
-                let trusted = trust::is_trusted(&repository, phase, steps)?;
-                if steps.is_empty() {
-                    ui::info(format!("No {} are configured.", phase.key()))?;
-                } else if trusted {
-                    ui::success(format!("The current {} are trusted.", phase.key()))?;
-                } else {
-                    ui::warning(format!("The current {} are not trusted.", phase.key()))?;
+                match hook_approval::evaluate(&repository, phase, config.hooks(phase))? {
+                    hook_approval::Evaluation::NoCommands => {
+                        ui::info(format!("No {} are configured.", phase.key()))?;
+                    }
+                    hook_approval::Evaluation::Trusted { .. } => {
+                        ui::success(format!("The current {} are trusted.", phase.key()))?;
+                    }
+                    hook_approval::Evaluation::ApprovalRequired(_) => {
+                        ui::warning(format!("The current {} are not trusted.", phase.key()))?;
+                    }
                 }
             }
         }

@@ -68,7 +68,7 @@ impl PhaseApprovals {
 
 /// Returns the deterministic executable identity of an ordered command list for one phase.
 #[must_use]
-pub fn command_hash(phase: HookPhase, steps: &[HookStep]) -> String {
+pub(crate) fn command_hash(phase: HookPhase, steps: &[HookStep]) -> String {
     let mut digest = Sha256::new();
     digest.update(b"pando-hook-phase-v1\0");
     digest.update(phase.key().as_bytes());
@@ -97,7 +97,11 @@ fn legacy_post_create_hash(steps: &[HookStep]) -> String {
 /// # Errors
 ///
 /// Returns an error when repository identity or trust storage cannot be resolved.
-pub fn is_trusted(repository: &Repository, phase: HookPhase, steps: &[HookStep]) -> Result<bool> {
+pub(crate) fn is_trusted(
+    repository: &Repository,
+    phase: HookPhase,
+    steps: &[HookStep],
+) -> Result<bool> {
     if steps.is_empty() {
         return Ok(true);
     }

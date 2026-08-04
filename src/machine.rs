@@ -1153,8 +1153,31 @@ pub fn trust(command: &str, request_mode: bool, dry_run_flag: bool) -> Result<()
     };
     let result = match command {
         "trust.status" => {
-            let c = EffectiveConfig::load(&repo)?;
-            let phases:Vec<_>=HookPhase::all().iter().map(|p|{let s=c.hooks(*p);json!({"phase":p.key(),"configured":!s.is_empty(),"trusted":trust::is_trusted(&repo,*p,s).unwrap_or(false),"step_count":s.len(),"source":{"kind":"effective","repository":BytePath::path(&repo.current().path)},"identity":if s.is_empty(){None}else{Some(trust::command_hash(*p,s))}})}).collect();
+            let config = EffectiveConfig::load(&repo)?;
+            let phases = HookPhase::all()
+                .iter()
+                .map(|phase| {
+                    let steps = config.hooks(*phase);
+                    let (trusted, identity) = match hook_approval::evaluate(&repo, *phase, steps)? {
+                        hook_approval::Evaluation::NoCommands => (false, None),
+                        hook_approval::Evaluation::Trusted { identity } => (true, Some(identity)),
+                        hook_approval::Evaluation::ApprovalRequired(candidate) => {
+                            (false, Some(candidate.identity().to_owned()))
+                        }
+                    };
+                    Ok(json!({
+                        "phase": phase.key(),
+                        "configured": !steps.is_empty(),
+                        "trusted": trusted,
+                        "step_count": steps.len(),
+                        "source": {
+                            "kind": "effective",
+                            "repository": BytePath::path(&repo.current().path),
+                        },
+                        "identity": identity,
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
             json!({"outcome":"status","phases":phases})
         }
         "trust.reset" => {
@@ -1632,7 +1655,9 @@ pub fn merge(
             &plan.config.pre_merge,
         ) {
             Ok(hook_approval::Evaluation::ApprovalRequired(candidate)) => Some(candidate),
-            Ok(hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted) => None,
+            Ok(
+                hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted { .. },
+            ) => None,
             Err(error) => {
                 return emit_err("merge", id, "trust.read_failed", format!("{error:#}"));
             }

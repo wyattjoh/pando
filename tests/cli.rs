@@ -4924,6 +4924,17 @@ fn configured_hook_phase_rejects_malformed_trust_storage() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("failed to parse trust storage"));
+
+    Command::cargo_bin("pando")
+        .unwrap()
+        .args(["--output", "json", "trust", "status"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("failed to parse trust storage"))
+        .stderr(predicate::str::is_empty());
 }
 
 fn git_output<const N: usize>(dir: &Path, args: [&str; N]) -> String {

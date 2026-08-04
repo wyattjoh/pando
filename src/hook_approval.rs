@@ -10,7 +10,7 @@ use crate::{
 #[derive(Debug, Eq, PartialEq)]
 pub enum Evaluation {
     NoCommands,
-    Trusted,
+    Trusted { identity: String },
     ApprovalRequired(Candidate),
 }
 
@@ -66,7 +66,9 @@ pub fn evaluate(
         return Ok(Evaluation::NoCommands);
     }
     if trust::is_trusted(repository, phase, commands)? {
-        return Ok(Evaluation::Trusted);
+        return Ok(Evaluation::Trusted {
+            identity: trust::command_hash(phase, commands),
+        });
     }
     Ok(Evaluation::ApprovalRequired(Candidate {
         phase,

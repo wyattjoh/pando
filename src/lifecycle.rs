@@ -240,7 +240,7 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Prefligh
     };
     let pre_merge_hooks_trusted = matches!(
         hook_approval::evaluate(&repository, HookPhase::PreMerge, &config.pre_merge)?,
-        hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted
+        hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted { .. }
     );
     // An in-place merge removes nothing, so its pre-remove hooks never run.
     let pre_remove_hooks_trusted = if in_place {
@@ -248,8 +248,10 @@ pub fn plan_merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Prefligh
     } else {
         let remove_config =
             EffectiveConfig::load_for_worktree(&repository, &repository.current().path)?;
-        remove_config.pre_remove.is_empty()
-            || trust::is_trusted(&repository, HookPhase::PreRemove, &remove_config.pre_remove)?
+        matches!(
+            hook_approval::evaluate(&repository, HookPhase::PreRemove, &remove_config.pre_remove,)?,
+            hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted { .. }
+        )
     };
     let context = MergeContext {
         source_branch: source,
