@@ -31,7 +31,8 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 | Module | Responsibility |
 |---|---|
 | `lib.rs` | `Worktree`/`WorktreeKind`/`Condition`/`SortMode` domain types, display/navigability rules, and stable worktree sorting |
-| `git.rs` | Every `git` subprocess call; parses `worktree list --porcelain -z`; batches HEAD committer metadata; `Repository` context |
+| `git.rs` | Private Git execution and parsing internals; parses `worktree list --porcelain -z`; batches HEAD committer metadata; `Repository` context |
+| `branch.rs` | Concrete branch/ref resolution interface; classification, targets, bases, fetch applicability, upstreams, remotes, and push planning |
 | `config.rs` | Strict three-layer YAML config parsing and effective value resolution |
 | `pr.rs`, `pr/provider.rs` | PR orchestration and metadata generation; pluggable `gh` and `tea` forge adapters |
 | `smart.rs` | Command implementations for `switch`/`create`/`get`/`trust`; all interactive prompts |
@@ -69,7 +70,7 @@ Shared hooks run before local hooks; the local root and default sort override th
 
 **Port hashing is pinned for compatibility.** `smart::port_for_branch` uses `SipHasher13` explicitly rather than `DefaultHasher` so a future std change cannot move ports away from Worktrunk v0.66.0. Golden values are asserted in `smart.rs` tests — treat them as a compatibility contract.
 
-**Branch resolution order** in `resolve_and_switch`: existing registered worktree → existing local branch → single already-fetched remote match → prompt among multiple remotes → confirm a genuinely new branch from the base `worktrees.base` selects. `smart::classify` owns that order and runs no prompt, so a dry run shares it without resolving a remote choice; only the new-branch arm's start point is configurable. The tool never adopts, repairs, prunes, moves, or deletes an existing destination or a broken worktree record.
+**Branch resolution order** in `resolve_and_switch`: existing registered worktree → existing local branch → single already-fetched remote match → prompt among multiple remotes → confirm a genuinely new branch from the base `worktrees.base` selects. `branch::Resolver` owns that order and never prompts or implicitly selects an ambiguous remote, so dry runs and adapters share the same typed resolution; only the new-branch arm's start point is configurable. The tool never adopts, repairs, prunes, moves, or deletes an existing destination or a broken worktree record.
 
 **One planner owns the new-branch start point.** `git::plan_new_branch_base` is the single place any interface resolves it, so human `switch`/`create`, their dry runs, and both JSON variants cannot drift. Dry runs call it with fetching disabled and report the refresh as an unattempted effect instead.
 

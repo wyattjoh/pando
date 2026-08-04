@@ -608,20 +608,12 @@ pub fn origin_url(cwd: &Path) -> Result<String> {
     git_stdout(cwd, ["remote", "get-url", "origin"])
 }
 
-/// Returns the current named branch.
-///
-/// # Errors
-/// Returns an error for detached, bare, or unknown worktrees.
-pub fn current_branch(repository: &Repository) -> Result<&str> {
-    repository.current_branch()
-}
-
 /// Asks Git to validate a proposed branch name.
 ///
 /// # Errors
 ///
 /// Returns an error when Git cannot run or rejects the name.
-pub fn validate_branch(cwd: &Path, branch: &str) -> Result<()> {
+pub(crate) fn validate_branch(cwd: &Path, branch: &str) -> Result<()> {
     if branch.is_empty() {
         bail!("branch name cannot be empty");
     }
@@ -642,7 +634,7 @@ pub fn validate_branch(cwd: &Path, branch: &str) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error when Git cannot inspect local refs.
-pub fn local_branch_exists(cwd: &Path, branch: &str) -> Result<bool> {
+fn local_branch_exists(cwd: &Path, branch: &str) -> Result<bool> {
     let reference = format!("refs/heads/{branch}");
     let output = run_git(cwd, ["show-ref", "--verify", "--quiet", &reference])
         .context("failed to inspect local branches")?;
@@ -662,90 +654,13 @@ pub fn local_branch_exists(cwd: &Path, branch: &str) -> Result<bool> {
 ///
 /// Returns an error when Git cannot inspect remote refs.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PushPlan {
-    pub remote: String,
-    pub branch: String,
-    pub set_upstream: bool,
+pub(crate) struct PushPlan {
+    pub(crate) remote: String,
+    pub(crate) branch: String,
+    pub(crate) set_upstream: bool,
 }
 
-/// Plans the deterministic ordinary push for a topic branch.
-///
-/// # Errors
-/// Returns an error when the upstream is malformed, or no unique remote can be selected.
-pub fn plan_push(cwd: &Path, branch: &str, requested: Option<&str>) -> Result<PushPlan> {
-    if let Some(remote) = requested {
-        let output = run_git(cwd, ["remote"])?;
-        ensure_success(&output, "git remote")?;
-        if !String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .any(|name| name == remote)
-        {
-            bail!("selected remote {remote:?} does not exist");
-        }
-        return Ok(PushPlan {
-            remote: remote.into(),
-            branch: branch.into(),
-            set_upstream: true,
-        });
-    }
-    let upstream = run_git(
-        cwd,
-        [
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{upstream}",
-        ],
-    )?;
-    if upstream.status.success() {
-        let value = String::from_utf8_lossy(&upstream.stdout).trim().to_owned();
-        let (remote, upstream_branch) = value
-            .split_once('/')
-            .context("configured upstream is not a remote branch")?;
-        if remote.is_empty() || upstream_branch.is_empty() {
-            bail!("configured upstream is not a remote branch: {value}");
-        }
-        return Ok(PushPlan {
-            remote: remote.into(),
-            branch: upstream_branch.into(),
-            set_upstream: false,
-        });
-    }
-    let output = run_git(cwd, ["remote"])?;
-    ensure_success(&output, "git remote")?;
-    let mut remotes: Vec<_> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_owned)
-        .collect();
-    if remotes.iter().any(|remote| remote == "origin") {
-        return Ok(PushPlan {
-            remote: "origin".into(),
-            branch: branch.into(),
-            set_upstream: true,
-        });
-    }
-    if let [remote] = remotes.as_slice() {
-        return Ok(PushPlan {
-            remote: remote.clone(),
-            branch: branch.into(),
-            set_upstream: true,
-        });
-    }
-    remotes.sort();
-    if remotes.is_empty() {
-        bail!("no Git remote is configured; add a remote before creating a pull request");
-    }
-    bail!(
-        "multiple Git remotes are configured ({}) and no origin exists; configure an upstream branch or choose a remote",
-        remotes.join(", ")
-    )
-}
-
-/// Publishes a branch with an ordinary fast-forward-safe push.
-///
-/// # Errors
-/// Returns an error when Git rejects or cannot execute the push.
-pub fn branch_upstream_remote(cwd: &Path, branch: &str) -> Result<Option<String>> {
+pub(crate) fn branch_upstream(cwd: &Path, branch: &str) -> Result<Option<String>> {
     let output = run_git(
         cwd,
         [
@@ -758,10 +673,20 @@ pub fn branch_upstream_remote(cwd: &Path, branch: &str) -> Result<Option<String>
     if !output.status.success() {
         return Ok(None);
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .split_once('/')
-        .map(|(remote, _)| remote.to_owned()))
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+    ))
+}
+
+pub(crate) fn configured_remotes(cwd: &Path) -> Result<Vec<String>> {
+    let output = run_git(cwd, ["remote"])?;
+    ensure_success(&output, "git remote")?;
+    let mut remotes: Vec<_> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    remotes.sort();
+    Ok(remotes)
 }
 
 /// Resolves the target branch, preserving an explicit configuration value.
@@ -770,7 +695,7 @@ pub fn branch_upstream_remote(cwd: &Path, branch: &str) -> Result<Option<String>
 ///
 /// # Errors
 /// Returns an error when Git cannot inspect refs or no fallback branch exists.
-pub fn resolve_target_branch(cwd: &Path, configured: Option<&str>) -> Result<String> {
+pub(crate) fn resolve_target_branch(cwd: &Path, configured: Option<&str>) -> Result<String> {
     if let Some(branch) = configured {
         return Ok(branch.to_owned());
     }
@@ -832,17 +757,17 @@ mod target_branch_tests {
 
 /// The remote-tracking ref a `fresh` new branch is cut from.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BaseRef {
+pub(crate) struct BaseRef {
     /// The remote that owns the ref, always `origin`.
-    pub remote: String,
+    pub(crate) remote: String,
     /// The target branch name on that remote.
-    pub branch: String,
+    pub(crate) branch: String,
 }
 
 impl BaseRef {
     /// Returns the short remote-tracking ref name, for example `origin/main`.
     #[must_use]
-    pub fn reference(&self) -> String {
+    pub(crate) fn reference(&self) -> String {
         format!("{}/{}", self.remote, self.branch)
     }
 }
@@ -854,7 +779,7 @@ impl BaseRef {
 ///
 /// # Errors
 /// Returns an error when neither source names a branch.
-pub fn resolve_base_ref(cwd: &Path, configured_target: Option<&str>) -> Result<BaseRef> {
+fn resolve_base_ref(cwd: &Path, configured_target: Option<&str>) -> Result<BaseRef> {
     let branch = match configured_target {
         Some(branch) => branch.to_owned(),
         None => origin_head_branch(cwd).context(
@@ -879,39 +804,15 @@ fn origin_head_branch(cwd: &Path) -> Option<String> {
         .filter(|branch| !branch.is_empty())
 }
 
-/// Why a requested base-ref fetch cannot apply.
-///
-/// A fetch is only meaningful for a genuinely new branch cut from a `fresh`
-/// base, so both the human and JSON adapters reject it from this one list
-/// rather than each inventing its own wording.
-pub const FETCH_REGISTERED_WORKTREE: &str = "the branch already has a registered worktree";
-pub const FETCH_LOCAL_BRANCH: &str = "the branch already exists locally";
-pub const FETCH_REMOTE_BRANCH: &str = "the branch already has a remote-tracking ref";
-pub const FETCH_HEAD_BASE: &str =
-    "the effective worktrees.base is 'head', which branches from the invoking worktree";
-
-/// Refuses a fetch that would silently do nothing.
-///
-/// # Errors
-/// Returns an error naming `because` when `inapplicable` holds.
-pub fn reject_fetch(inapplicable: bool, because: &str) -> Result<()> {
-    if inapplicable {
-        bail!(
-            "a base-ref fetch only applies to a genuinely new branch on a 'fresh' base, but {because}"
-        );
-    }
-    Ok(())
-}
-
 /// The start point a genuinely new branch will be cut from.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NewBranchBase {
+pub(crate) struct NewBranchBase {
     /// The commit the branch starts at.
-    pub commit: String,
+    pub(crate) commit: String,
     /// The remote-tracking ref the commit came from, absent in `head` mode.
-    pub base_ref: Option<BaseRef>,
+    pub(crate) base_ref: Option<BaseRef>,
     /// Git's captured output from an explicit `--fetch`, when one ran.
-    pub fetch_output: Option<String>,
+    pub(crate) fetch_output: Option<String>,
 }
 
 /// Plans the start point for a genuinely new branch under the effective base mode.
@@ -924,7 +825,7 @@ pub struct NewBranchBase {
 ///
 /// # Errors
 /// Returns an error when `HEAD`, the base ref, or its commit cannot be resolved.
-pub fn plan_new_branch_base(
+pub(crate) fn plan_new_branch_base(
     cwd: &Path,
     mode: BaseMode,
     configured_target: Option<&str>,
@@ -950,7 +851,7 @@ pub fn plan_new_branch_base(
 ///
 /// # Errors
 /// Returns an error naming the fix when the ref has never been fetched.
-pub fn base_ref_commit(cwd: &Path, base: &BaseRef) -> Result<String> {
+pub(crate) fn base_ref_commit(cwd: &Path, base: &BaseRef) -> Result<String> {
     let reference = base.reference();
     git_stdout(
         cwd,
@@ -973,7 +874,7 @@ pub fn base_ref_commit(cwd: &Path, base: &BaseRef) -> Result<String> {
 ///
 /// # Errors
 /// Returns an error, including Git's captured output, when the fetch fails.
-pub fn fetch_base_ref(cwd: &Path, base: &BaseRef) -> Result<String> {
+fn fetch_base_ref(cwd: &Path, base: &BaseRef) -> Result<String> {
     let refspec = format!(
         "+refs/heads/{branch}:refs/remotes/{remote}/{branch}",
         branch = base.branch,
@@ -991,7 +892,7 @@ pub fn fetch_base_ref(cwd: &Path, base: &BaseRef) -> Result<String> {
 ///
 /// # Errors
 /// Returns an error when the remote is missing or Git cannot read it.
-pub fn remote_url(cwd: &Path, remote: &str) -> Result<String> {
+pub(crate) fn remote_url(cwd: &Path, remote: &str) -> Result<String> {
     let output = run_git(cwd, ["remote", "get-url", remote])?;
     ensure_success(&output, "git remote get-url")?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
@@ -1001,7 +902,7 @@ pub fn remote_url(cwd: &Path, remote: &str) -> Result<String> {
 ///
 /// # Errors
 /// Returns an error when Git rejects or cannot execute the push.
-pub fn push(cwd: &Path, plan: &PushPlan, inherit: bool) -> Result<()> {
+pub(crate) fn push(cwd: &Path, plan: &PushPlan, inherit: bool) -> Result<()> {
     let refspec = format!("{}:{}", plan.branch, plan.branch);
     if inherit {
         let status = GitProcess::new(cwd, ["push", "-u", &plan.remote, &refspec])

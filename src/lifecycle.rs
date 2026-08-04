@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Condition, Worktree, WorktreeKind,
+    branch::Resolver,
     config::{EffectiveConfig, HookPhase},
     git::{self, Repository},
     hash, hook_approval,
@@ -668,22 +669,15 @@ pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
     }
     let config = EffectiveConfig::load(&repository)?;
     let source = journal.as_ref().map_or_else(
-        || git::current_branch(&repository).map(str::to_owned),
+        || repository.current_branch().map(str::to_owned),
         |s| Ok(s.source_branch.clone()),
     )?;
+    let resolver = Resolver::new(&repository);
     let target = journal.as_ref().map_or_else(
-        || {
-            git::resolve_target_branch(
-                repository
-                    .primary
-                    .as_ref()
-                    .context("repository has no primary worktree")?,
-                config.target_branch.as_deref(),
-            )
-        },
+        || resolver.target(config.target_branch.as_deref()),
         |s| Ok(s.target_branch.clone()),
     )?;
-    git::validate_branch(primary, &target)?;
+    resolver.validate(&target)?;
     let checked_out = primary_branch(&repository)?;
     if in_place {
         if journal.is_none() && checked_out == target {
@@ -2174,7 +2168,7 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
         .worktrees
         .iter()
         .any(|worktree| worktree.path == current.path)
-        || git::current_branch(&refreshed_repository).ok() != Some(state.target_branch.as_str())
+        || refreshed_repository.current_branch().ok() != Some(state.target_branch.as_str())
         || !git::branch_commit(primary, &state.source_branch).is_ok_and(|head| head == candidate)
         || !git::branch_commit(primary, &state.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
@@ -2518,7 +2512,7 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     let rebase_active = git::rebase_in_progress(&repository.current().path)?;
     let source = match &journal {
         Some(state) => state.source_branch.clone(),
-        None => git::current_branch(&repository)?.to_owned(),
+        None => repository.current_branch()?.to_owned(),
     };
     let dirty = !rebase_active && git::is_dirty(&repository.current().path)?;
     if dirty && !yolo_stage_all {
@@ -2549,10 +2543,11 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     }
     let target = match &journal {
         Some(state) => state.target_branch.clone(),
-        None => git::resolve_target_branch(primary, config.target_branch.as_deref())
+        None => Resolver::new(&repository)
+            .target(config.target_branch.as_deref())
             .context("failed to resolve merge target")?,
     };
-    git::validate_branch(primary, &target)?;
+    Resolver::new(&repository).validate(&target)?;
     let checked_out = primary_branch(&repository)?;
     if in_place {
         if journal.is_none() && checked_out == target {
@@ -2919,7 +2914,7 @@ fn select_removal_targets(
     force: bool,
 ) -> Result<Vec<Worktree>> {
     let mut names = if branches.is_empty() {
-        vec![git::current_branch(repository)?.to_owned()]
+        vec![repository.current_branch()?.to_owned()]
     } else {
         branches.to_vec()
     };
@@ -2933,7 +2928,7 @@ fn select_removal_targets(
     }
     let mut targets = Vec::with_capacity(branches.len().max(1));
     for branch in if branches.is_empty() {
-        vec![git::current_branch(repository)?.to_owned()]
+        vec![repository.current_branch()?.to_owned()]
     } else {
         branches.to_vec()
     } {

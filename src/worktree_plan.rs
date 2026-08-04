@@ -14,7 +14,10 @@ use crate::protocol::{
 
 use crate::{
     Worktree,
-    branch::{self, Classification},
+    branch::{
+        self, Classification, FETCH_HEAD_BASE, FETCH_LOCAL_BRANCH, FETCH_REGISTERED_WORKTREE,
+        FETCH_REMOTE_BRANCH, Resolver,
+    },
     config::EffectiveConfig,
     git::{self, Repository},
     hook_approval,
@@ -776,14 +779,15 @@ pub(crate) fn plan(
     description: Option<String>,
     dry_run: bool,
 ) -> Result<Result<Plan, Blocker>> {
-    if let Err(error) = git::validate_branch(&repository.current().path, branch) {
+    let resolver = Resolver::new(repository);
+    if let Err(error) = resolver.validate(branch) {
         return Ok(Err(Blocker::InvalidBranch {
             message: format!("{error:#}"),
         }));
     }
-    let classification = branch::classify(repository, branch)?;
+    let classification = resolver.classify(branch)?;
     if let Classification::Registered(worktree) = classification {
-        if let Err(error) = git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE) {
+        if let Err(error) = branch::reject_fetch(fetch.requested(), FETCH_REGISTERED_WORKTREE) {
             return Ok(Err(Blocker::FetchNotApplicable {
                 message: format!("{error:#}"),
             }));
@@ -928,7 +932,7 @@ fn plan_source(
     match classification {
         Classification::Registered(_) => unreachable!("registered classification returned above"),
         Classification::Local => {
-            reject_fetch(fetch, git::FETCH_LOCAL_BRANCH)?;
+            reject_fetch(fetch, FETCH_LOCAL_BRANCH)?;
             if remote.is_some() {
                 return Err(Box::new(Blocker::IrrelevantRemote));
             }
@@ -942,23 +946,23 @@ fn plan_source(
                 return Err(Box::new(Blocker::UnknownRemote));
             }
             if fetch.requested() && config.base == crate::BaseMode::Head {
-                reject_fetch(fetch, git::FETCH_HEAD_BASE)?;
+                reject_fetch(fetch, FETCH_HEAD_BASE)?;
             }
-            git::plan_new_branch_base(
-                &repository.current().path,
-                config.base,
-                config.target_branch.as_deref(),
-                fetch.refreshes(),
-            )
-            .map(|base| Source::New { base })
-            .map_err(|error| {
-                Box::new(Blocker::BaseUnavailable {
-                    message: format!("{error:#}"),
+            Resolver::new(repository)
+                .new_branch_base(
+                    config.base,
+                    config.target_branch.as_deref(),
+                    fetch.refreshes(),
+                )
+                .map(|base| Source::New { base })
+                .map_err(|error| {
+                    Box::new(Blocker::BaseUnavailable {
+                        message: format!("{error:#}"),
+                    })
                 })
-            })
         }
         Classification::Remotes(remotes) => {
-            reject_fetch(fetch, git::FETCH_REMOTE_BRANCH)?;
+            reject_fetch(fetch, FETCH_REMOTE_BRANCH)?;
             match remote {
                 Some(remote) => remotes
                     .into_iter()
@@ -1183,7 +1187,7 @@ fn revalidate(repository: &Repository, plan: &Plan) -> Result<()> {
 
 fn revalidate_new(repository: &Repository, base: &git::NewBranchBase) -> Result<()> {
     let actual = match &base.base_ref {
-        Some(base_ref) => git::base_ref_commit(&repository.current().path, base_ref)?,
+        Some(base_ref) => Resolver::new(repository).base_commit(base_ref)?,
         None => git::head_commit(&repository.current().path)?,
     };
     if actual != base.commit {
@@ -1237,7 +1241,7 @@ pub(crate) fn planned_effects(plan: &Plan) -> Vec<Effect> {
 }
 
 fn reject_fetch(fetch: FetchIntent, because: &str) -> Result<(), Box<Blocker>> {
-    git::reject_fetch(fetch.requested(), because).map_err(|error| {
+    branch::reject_fetch(fetch.requested(), because).map_err(|error| {
         Box::new(Blocker::FetchNotApplicable {
             message: format!("{error:#}"),
         })

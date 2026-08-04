@@ -257,36 +257,45 @@ fn execute(
             );
         }
     }
-    let base =
-        crate::git::resolve_target_branch(&repo.current().path, config.target_branch.as_deref())?;
-    let head = crate::git::current_branch(&repo)?.to_owned();
-    let base_remote = crate::git::branch_upstream_remote(&repo.current().path, &base)?
+    let resolver = crate::branch::Resolver::new(&repo);
+    let base = resolver.target(config.target_branch.as_deref())?;
+    let head = repo.current_branch()?.to_owned();
+    let base_remote = resolver
+        .upstream_remote(&base)?
         .context("target branch has no upstream; cannot resolve base repository")?;
-    let base_url = crate::git::remote_url(&repo.current().path, &base_remote)?;
-    let push_plan =
-        match crate::git::plan_push(&repo.current().path, &head, requested_remote.as_deref()) {
-            Ok(plan) => plan,
-            Err(error)
-                if requested_remote.is_none()
-                    && !json_mode
-                    && !force
-                    && error.to_string().contains("multiple Git remotes") =>
-            {
-                crate::ui::ensure_interactive("remote selection requires confirmation")?;
-                let remotes = git_cmd(&repo, &["remote"])?;
-                let options: Vec<(String, String, String)> = remotes
-                    .lines()
-                    .map(|v| (v.to_owned(), v.to_owned(), String::new()))
-                    .collect();
-                let remote = cliclack::select("Select the pull request head remote")
-                    .items(&options)
-                    .interact()
-                    .map_err(|e| anyhow::anyhow!(e))?;
-                crate::git::plan_push(&repo.current().path, &head, Some(&remote))?
+    let base_url = resolver.remote_url(&base_remote)?;
+    let push_plan = match resolver.push(&head, requested_remote.as_deref()) {
+        Ok(crate::branch::PushResolution::Planned(plan)) => plan,
+        Ok(crate::branch::PushResolution::Ambiguous(remotes)) if !json_mode && !force => {
+            crate::ui::ensure_interactive("remote selection requires confirmation")?;
+            let options: Vec<(String, String, String)> = remotes
+                .iter()
+                .map(|remote| (remote.clone(), remote.clone(), String::new()))
+                .collect();
+            let remote = cliclack::select("Select the pull request head remote")
+                .items(&options)
+                .interact()
+                .map_err(|e| anyhow::anyhow!(e))?;
+            match resolver.push(&head, Some(&remote))? {
+                crate::branch::PushResolution::Planned(plan) => plan,
+                crate::branch::PushResolution::Ambiguous(_) => {
+                    unreachable!("an explicit remote cannot be ambiguous")
+                }
             }
-            Err(error) => return fail(json_mode, "pr.remote_selection", &format!("{error:#}")),
-        };
-    let head_url = crate::git::remote_url(&repo.current().path, &push_plan.remote)?;
+        }
+        Ok(crate::branch::PushResolution::Ambiguous(remotes)) => {
+            return fail(
+                json_mode,
+                "pr.remote_selection",
+                &format!(
+                    "multiple Git remotes are configured ({}) and no origin exists; configure an upstream branch or choose a remote",
+                    remotes.join(", ")
+                ),
+            );
+        }
+        Err(error) => return fail(json_mode, "pr.remote_selection", &format!("{error:#}")),
+    };
+    let head_url = resolver.remote_url(&push_plan.remote)?;
     let mut resolved_provider =
         match provider::resolve(config.pr_provider, &base_url, &head_url, &head) {
             Ok(provider) => provider,

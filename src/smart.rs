@@ -15,6 +15,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     Row, SortMode, Worktree, WorktreeKind,
+    branch::{self, FETCH_REGISTERED_WORKTREE, Resolver},
     config::{EffectiveConfig, HookPhase},
     git::{self, Repository},
     hook_approval,
@@ -128,7 +129,7 @@ pub fn create_dry_run(branch: &str, fetch: bool) -> Result<()> {
 fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> {
     let repository =
         git::repository(&env::current_dir().context("failed to read the current directory")?)?;
-    git::validate_branch(&repository.current().path, branch)?;
+    Resolver::new(&repository).validate(branch)?;
     let plan = match worktree_plan::plan(&repository, intent, branch, None, fetch, None, true)? {
         Ok(plan) => plan,
         Err(PlanBlocker::RemoteSelectionRequired { destination, .. }) => {
@@ -482,7 +483,7 @@ fn pick_and_switch(
                 WorktreeKind::Branch(branch) => Some(branch.as_str()),
                 _ => None,
             };
-            git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE)?;
+            branch::reject_fetch(fetch.requested(), FETCH_REGISTERED_WORKTREE)?;
             enter_existing(repository, &chosen.path, branch)
         }
         PickerChoice::Branch(branch) => {
@@ -1271,7 +1272,7 @@ fn resolve_and_switch(
     intent: Intent,
     fetch: FetchIntent,
 ) -> Result<()> {
-    git::validate_branch(&repository.current().path, branch)?;
+    Resolver::new(repository).validate(branch)?;
     let mut remote = None;
     let plan = loop {
         match worktree_plan::plan(
@@ -1294,7 +1295,7 @@ fn resolve_and_switch(
                 blocker @ (PlanBlocker::RegisteredForCreate { .. }
                 | PlanBlocker::DestinationUnavailable { .. }),
             ) => {
-                git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE)?;
+                branch::reject_fetch(fetch.requested(), FETCH_REGISTERED_WORKTREE)?;
                 return Err(render_plan_blocker(branch, blocker));
             }
             Err(blocker) => return Err(render_plan_blocker(branch, blocker)),
