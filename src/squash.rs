@@ -98,8 +98,8 @@ pub fn plan(
         return Ok(SquashPlan::skipped());
     }
     let commit_count = if countable {
-        let head = git::head_commit(&repository.current().path)?;
-        let count = git::count_commits_between(&repository.current().path, target, &head)?;
+        let count =
+            git::HistoryObservation::new(&repository.current().path).count_from_head(target)?;
         // One commit is already the shape a squash produces, unless staged
         // yolo changes must be folded into a newly generated message.
         if count < 2 && !include_staged {
@@ -272,13 +272,12 @@ fn render_prompt(
         .add_template("squash", template)
         .context("failed to parse the squash generation template")?;
     let cwd = &repository.current().path;
-    let head = git::head_commit(cwd)?;
     let diff_source = if include_staged {
         git::RangeDiffSource::Staged
     } else {
         git::RangeDiffSource::Committed
     };
-    let range = git::HistoryObservation::new(cwd).range(target, &head, diff_source)?;
+    let range = git::HistoryObservation::new(cwd).range_from_head(target, diff_source)?;
     let branch = match &repository.current().kind {
         WorktreeKind::Branch(value) => value.as_str(),
         WorktreeKind::Detached => "(detached)",
@@ -294,6 +293,7 @@ fn render_prompt(
             branch,
             target,
             repo,
+            head_commit => range.head_commit,
             commit_count => range.commit_count,
             commits => range.messages,
             git_diff => range.patch,

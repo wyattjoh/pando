@@ -391,7 +391,7 @@ impl StatusSnapshot {
         !self.entries.is_empty()
     }
 
-    fn into_porcelain(self) -> Vec<u8> {
+    pub(crate) fn into_porcelain(self) -> Vec<u8> {
         let mut output = Vec::new();
         for entry in self.entries {
             output.extend_from_slice(&entry.code);
@@ -424,6 +424,7 @@ pub(crate) enum RangeDiffSource {
 /// Commit messages and diff material for `ancestor..descendant`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CommitRange {
+    pub(crate) head_commit: String,
     pub(crate) commit_count: usize,
     pub(crate) messages: Vec<String>,
     pub(crate) patch: String,
@@ -446,7 +447,7 @@ impl<'cwd> HistoryObservation<'cwd> {
         Self { cwd }
     }
 
-    fn head_commit(self) -> Result<String> {
+    pub(crate) fn head_commit(self) -> Result<String> {
         head_commit_observed(self.cwd)
     }
 
@@ -462,6 +463,10 @@ impl<'cwd> HistoryObservation<'cwd> {
         status_observed(self.cwd)
     }
 
+    pub(crate) fn has_staged_changes(self) -> Result<bool> {
+        staged_changes_present(self.cwd)
+    }
+
     pub(crate) fn staged(self, target: Option<&str>) -> Result<StagedChanges> {
         Ok(StagedChanges {
             patch: staged_patch(self.cwd, target)?,
@@ -469,18 +474,23 @@ impl<'cwd> HistoryObservation<'cwd> {
         })
     }
 
-    pub(crate) fn range(
+    pub(crate) fn count_from_head(self, ancestor: &str) -> Result<usize> {
+        let head = self.head_commit()?;
+        range_commit_count(self.cwd, ancestor, &head)
+    }
+
+    pub(crate) fn range_from_head(
         self,
         ancestor: &str,
-        descendant: &str,
         diff_source: RangeDiffSource,
     ) -> Result<CommitRange> {
-        let commit_count = range_commit_count(self.cwd, ancestor, descendant)?;
-        let messages = range_commit_messages(self.cwd, ancestor, descendant)?;
+        let head_commit = self.head_commit()?;
+        let commit_count = range_commit_count(self.cwd, ancestor, &head_commit)?;
+        let messages = range_commit_messages(self.cwd, ancestor, &head_commit)?;
         let (patch, statistics) = match diff_source {
             RangeDiffSource::Committed => (
-                range_patch(self.cwd, ancestor, descendant, None)?,
-                range_patch(self.cwd, ancestor, descendant, Some("--stat"))?,
+                range_patch(self.cwd, ancestor, &head_commit, None)?,
+                range_patch(self.cwd, ancestor, &head_commit, Some("--stat"))?,
             ),
             RangeDiffSource::Staged => (
                 staged_patch(self.cwd, Some(ancestor))?,
@@ -488,6 +498,7 @@ impl<'cwd> HistoryObservation<'cwd> {
             ),
         };
         Ok(CommitRange {
+            head_commit,
             commit_count,
             messages,
             patch,
@@ -495,7 +506,7 @@ impl<'cwd> HistoryObservation<'cwd> {
         })
     }
 
-    fn recent_subjects(self) -> Result<Vec<String>> {
+    pub(crate) fn recent_subjects(self) -> Result<Vec<String>> {
         recent_subjects_observed(self.cwd)
     }
 }
@@ -1478,20 +1489,6 @@ fn ancestry_observed(cwd: &Path, ancestor: &str, descendant: &str) -> Result<boo
     }
 }
 
-/// Reports whether the invoking worktree has staged, unstaged, or untracked changes.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot inspect status.
-/// Reports whether the Git index contains changes relative to `HEAD`.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot inspect the index.
-pub fn has_staged_changes(cwd: &Path) -> Result<bool> {
-    staged_changes_present(cwd)
-}
-
 fn staged_changes_present(cwd: &Path) -> Result<bool> {
     let output = run_git(cwd, ["diff", "--cached", "--quiet"])
         .context("failed to inspect staged changes")?;
@@ -1503,42 +1500,6 @@ fn staged_changes_present(cwd: &Path) -> Result<bool> {
             stderr_detail(&output)
         ),
     }
-}
-
-/// Returns stable staged patch output without colour or external diff commands.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot produce the staged diff.
-pub fn staged_diff(cwd: &Path) -> Result<String> {
-    staged_patch(cwd, None)
-}
-
-/// Returns stable staged diff statistics.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot produce staged diff statistics.
-pub fn staged_diff_stat(cwd: &Path) -> Result<String> {
-    staged_statistics(cwd, None)
-}
-
-/// Returns a stable staged patch against `target`.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot produce the staged diff.
-pub fn staged_diff_against(cwd: &Path, target: &str) -> Result<String> {
-    staged_patch(cwd, Some(target))
-}
-
-/// Returns stable staged diff statistics against `target`.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot produce the staged diff statistics.
-pub fn staged_diff_stat_against(cwd: &Path, target: &str) -> Result<String> {
-    staged_statistics(cwd, Some(target))
 }
 
 fn staged_patch(cwd: &Path, target: Option<&str>) -> Result<String> {
@@ -1595,15 +1556,6 @@ fn staged_statistics(cwd: &Path, target: Option<&str>) -> Result<String> {
     }
 }
 
-/// Counts the commits reachable from `descendant` but not from `ancestor`.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot walk the range.
-pub fn count_commits_between(cwd: &Path, ancestor: &str, descendant: &str) -> Result<usize> {
-    range_commit_count(cwd, ancestor, descendant)
-}
-
 fn range_commit_count(cwd: &Path, ancestor: &str, descendant: &str) -> Result<usize> {
     let range = format!("{ancestor}..{descendant}");
     git_stdout(cwd, ["rev-list", "--count", &range])
@@ -1611,18 +1563,6 @@ fn range_commit_count(cwd: &Path, ancestor: &str, descendant: &str) -> Result<us
         .trim()
         .parse()
         .with_context(|| format!("git rev-list --count {range} returned a non-numeric count"))
-}
-
-/// Returns the full messages of the commits in `ancestor..descendant`, oldest first.
-///
-/// Each entry keeps its subject and body so a squash generator sees the
-/// reasoning the author already wrote, not just a list of subjects.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot walk the range.
-pub fn range_messages(cwd: &Path, ancestor: &str, descendant: &str) -> Result<Vec<String>> {
-    range_commit_messages(cwd, ancestor, descendant)
 }
 
 fn range_commit_messages(cwd: &Path, ancestor: &str, descendant: &str) -> Result<Vec<String>> {
@@ -1637,24 +1577,6 @@ fn range_commit_messages(cwd: &Path, ancestor: &str, descendant: &str) -> Result
         .filter(|message| !message.is_empty())
         .map(str::to_owned)
         .collect())
-}
-
-/// Returns a stable patch for `ancestor..descendant`.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot produce the diff.
-pub fn range_diff(cwd: &Path, ancestor: &str, descendant: &str) -> Result<String> {
-    range_patch(cwd, ancestor, descendant, None)
-}
-
-/// Returns stable diff statistics for `ancestor..descendant`.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot produce the statistics.
-pub fn range_diff_stat(cwd: &Path, ancestor: &str, descendant: &str) -> Result<String> {
-    range_patch(cwd, ancestor, descendant, Some("--stat"))
 }
 
 fn range_patch(
@@ -1728,15 +1650,6 @@ fn commit_message_stdin_impl(cwd: &Path, message: &str) -> Result<String> {
     bail!("git commit failed with {}\n{transcript}", output.status)
 }
 
-/// Returns up to ten reachable commit subjects, newest first.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot read commit history other than an unborn `HEAD`.
-pub fn recent_subjects(cwd: &Path) -> Result<Vec<String>> {
-    HistoryObservation::new(cwd).recent_subjects()
-}
-
 fn recent_subjects_observed(cwd: &Path) -> Result<Vec<String>> {
     let output =
         run_git(cwd, ["log", "-10", "--format=%s"]).context("failed to read recent commits")?;
@@ -1767,20 +1680,6 @@ fn commit_impl(cwd: &Path, message: &str) -> Result<()> {
     } else {
         bail!("git commit failed: {}", stderr_detail(&output))
     }
-}
-
-/// Commits the index with terminal prompts disabled, retaining both streams.
-///
-/// # Errors
-///
-/// Returns an error only when Git cannot be started.
-/// Returns the byte-safe porcelain status used by machine commit planning.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot inspect status.
-pub fn status_porcelain(cwd: &Path) -> Result<Vec<u8>> {
-    Ok(HistoryObservation::new(cwd).status()?.into_porcelain())
 }
 
 fn status_observed(cwd: &Path) -> Result<StatusSnapshot> {

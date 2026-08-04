@@ -221,7 +221,7 @@ fn run_human(invocation: &Invocation, source: &MessageSource) -> Result<()> {
     let repository = git::repository(&cwd)?;
     ensure_worktree(&repository)?;
     let mut stage_all = invocation.stage_all;
-    let staged = git::has_staged_changes(&repository.current().path)?;
+    let staged = git::HistoryObservation::new(&repository.current().path).has_staged_changes()?;
     let dirty = has_any_changes(&repository.current().path)?;
     if stage_all && !dirty {
         bail!("nothing to commit");
@@ -271,7 +271,7 @@ fn run_human(invocation: &Invocation, source: &MessageSource) -> Result<()> {
         "Failed to create commit",
         |_| LifecycleMutation::new(&repository.current().path).commit(&message.value),
     )?;
-    let hash = git::head_commit(&repository.current().path)?;
+    let hash = git::HistoryObservation::new(&repository.current().path).head_commit()?;
     let rendered_message = render::commit_message(&message.value);
     if message.generated {
         ui::step(rendered_message)?;
@@ -324,7 +324,9 @@ fn execute_json(
         outcome.result = Err(commit_error("repository.bare", error));
         return outcome;
     }
-    let staged = git::has_staged_changes(&repository.current().path).unwrap_or(false);
+    let staged = git::HistoryObservation::new(&repository.current().path)
+        .has_staged_changes()
+        .unwrap_or(false);
     let dirty = has_any_changes(&repository.current().path).unwrap_or(false);
     if invocation.stage_all && !dirty {
         outcome.result = Err(commit_error(
@@ -422,7 +424,7 @@ fn execute_json(
     }
     outcome.effects.last_mut().expect("commit effect").completed = true;
     outcome.context = context_for(&repository);
-    match git::head_commit(&repository.current().path) {
+    match git::HistoryObservation::new(&repository.current().path).head_commit() {
         Ok(commit) => outcome.result = Ok(CommitSuccess::Committed { commit, selection }),
         Err(error) => {
             outcome.result = Err(commit_error(
@@ -669,7 +671,7 @@ fn ensure_worktree(repository: &Repository) -> Result<()> {
     Ok(())
 }
 fn ensure_staged(repository: &Repository) -> Result<()> {
-    if git::has_staged_changes(&repository.current().path)? {
+    if git::HistoryObservation::new(&repository.current().path).has_staged_changes()? {
         Ok(())
     } else {
         bail!("nothing to commit")
@@ -679,7 +681,7 @@ fn has_any_changes(cwd: &Path) -> Result<bool> {
     Ok(!status_bytes(cwd)?.is_empty())
 }
 fn status_bytes(cwd: &Path) -> Result<Vec<u8>> {
-    git::status_porcelain(cwd)
+    Ok(git::HistoryObservation::new(cwd).status()?.into_porcelain())
 }
 
 fn preview_all(cwd: &Path) -> Result<()> {
@@ -705,7 +707,7 @@ fn preview_selection(cwd: &Path, stage_all: bool) -> Result<()> {
     }
 }
 fn preview_staged(cwd: &Path) -> Result<()> {
-    let stat = git::staged_diff_stat(cwd)?;
+    let stat = git::HistoryObservation::new(cwd).staged(None)?.statistics;
     ui::info(format!(
         "{}\n{}",
         ui::heading_style().apply_to("Staged changes:"),
@@ -734,7 +736,7 @@ fn render_prompt(repository: &Repository, template: &str) -> Result<String> {
     );
     let history = git::HistoryObservation::new(&repository.current().path);
     let staged = history.staged(None)?;
-    environment.get_template("commit")?.render(context! { git_diff => staged.patch, git_diff_stat => staged.statistics, branch, repo, recent_commits => git::recent_subjects(&repository.current().path)? }).context("failed to render commit generation template")
+    environment.get_template("commit")?.render(context! { git_diff => staged.patch, git_diff_stat => staged.statistics, branch, repo, recent_commits => history.recent_subjects()? }).context("failed to render commit generation template")
 }
 fn context_for(repository: &Repository) -> CommitContext {
     let path = &repository.current().path;
@@ -742,7 +744,9 @@ fn context_for(repository: &Repository) -> CommitContext {
         .status()
         .unwrap_or_default();
     let mut changes = ChangesContext {
-        staged_diffstat: git::staged_diff_stat(path).unwrap_or_default(),
+        staged_diffstat: git::HistoryObservation::new(path)
+            .staged(None)
+            .map_or_else(|_| String::new(), |staged| staged.statistics),
         ..ChangesContext::default()
     };
     for entry in status.entries {
