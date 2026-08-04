@@ -29,7 +29,7 @@ use crate::{
 
 pub use crate::read_only::GetProperty;
 
-#[derive(Clone, Copy, Debug, clap::Subcommand)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::Subcommand)]
 pub enum TrustCommand {
     /// Show configured and trusted state for every hook phase.
     Status,
@@ -196,9 +196,10 @@ fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> 
 pub fn trust_dry_run(command: TrustCommand) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = git::repository(&cwd)?;
+    let outcome = trust::execute(&repository, trust_leaf(command), true)?;
     match command {
         TrustCommand::Status | TrustCommand::CommitStatus | TrustCommand::MergeStatus => {
-            trust_command(command)
+            render_trust_outcome(command, outcome)
         }
         TrustCommand::Reset => ui::finish("Would reset hook trust; no changes made."),
         TrustCommand::CommitReset => {
@@ -234,6 +235,13 @@ pub fn trust_dry_run(command: TrustCommand) -> Result<()> {
 pub fn trust_command(command: TrustCommand) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = git::repository(&cwd)?;
+    if !matches!(
+        command,
+        TrustCommand::CommitApprove | TrustCommand::PrApprove | TrustCommand::MergeApprove
+    ) {
+        let outcome = trust::execute(&repository, trust_leaf(command), false)?;
+        return render_trust_outcome(command, outcome);
+    }
     match command {
         TrustCommand::Status => {
             let config = EffectiveConfig::load(&repository)?;
@@ -376,6 +384,85 @@ pub fn trust_command(command: TrustCommand) -> Result<()> {
             trust::approve_generation(&repository, &config.generation)?;
             ui::success("Approved commit generator for this repository.")?;
         }
+    }
+    Ok(())
+}
+
+const fn trust_leaf(command: TrustCommand) -> trust::Command {
+    match command {
+        TrustCommand::Status => trust::Command::HooksStatus,
+        TrustCommand::Reset => trust::Command::HooksReset,
+        TrustCommand::CommitStatus => trust::Command::CommitStatus,
+        TrustCommand::CommitReset => trust::Command::CommitReset,
+        TrustCommand::CommitApprove => trust::Command::CommitApprove,
+        TrustCommand::PrStatus => trust::Command::PrStatus,
+        TrustCommand::PrReset => trust::Command::PrReset,
+        TrustCommand::PrApprove => trust::Command::PrApprove,
+        TrustCommand::MergeStatus => trust::Command::MergeStatus,
+        TrustCommand::MergeReset => trust::Command::MergeReset,
+        TrustCommand::MergeApprove => trust::Command::MergeApprove,
+    }
+}
+
+fn render_trust_outcome(command: TrustCommand, outcome: trust::Outcome) -> Result<()> {
+    let result = outcome
+        .result
+        .map_err(|failure| anyhow::anyhow!(failure.message))?;
+    match result {
+        trust::Success::Status { phases } => {
+            for phase in phases {
+                if !phase.configured {
+                    ui::info(format!("No {} are configured.", phase.phase))?;
+                } else if phase.trusted {
+                    ui::success(format!("The current {} are trusted.", phase.phase))?;
+                } else {
+                    ui::warning(format!("The current {} are not trusted.", phase.phase))?;
+                }
+            }
+        }
+        trust::Success::GeneratorStatus { state, .. } => {
+            let noun = match command {
+                TrustCommand::CommitStatus => "commit generator",
+                TrustCommand::PrStatus => "PR generator",
+                TrustCommand::MergeStatus => "squash message generator",
+                _ => unreachable!(),
+            };
+            match state {
+                "absent" => ui::info(format!("No {noun} is configured."))?,
+                "user_controlled" => ui::info(format!("The effective {noun} is user-controlled."))?,
+                "trusted_shared" if command == TrustCommand::CommitStatus => {
+                    ui::success("The effective shared commit generator is trusted.")?;
+                }
+                "trusted_shared" => ui::success(format!("The effective {noun} is trusted."))?,
+                "untrusted_shared" => {
+                    ui::warning(format!("The effective shared {noun} is not trusted."))?;
+                }
+                _ => unreachable!("trust owns a closed status catalog"),
+            }
+        }
+        trust::Success::Reset => match command {
+            TrustCommand::Reset => ui::success("Reset hook trust for this repository.")?,
+            TrustCommand::CommitReset => {
+                ui::success("Reset commit generator trust for this repository.")?;
+            }
+            TrustCommand::PrReset => ui::success("Reset PR generator trust for this repository.")?,
+            TrustCommand::MergeReset => {
+                ui::success("Reset squash message generator trust for this repository.")?;
+            }
+            _ => unreachable!(),
+        },
+        trust::Success::AlreadyReset => match command {
+            TrustCommand::Reset => ui::info("No saved hook trust existed for this repository.")?,
+            TrustCommand::CommitReset => {
+                ui::info("No saved commit generator trust existed for this repository.")?;
+            }
+            TrustCommand::PrReset => ui::success("Reset PR generator trust for this repository.")?,
+            TrustCommand::MergeReset => {
+                ui::info("No saved squash message generator trust existed for this repository.")?;
+            }
+            _ => unreachable!(),
+        },
+        trust::Success::DryRun { .. } => unreachable!("human execution was not a dry run"),
     }
     Ok(())
 }

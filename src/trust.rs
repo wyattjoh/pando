@@ -7,14 +7,326 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    config::{self, EffectiveGeneration, GenerationSource, HookPhase, HookStep},
+    config::{self, EffectiveConfig, EffectiveGeneration, GenerationSource, HookPhase, HookStep},
     git::Repository,
-    hash,
+    hash, hook_approval,
+    protocol::{BytePath, Effect, ErrorBody, MutationClass, RecoveryAction, RecoveryInvocation},
 };
+
+/// A stable trust command leaf owned by the trust domain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Command {
+    HooksStatus,
+    HooksReset,
+    CommitStatus,
+    CommitReset,
+    CommitApprove,
+    PrStatus,
+    PrReset,
+    PrApprove,
+    MergeStatus,
+    MergeReset,
+    MergeApprove,
+}
+
+impl Command {
+    /// Returns the version 1 protocol command identifier.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::HooksStatus => "trust.status",
+            Self::HooksReset => "trust.reset",
+            Self::CommitStatus => "trust.commit_status",
+            Self::CommitReset => "trust.commit_reset",
+            Self::CommitApprove => "trust.commit_approve",
+            Self::PrStatus => "trust.pr_status",
+            Self::PrReset => "trust.pr_reset",
+            Self::PrApprove => "trust.pr_approve",
+            Self::MergeStatus => "trust.merge_status",
+            Self::MergeReset => "trust.merge_reset",
+            Self::MergeApprove => "trust.merge_approve",
+        }
+    }
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct HookStatus {
+    pub phase: &'static str,
+    pub configured: bool,
+    pub trusted: bool,
+    pub step_count: usize,
+    pub source: HookSource,
+    pub identity: Option<String>,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct HookSource {
+    pub kind: &'static str,
+    pub repository: BytePath,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct Candidate {
+    pub command: Option<String>,
+    pub template: Option<String>,
+    pub identity: Option<String>,
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Success {
+    Status {
+        phases: Vec<HookStatus>,
+    },
+    GeneratorStatus {
+        state: &'static str,
+        identity: Option<String>,
+        source: Option<String>,
+    },
+    Reset,
+    AlreadyReset,
+    DryRun {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        candidate: Option<Candidate>,
+    },
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct Failure {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl From<Failure> for ErrorBody {
+    fn from(value: Failure) -> Self {
+        Self {
+            code: value.code.into(),
+            message: value.message,
+        }
+    }
+}
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+#[serde(untagged)]
+pub enum ContextBody {
+    Empty {},
+    Candidate { candidate: Candidate },
+}
+
+/// One command-owned trust result, ready for either presentation adapter.
+#[derive(Clone, Debug)]
+pub struct Outcome {
+    pub result: std::result::Result<Success, Failure>,
+    pub context: ContextBody,
+    pub effects: Vec<Effect>,
+    pub recovery: Vec<RecoveryAction<()>>,
+}
+
+impl Outcome {
+    fn success(result: Success, effects: Vec<Effect>) -> Self {
+        Self {
+            result: Ok(result),
+            context: ContextBody::Empty {},
+            effects,
+            recovery: Vec::new(),
+        }
+    }
+}
+
+/// Executes a noninteractive trust leaf and returns domain-owned protocol data.
+///
+/// Approval leaves never persist approval. They return a preview for dry runs and
+/// an approval-required failure otherwise. The human adapter must gather consent
+/// before calling the explicit approval persistence functions.
+///
+/// # Errors
+/// Returns an error when configuration or trust storage cannot be inspected or updated.
+#[allow(clippy::too_many_lines)]
+pub fn execute(repository: &Repository, command: Command, dry_run: bool) -> Result<Outcome> {
+    let mutation = |result| {
+        Outcome::success(
+            result,
+            vec![Effect {
+                action: command.id().into(),
+                attempted: !dry_run,
+                completed: !dry_run,
+                details: None,
+            }],
+        )
+    };
+    match command {
+        Command::HooksStatus => {
+            let config = EffectiveConfig::load(repository)?;
+            let phases = HookPhase::all()
+                .iter()
+                .map(|phase| {
+                    let steps = config.hooks(*phase);
+                    let (trusted, identity) =
+                        match hook_approval::evaluate(repository, *phase, steps)? {
+                            hook_approval::Evaluation::NoCommands => (false, None),
+                            hook_approval::Evaluation::Trusted { identity } => {
+                                (true, Some(identity))
+                            }
+                            hook_approval::Evaluation::ApprovalRequired(candidate) => {
+                                (false, Some(candidate.identity().to_owned()))
+                            }
+                        };
+                    Ok(HookStatus {
+                        phase: phase.key(),
+                        configured: !steps.is_empty(),
+                        trusted,
+                        step_count: steps.len(),
+                        source: HookSource {
+                            kind: "effective",
+                            repository: BytePath::path(&repository.current().path),
+                        },
+                        identity,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Outcome::success(Success::Status { phases }, Vec::new()))
+        }
+        Command::HooksReset => {
+            let changed = !dry_run && reset(repository)?;
+            Ok(mutation(reset_result(changed, dry_run)))
+        }
+        Command::CommitStatus | Command::PrStatus | Command::MergeStatus => {
+            let config = EffectiveConfig::load(repository)?;
+            let generation = match command {
+                Command::CommitStatus => &config.generation,
+                Command::PrStatus => &config.pr_generation,
+                Command::MergeStatus => &config.merge_generation,
+                _ => unreachable!(),
+            };
+            let identity = match command {
+                Command::CommitStatus => generation_hash(generation),
+                Command::PrStatus => generation_hash_named(generation, b"pando-pr-generation-v1"),
+                Command::MergeStatus => merge_generation_hash(generation),
+                _ => unreachable!(),
+            };
+            let trusted = match command {
+                Command::CommitStatus => is_generation_trusted(repository, generation)?,
+                Command::PrStatus => is_pr_generation_trusted(repository, generation)?,
+                Command::MergeStatus => is_merge_generation_trusted(repository, generation)?,
+                _ => unreachable!(),
+            };
+            let state = if generation.command.is_none() {
+                "absent"
+            } else if identity.is_none() {
+                "user_controlled"
+            } else if trusted {
+                "trusted_shared"
+            } else {
+                "untrusted_shared"
+            };
+            let source = generation
+                .command
+                .as_ref()
+                .map(|value| format!("{:?}", value.source).to_lowercase());
+            Ok(Outcome::success(
+                Success::GeneratorStatus {
+                    state,
+                    identity,
+                    source,
+                },
+                Vec::new(),
+            ))
+        }
+        Command::CommitReset | Command::PrReset | Command::MergeReset => {
+            let changed = if dry_run {
+                false
+            } else {
+                match command {
+                    Command::CommitReset => reset_generation(repository)?,
+                    Command::PrReset => reset_pr_generation(repository)?,
+                    Command::MergeReset => reset_merge_generation(repository)?,
+                    _ => unreachable!(),
+                }
+            };
+            Ok(mutation(reset_result(changed, dry_run)))
+        }
+        Command::CommitApprove | Command::PrApprove | Command::MergeApprove => {
+            let config = EffectiveConfig::load(repository)?;
+            let generation = match command {
+                Command::CommitApprove => &config.generation,
+                Command::PrApprove => &config.pr_generation,
+                Command::MergeApprove => &config.merge_generation,
+                _ => unreachable!(),
+            };
+            let identity = match command {
+                Command::CommitApprove => generation_hash(generation),
+                Command::PrApprove => generation_hash_named(generation, b"pando-pr-generation-v1"),
+                Command::MergeApprove => merge_generation_hash(generation),
+                _ => unreachable!(),
+            };
+            let candidate = Candidate {
+                command: generation.command.as_ref().map(|value| value.value.clone()),
+                template: generation
+                    .template
+                    .as_ref()
+                    .map(|value| value.value.clone()),
+                identity,
+            };
+            if dry_run {
+                return Ok(Outcome::success(
+                    Success::DryRun {
+                        candidate: Some(candidate),
+                    },
+                    Vec::new(),
+                ));
+            }
+            let action = match command {
+                Command::CommitApprove => "trust.approve_commit_generator",
+                Command::PrApprove => "trust.approve_pr_generator",
+                Command::MergeApprove => "trust.approve_merge_generator",
+                _ => unreachable!(),
+            };
+            Ok(Outcome {
+                result: Err(Failure {
+                    code: "trust.approval_required",
+                    message: "approval requires a manual human invocation".into(),
+                }),
+                context: ContextBody::Candidate { candidate },
+                effects: Vec::new(),
+                recovery: vec![RecoveryAction {
+                    action: action.into(),
+                    description: "Review these settings and approve interactively".into(),
+                    mutation: MutationClass::Trust,
+                    requires_human_approval: true,
+                    invocation: RecoveryInvocation {
+                        argv: vec!["pando".into(), "trust".into(), human_leaf(command).into()],
+                        stdin: None,
+                        working_directory: Some(BytePath::path(&repository.current().path)),
+                    },
+                }],
+            })
+        }
+    }
+}
+
+const fn human_leaf(command: Command) -> &'static str {
+    match command {
+        Command::CommitApprove => "commit-approve",
+        Command::PrApprove => "pr-approve",
+        Command::MergeApprove => "merge-approve",
+        _ => unreachable!(),
+    }
+}
+
+fn reset_result(changed: bool, dry_run: bool) -> Success {
+    if dry_run {
+        Success::DryRun { candidate: None }
+    } else if changed {
+        Success::Reset
+    } else {
+        Success::AlreadyReset
+    }
+}
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

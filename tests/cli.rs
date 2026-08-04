@@ -2959,6 +2959,10 @@ fn json_trust_merge_leaves_answer_structurally_instead_of_panicking() {
         value["next_steps"][0]["invocation"]["argv"][2],
         "merge-approve"
     );
+    assert!(
+        !xdg.path().join("pando/trust.json").exists(),
+        "structured approval must not persist trust"
+    );
 }
 
 /// `pr-*` has no JSON implementation. It must refuse structurally rather than

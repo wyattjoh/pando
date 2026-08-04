@@ -945,135 +945,16 @@ pub fn trust(command: &str, request_mode: bool, dry_run_flag: bool) -> Result<()
         Ok(v) => v,
         Err(e) => return emit_err(command, id, "repository.invalid", format!("{e:#}")),
     };
-    let result = match command {
-        "trust.status" => {
-            let config = EffectiveConfig::load(&repo)?;
-            let phases = HookPhase::all()
-                .iter()
-                .map(|phase| {
-                    let steps = config.hooks(*phase);
-                    let (trusted, identity) = match hook_approval::evaluate(&repo, *phase, steps)? {
-                        hook_approval::Evaluation::NoCommands => (false, None),
-                        hook_approval::Evaluation::Trusted { identity } => (true, Some(identity)),
-                        hook_approval::Evaluation::ApprovalRequired(candidate) => {
-                            (false, Some(candidate.identity().to_owned()))
-                        }
-                    };
-                    Ok(json!({
-                        "phase": phase.key(),
-                        "configured": !steps.is_empty(),
-                        "trusted": trusted,
-                        "step_count": steps.len(),
-                        "source": {
-                            "kind": "effective",
-                            "repository": BytePath::path(&repo.current().path),
-                        },
-                        "identity": identity,
-                    }))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            json!({"outcome":"status","phases":phases})
-        }
-        "trust.reset" => {
-            let changed = if dry { false } else { trust::reset(&repo)? };
-            json!({"outcome":if changed{"reset"}else if dry{"dry_run"}else{"already_reset"}})
-        }
-        "trust.commit_status" => {
-            let c = EffectiveConfig::load(&repo)?;
-            let hash = trust::generation_hash(&c.generation);
-            let state = if c.generation.command.is_none() {
-                "absent"
-            } else if hash.is_none() {
-                "user_controlled"
-            } else if trust::is_generation_trusted(&repo, &c.generation)? {
-                "trusted_shared"
-            } else {
-                "untrusted_shared"
-            };
-            let source = c
-                .generation
-                .command
-                .as_ref()
-                .map(|v| format!("{:?}", v.source).to_lowercase());
-            json!({"outcome":"status","state":state,"identity":hash,"source":source})
-        }
-        "trust.commit_reset" => {
-            let changed = if dry {
-                false
-            } else {
-                trust::reset_generation(&repo)?
-            };
-            json!({"outcome":if changed{"reset"}else if dry{"dry_run"}else{"already_reset"}})
-        }
-        "trust.commit_approve" => {
-            let c = EffectiveConfig::load(&repo)?;
-            let details = json!({"command":c.generation.command.as_ref().map(|v|&v.value),"template":c.generation.template.as_ref().map(|v|&v.value),"identity":trust::generation_hash(&c.generation)});
-            if dry {
-                json!({"outcome":"dry_run","candidate":details})
-            } else {
-                let mut response = protocol::failure(
-                    command,
-                    id,
-                    "trust.approval_required",
-                    "approval requires a manual human invocation",
-                );
-                response.context = json!({"candidate":details});
-                response.next_steps.push(crate::protocol::NextStep {
-                    action: "trust.approve_commit_generator".into(), description: "Review these settings and approve interactively".into(), mutation: "trust".into(), requires_human_approval: true,
-                    invocation: json!({"argv":["pando","trust","commit-approve"],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}),
-                });
-                return emit(response, true);
-            }
-        }
-        "trust.merge_status" => {
-            let c = EffectiveConfig::load(&repo)?;
-            let hash = trust::merge_generation_hash(&c.merge_generation);
-            let state = if c.merge_generation.command.is_none() {
-                "absent"
-            } else if hash.is_none() {
-                "user_controlled"
-            } else if trust::is_merge_generation_trusted(&repo, &c.merge_generation)? {
-                "trusted_shared"
-            } else {
-                "untrusted_shared"
-            };
-            let source = c
-                .merge_generation
-                .command
-                .as_ref()
-                .map(|v| format!("{:?}", v.source).to_lowercase());
-            json!({"outcome":"status","state":state,"identity":hash,"source":source})
-        }
-        "trust.merge_reset" => {
-            let changed = if dry {
-                false
-            } else {
-                trust::reset_merge_generation(&repo)?
-            };
-            json!({"outcome":if changed{"reset"}else if dry{"dry_run"}else{"already_reset"}})
-        }
-        "trust.merge_approve" => {
-            let c = EffectiveConfig::load(&repo)?;
-            let details = json!({"command":c.merge_generation.command.as_ref().map(|v|&v.value),"template":c.merge_generation.template.as_ref().map(|v|&v.value),"identity":trust::merge_generation_hash(&c.merge_generation)});
-            if dry {
-                json!({"outcome":"dry_run","candidate":details})
-            } else {
-                let mut response = protocol::failure(
-                    command,
-                    id,
-                    "trust.approval_required",
-                    "approval requires a manual human invocation",
-                );
-                response.context = json!({"candidate":details});
-                response.next_steps.push(crate::protocol::NextStep {
-                    action: "trust.approve_merge_generator".into(), description: "Review these settings and approve interactively".into(), mutation: "trust".into(), requires_human_approval: true,
-                    invocation: json!({"argv":["pando","trust","merge-approve"],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}),
-                });
-                return emit(response, true);
-            }
-        }
-        // `pr-*` trust leaves have no JSON implementation yet. Report that as a
-        // structured refusal rather than panicking on an unmatched leaf.
+    let leaf = match command {
+        "trust.status" => trust::Command::HooksStatus,
+        "trust.reset" => trust::Command::HooksReset,
+        "trust.commit_status" => trust::Command::CommitStatus,
+        "trust.commit_reset" => trust::Command::CommitReset,
+        "trust.commit_approve" => trust::Command::CommitApprove,
+        "trust.merge_status" => trust::Command::MergeStatus,
+        "trust.merge_reset" => trust::Command::MergeReset,
+        "trust.merge_approve" => trust::Command::MergeApprove,
+        // PR trust leaves intentionally retain their published version 1 refusal.
         _ => {
             return emit_err(
                 command,
@@ -1083,23 +964,18 @@ pub fn trust(command: &str, request_mode: bool, dry_run_flag: bool) -> Result<()
             );
         }
     };
-    let effects = if matches!(
-        command,
-        "trust.reset" | "trust.commit_reset" | "trust.merge_reset"
-    ) {
-        vec![Effect {
-            action: command.into(),
-            attempted: !dry,
-            completed: !dry,
-            details: None,
-        }]
-    } else {
-        vec![]
-    };
-    emit(
-        protocol::success(command, id, result, json!({}), effects),
-        false,
-    )
+    let outcome = trust::execute(&repo, leaf, dry)?;
+    let failed = outcome.result.is_err();
+    let response = protocol::adapt(
+        leaf.id(),
+        id,
+        outcome.result,
+        outcome.context,
+        outcome.effects,
+        Vec::new(),
+        outcome.recovery,
+    )?;
+    emit(response, failed)
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
