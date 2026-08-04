@@ -643,13 +643,7 @@ fn validate_message(message: &str) -> Result<String> {
 }
 
 fn git_commit_captured(cwd: &Path, message: &str) -> Result<Output> {
-    Command::new("git")
-        .args(["commit", "-m", message])
-        .current_dir(cwd)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .output()
-        .context("failed to start git commit")
+    git::commit_captured(cwd, message)
 }
 
 fn diagnostics_for(source: &str, output: &Output) -> Vec<Diagnostic> {
@@ -686,14 +680,7 @@ fn has_any_changes(cwd: &Path) -> Result<bool> {
     Ok(!status_bytes(cwd)?.is_empty())
 }
 fn status_bytes(cwd: &Path) -> Result<Vec<u8>> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "-z"])
-        .current_dir(cwd)
-        .output()?;
-    if !output.status.success() {
-        bail!("git status failed");
-    }
-    Ok(output.stdout)
+    git::status_porcelain(cwd)
 }
 
 fn preview_all(cwd: &Path) -> Result<()> {

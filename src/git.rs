@@ -5,7 +5,7 @@ use std::{
     io::Write,
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, ExitStatus, Output, Stdio},
     thread,
 };
 
@@ -13,6 +13,83 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, FixedOffset};
 
 use crate::{BaseMode, Condition, Worktree, WorktreeKind};
+
+/// Private execution kernel for the installed Git executable.
+///
+/// Callers choose only the stream policy needed by the repository operation;
+/// executable selection, working directory, terminal routing, and optional
+/// editor suppression stay local to this module.
+struct GitProcess {
+    command: Command,
+}
+
+struct PipedContexts {
+    start: &'static str,
+    open_input: &'static str,
+    write_input: &'static str,
+    writer_panicked: &'static str,
+    await_output: &'static str,
+}
+
+impl GitProcess {
+    fn new<I, S>(cwd: &Path, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = Command::new("git");
+        command.args(args).current_dir(cwd);
+        Self { command }
+    }
+
+    fn suppress_editor(mut self) -> Self {
+        self.command.env("GIT_EDITOR", "true");
+        self
+    }
+
+    fn disable_terminal_prompt(mut self) -> Self {
+        self.command.env("GIT_TERMINAL_PROMPT", "0");
+        self
+    }
+
+    fn captured(mut self) -> std::io::Result<Output> {
+        self.command.stdin(Stdio::null()).output()
+    }
+
+    fn captured_inheriting_stdin(mut self) -> std::io::Result<Output> {
+        self.command.stdin(Stdio::inherit()).output()
+    }
+
+    fn displayed(mut self) -> Result<ExitStatus> {
+        self.command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::from(open_stderr()?))
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(Into::into)
+    }
+
+    fn piped(mut self, input: Vec<u8>, contexts: &PipedContexts) -> Result<Output> {
+        let mut child = self
+            .command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context(contexts.start)?;
+        let mut stdin = child.stdin.take().context(contexts.open_input)?;
+        let write_context = contexts.write_input;
+        let writer =
+            thread::spawn(move || -> Result<()> { stdin.write_all(&input).context(write_context) });
+        let output = child.wait_with_output();
+        let writer = writer
+            .join()
+            .map_err(|_| anyhow!(contexts.writer_panicked))?;
+        let output = output.context(contexts.await_output)?;
+        writer?;
+        Ok(output)
+    }
+}
 
 #[derive(Debug)]
 pub struct Discovery {
@@ -171,33 +248,22 @@ fn resolve_commit_timestamps(
         return Ok(HashMap::new());
     }
 
-    let mut child = Command::new("git")
-        .args(["cat-file", "--batch"])
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to start git cat-file --batch")?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .context("failed to open git cat-file input")?;
     let requests = oids
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join("\n");
-    let writer = thread::spawn(move || -> Result<()> {
-        writeln!(stdin, "{requests}").context("failed to write git cat-file input")
-    });
-    let output = child.wait_with_output();
-    let writer = writer
-        .join()
-        .map_err(|_| anyhow!("git cat-file input writer panicked"))?;
-    let output = output.context("failed to read git cat-file output")?;
+    let output = GitProcess::new(cwd, ["cat-file", "--batch"]).piped(
+        format!("{requests}\n").into_bytes(),
+        &PipedContexts {
+            start: "failed to start git cat-file --batch",
+            open_input: "failed to open git cat-file input",
+            write_input: "failed to write git cat-file input",
+            writer_panicked: "git cat-file input writer panicked",
+            await_output: "failed to read git cat-file output",
+        },
+    )?;
     ensure_success(&output, "git cat-file --batch")?;
-    writer?;
     parse_commit_batch(&output.stdout, oids)
 }
 
@@ -871,13 +937,8 @@ pub fn remote_url(cwd: &Path, remote: &str) -> Result<String> {
 pub fn push(cwd: &Path, plan: &PushPlan, inherit: bool) -> Result<()> {
     let refspec = format!("{}:{}", plan.branch, plan.branch);
     if inherit {
-        let status = Command::new("git")
-            .args(["push", "-u", &plan.remote, &refspec])
-            .current_dir(cwd)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::from(open_stderr()?))
-            .stderr(Stdio::inherit())
-            .status()
+        let status = GitProcess::new(cwd, ["push", "-u", &plan.remote, &refspec])
+            .displayed()
             .context("failed to start git push")?;
         if status.success() {
             Ok(())
@@ -1021,12 +1082,9 @@ fn run_lifecycle_git(cwd: &Path, args: &[&str], operation: &str, inherit: bool) 
     if inherit {
         return run_git_inherit(cwd, args, operation).map(|()| String::new());
     }
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_EDITOR", "true")
-        .stdin(Stdio::null())
-        .output()
+    let output = GitProcess::new(cwd, args)
+        .suppress_editor()
+        .captured()
         .with_context(|| format!("failed to start git {operation}"))?;
     let transcript = combined_output(&output);
     if output.status.success() {
@@ -1067,18 +1125,13 @@ fn combined_output(output: &Output) -> String {
 ///
 /// Returns an error when Git cannot remove the worktree.
 pub fn remove_worktree(cwd: &Path, path: &Path, force: bool) -> Result<()> {
-    let mut command = Command::new("git");
-    command.arg("worktree").arg("remove");
+    let mut args = vec![OsStr::new("worktree"), OsStr::new("remove")];
     if force {
-        command.arg("--force");
+        args.push(OsStr::new("--force"));
     }
-    let status = command
-        .arg(path)
-        .current_dir(cwd)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::from(open_stderr()?))
-        .stderr(Stdio::inherit())
-        .status()
+    args.push(path.as_os_str());
+    let status = GitProcess::new(cwd, args)
+        .displayed()
         .context("failed to start git worktree remove")?;
     if status.success() {
         Ok(())
@@ -1092,16 +1145,13 @@ pub fn remove_worktree(cwd: &Path, path: &Path, force: bool) -> Result<()> {
 /// # Errors
 /// Returns an error only when Git cannot be started.
 pub fn remove_worktree_captured(cwd: &Path, path: &Path, force: bool) -> Result<Output> {
-    let mut command = Command::new("git");
-    command.arg("worktree").arg("remove");
+    let mut args = vec![OsStr::new("worktree"), OsStr::new("remove")];
     if force {
-        command.arg("--force");
+        args.push(OsStr::new("--force"));
     }
-    command
-        .arg(path)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
+    args.push(path.as_os_str());
+    GitProcess::new(cwd, args)
+        .captured()
         .context("failed to start git worktree remove")
 }
 
@@ -1349,24 +1399,18 @@ pub fn reset_soft(cwd: &Path, commit: &str, inherit: bool) -> Result<String> {
 /// Panics if the child's piped stdin is unavailable, which cannot happen for a
 /// process spawned with `Stdio::piped`.
 pub fn commit_message_stdin(cwd: &Path, message: &str) -> Result<String> {
-    let mut child = Command::new("git")
-        .args(["commit", "--file", "-"])
-        .current_dir(cwd)
-        .env("GIT_EDITOR", "true")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to start git commit")?;
-    child
-        .stdin
-        .take()
-        .expect("stdin was piped")
-        .write_all(message.as_bytes())
-        .context("failed to send the commit message to git commit")?;
-    let output = child
-        .wait_with_output()
-        .context("failed to await git commit")?;
+    let output = GitProcess::new(cwd, ["commit", "--file", "-"])
+        .suppress_editor()
+        .piped(
+            message.as_bytes().to_vec(),
+            &PipedContexts {
+                start: "failed to start git commit",
+                open_input: "failed to open git commit input",
+                write_input: "failed to send the commit message to git commit",
+                writer_panicked: "git commit input writer panicked",
+                await_output: "failed to await git commit",
+            },
+        )?;
     let transcript = combined_output(&output);
     if output.status.success() {
         return Ok(transcript);
@@ -1404,17 +1448,41 @@ pub fn recent_subjects(cwd: &Path) -> Result<Vec<String>> {
 ///
 /// Returns an error when Git cannot create the commit.
 pub fn commit(cwd: &Path, message: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["commit", "-m", message])
-        .current_dir(cwd)
-        .stdin(Stdio::inherit())
-        .output()
+    let output = GitProcess::new(cwd, ["commit", "-m", message])
+        .captured_inheriting_stdin()
         .context("failed to start git commit")?;
     if output.status.success() {
         Ok(())
     } else {
         bail!("git commit failed: {}", stderr_detail(&output))
     }
+}
+
+/// Commits the index with terminal prompts disabled, retaining both streams.
+///
+/// # Errors
+///
+/// Returns an error only when Git cannot be started.
+pub fn commit_captured(cwd: &Path, message: &str) -> Result<Output> {
+    GitProcess::new(cwd, ["commit", "-m", message])
+        .disable_terminal_prompt()
+        .captured()
+        .context("failed to start git commit")
+}
+
+/// Returns the byte-safe porcelain status used by machine commit planning.
+///
+/// # Errors
+///
+/// Returns an error when Git cannot inspect status.
+pub fn status_porcelain(cwd: &Path) -> Result<Vec<u8>> {
+    let output = GitProcess::new(cwd, ["status", "--porcelain=v1", "-z"])
+        .captured()
+        .context("failed to start git status")?;
+    if !output.status.success() {
+        bail!("git status failed");
+    }
+    Ok(output.stdout)
 }
 
 /// Reports whether the invoking worktree has staged, unstaged, or untracked changes.
@@ -1448,15 +1516,13 @@ pub fn would_be_ignored(cwd: &Path, path: &Path) -> Result<bool> {
 }
 
 fn check_ignored(cwd: &Path, path: &Path, no_index: bool) -> Result<bool> {
-    let mut command = Command::new("git");
-    command.args([OsStr::new("check-ignore"), OsStr::new("--quiet")]);
+    let mut args = vec![OsStr::new("check-ignore"), OsStr::new("--quiet")];
     if no_index {
-        command.arg("--no-index");
+        args.push(OsStr::new("--no-index"));
     }
-    let output = command
-        .arg(path)
-        .current_dir(cwd)
-        .output()
+    args.push(path.as_os_str());
+    let output = GitProcess::new(cwd, args)
+        .captured()
         .context("failed to ask Git whether the path is ignored")?;
     match output.status.code() {
         Some(0) => Ok(true),
@@ -1476,11 +1542,12 @@ fn check_ignored(cwd: &Path, path: &Path, no_index: bool) -> Result<bool> {
 /// Returns an error when Git cannot update the local configuration.
 pub fn set_branch_description(cwd: &Path, branch: &str, description: &str) -> Result<()> {
     let key = format!("branch.{branch}.description");
-    let output = Command::new("git")
-        .args(["config", "--local", "--replace-all", &key, description])
-        .current_dir(cwd)
-        .output()
-        .context("failed to start Git while setting the branch description")?;
+    let output = GitProcess::new(
+        cwd,
+        ["config", "--local", "--replace-all", &key, description],
+    )
+    .captured()
+    .context("failed to start Git while setting the branch description")?;
     if output.status.success() {
         Ok(())
     } else {
@@ -1564,16 +1631,12 @@ fn run_worktree_add<const N: usize>(
     branch: &str,
     destination: &Path,
 ) -> Result<()> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to start Git while creating worktree for {branch:?} at {}",
-                destination.display()
-            )
-        })?;
+    let output = GitProcess::new(cwd, args).captured().with_context(|| {
+        format!(
+            "failed to start Git while creating worktree for {branch:?} at {}",
+            destination.display()
+        )
+    })?;
     if output.status.success() {
         Ok(())
     } else {
@@ -1593,13 +1656,8 @@ fn open_stderr() -> Result<fs::File> {
 }
 
 fn run_git_inherit(cwd: &Path, args: &[&str], operation: &str) -> Result<()> {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::from(open_stderr()?))
-        .stderr(Stdio::inherit())
-        .status()
+    let status = GitProcess::new(cwd, args)
+        .displayed()
         .with_context(|| format!("failed to start git {operation}"))?;
     if status.success() {
         Ok(())
@@ -1657,7 +1715,7 @@ fn inspect_condition(worktree: &Worktree) -> Condition {
 }
 
 fn run_git<const N: usize>(cwd: &Path, args: [&str; N]) -> std::io::Result<Output> {
-    Command::new("git").args(args).current_dir(cwd).output()
+    GitProcess::new(cwd, args).captured()
 }
 
 fn stderr_detail(output: &Output) -> String {
