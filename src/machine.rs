@@ -324,6 +324,7 @@ fn resolve(
             false,
         );
     }
+    #[allow(unused_variables)]
     let Some(primary) = repo.primary.as_ref() else {
         return emit_err(
             command,
@@ -570,13 +571,19 @@ fn resolve(
             false,
         );
     }
-    if config.post_create.is_empty() {
-        let execution = crate::worktree_plan::execute(&repo, &shared_plan);
-        let effects = match execution {
-            Ok(outcome) => outcome.effects,
+    {
+        let execution = crate::worktree_plan::execute(
+            &repo,
+            &shared_plan,
+            crate::setup::OutputPolicy::Captured,
+            || Ok(()),
+        );
+        let outcome = match execution {
+            Ok(outcome) => outcome,
             Err(failure) => {
                 let code = match failure.code {
                     "description_failed" => "create.description_failed".to_owned(),
+                    "setup_failed" => format!("{command}.setup_failed"),
                     "plan_stale" => format!("{command}.plan_stale"),
                     _ => format!("{command}.creation_failed"),
                 };
@@ -586,8 +593,13 @@ fn resolve(
                     "branch": branch,
                     "destination": BytePath::path(&destination),
                     "created": failure.created,
+                    "setup": failure.setup_incomplete.then_some("incomplete"),
+                    "hook_outcome": failure.hook_outcome.map(|outcome| format!("{outcome:?}")),
                 });
                 response.effects = failure.effects;
+                if let crate::setup::HookOutput::Captured(output) = failure.hook_output {
+                    push_hook_diagnostics(&mut response, output);
+                }
                 if code == "create.description_failed" {
                     if let Some(description) = input.description.as_deref() {
                         response.next_steps.push(protocol::NextStep {
@@ -603,9 +615,20 @@ fn resolve(
                         });
                     }
                 }
+                if failure.setup_incomplete {
+                    response.next_steps.push(protocol::NextStep {
+                        action: format!("{command}.recover_setup"),
+                        description: "Inspect the worktree and retry or explicitly complete setup interactively".into(),
+                        mutation: "setup".into(),
+                        requires_human_approval: true,
+                        invocation: json!({"argv":["pando","switch",branch],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}),
+                    });
+                }
                 return emit(response, true);
             }
         };
+        let effects = outcome.effects;
+        let hook_output = outcome.hook_output;
         let mut result = json!({
             "outcome": if input.dry_run { "creation_plan" } else { "created" },
             "branch": branch,
@@ -619,11 +642,13 @@ fn resolve(
                 result["base_ref"] = json!(base_ref.reference());
             }
         }
-        return emit(
-            protocol::success(command, id, result, json!({}), effects),
-            false,
-        );
+        let mut response = protocol::success(command, id, result, json!({}), effects);
+        if let crate::setup::HookOutput::Captured(output) = hook_output {
+            push_hook_diagnostics(&mut response, output);
+        }
+        return emit(response, false);
     }
+    #[allow(unreachable_code)]
     let mut effects = Vec::new();
     if let Some(base) = &new_base {
         if input.fetch {

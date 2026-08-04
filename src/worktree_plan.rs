@@ -13,6 +13,7 @@ use crate::{
     config::EffectiveConfig,
     git::{self, Repository},
     hook_approval,
+    setup::{self, HookOutcome, HookOutput, OutputPolicy},
 };
 
 /// The public command intent whose policy differences affect planning.
@@ -78,11 +79,12 @@ pub(crate) struct Plan {
     pub(crate) dry_run: bool,
 }
 
-/// The result of executing a navigation or hook-free creation plan.
+/// The result of executing a navigation or creation plan.
 #[derive(Debug)]
 pub(crate) struct ExecutionOutcome {
     pub(crate) destination: PathBuf,
     pub(crate) effects: Vec<Effect>,
+    pub(crate) hook_output: HookOutput,
 }
 
 /// A failed execution together with effects advanced only at real transitions.
@@ -92,6 +94,9 @@ pub(crate) struct ExecutionFailure {
     pub(crate) error: anyhow::Error,
     pub(crate) effects: Vec<Effect>,
     pub(crate) created: bool,
+    pub(crate) setup_incomplete: bool,
+    pub(crate) hook_outcome: Option<HookOutcome>,
+    pub(crate) hook_output: HookOutput,
 }
 
 /// A caller decision or safety condition that prevents an executable plan.
@@ -306,54 +311,55 @@ fn plan_source(
 
 /// Executes a navigation or creation plan without reclassifying its branch.
 ///
-/// Hook-bearing plans remain owned by the setup executor and are rejected here.
+/// The output policy is the sole adapter-specific input: human callers stream
+/// hooks, while structured callers capture bounded diagnostics.
 #[allow(clippy::too_many_lines)] // This is the single explicit worktree execution boundary.
 pub(crate) fn execute(
     repository: &Repository,
     plan: &Plan,
+    output_policy: OutputPolicy,
+    on_created: impl FnOnce() -> Result<()>,
 ) -> std::result::Result<ExecutionOutcome, ExecutionFailure> {
     let mut effects = planned_effects(plan);
+    let empty_output = || match output_policy {
+        OutputPolicy::Streamed => HookOutput::Streamed,
+        OutputPolicy::Captured => HookOutput::Captured(Vec::new()),
+    };
+    let failure = |code, error, effects, created, setup_incomplete| ExecutionFailure {
+        code,
+        error,
+        effects,
+        created,
+        setup_incomplete,
+        hook_outcome: None,
+        hook_output: empty_output(),
+    };
     if let Source::Registered(worktree) = &plan.source {
         return Ok(ExecutionOutcome {
             destination: worktree.path.clone(),
             effects,
+            hook_output: empty_output(),
         });
     }
     let config = plan.config.as_ref().expect("creation plan has config");
-    if !config.post_create.is_empty() {
-        return Err(ExecutionFailure {
-            code: "hooks_present",
-            error: anyhow::anyhow!("hook-bearing plan requires the setup executor"),
-            effects,
-            created: false,
-        });
-    }
     if plan.dry_run {
         return Ok(ExecutionOutcome {
             destination: plan.destination.clone(),
             effects,
+            hook_output: empty_output(),
         });
     }
-    if let Err(error) = revalidate(repository, plan) {
-        return Err(ExecutionFailure {
-            code: "plan_stale",
-            error,
-            effects,
-            created: false,
-        });
-    }
+    revalidate(repository, plan)
+        .map_err(|error| failure("plan_stale", error, effects.clone(), false, false))?;
     if let Some(parent) = plan.destination.parent() {
-        if let Err(error) = fs::create_dir_all(parent)
+        fs::create_dir_all(parent)
             .with_context(|| format!("failed to create destination parent {}", parent.display()))
-        {
-            return Err(ExecutionFailure {
-                code: "creation_failed",
-                error,
-                effects,
-                created: false,
-            });
-        }
+            .map_err(|error| failure("creation_failed", error, effects.clone(), false, false))?;
     }
+    let pending = (!config.post_create.is_empty())
+        .then(|| setup::prepare(&repository.common_dir, &plan.branch, &plan.destination))
+        .transpose()
+        .map_err(|error| failure("setup_failed", error, effects.clone(), false, true))?;
     let creation_index = effects
         .iter()
         .position(|effect| effect.action == "create_worktree")
@@ -384,38 +390,96 @@ pub(crate) fn execute(
         ),
     };
     if let Err(error) = creation {
-        return Err(ExecutionFailure {
-            code: "creation_failed",
-            error,
-            effects,
-            created: false,
-        });
+        if let Some(pending) = pending
+            && let Err(cancel_error) = pending.cancel()
+        {
+            return Err(failure(
+                "creation_failed",
+                cancel_error.context(format!(
+                    "worktree creation failed ({error:#}) and pending setup state could not be cleared"
+                )),
+                effects,
+                false,
+                true,
+            ));
+        }
+        return Err(failure("creation_failed", error, effects, false, false));
     }
     effects[creation_index].completed = true;
     if let Some(index) = branch_index {
         effects[index].completed = true;
     }
+    let identity = if let Some(pending) = pending {
+        let identity = git::worktree_identity(&plan.destination)
+            .map_err(|error| failure("setup_failed", error, effects.clone(), true, true))?;
+        pending
+            .commit(&repository.common_dir, &identity)
+            .map_err(|error| failure("setup_failed", error, effects.clone(), true, true))?;
+        Some(identity)
+    } else {
+        None
+    };
+    on_created().map_err(|error| {
+        failure(
+            "setup_failed",
+            error,
+            effects.clone(),
+            true,
+            identity.is_some(),
+        )
+    })?;
     if let Some(description) = plan.description.as_deref() {
         let index = effects
             .iter()
             .position(|effect| effect.action == "set_branch_description")
             .expect("described plans carry a description effect");
         effects[index].attempted = true;
-        if let Err(error) =
-            git::set_branch_description(&repository.current().path, &plan.branch, description)
-        {
+        git::set_branch_description(&repository.current().path, &plan.branch, description)
+            .map_err(|error| {
+                failure(
+                    "description_failed",
+                    error,
+                    effects.clone(),
+                    true,
+                    identity.is_some(),
+                )
+            })?;
+        effects[index].completed = true;
+    }
+    if let Some(identity) = identity {
+        let execution = setup::execute(
+            crate::config::HookPhase::PostCreate,
+            &config.post_create,
+            &plan.destination,
+            output_policy,
+        )
+        .map_err(|error| failure("setup_failed", error, effects.clone(), true, true))?;
+        if execution.outcome != HookOutcome::Success {
             return Err(ExecutionFailure {
-                code: "description_failed",
-                error,
+                code: "setup_failed",
+                error: anyhow::anyhow!(
+                    "post-create hook outcome: {:?}; setup remains incomplete",
+                    execution.outcome
+                ),
                 effects,
                 created: true,
+                setup_incomplete: true,
+                hook_outcome: Some(execution.outcome),
+                hook_output: execution.output,
             });
         }
-        effects[index].completed = true;
+        setup::clear(&repository.common_dir, &identity, Some(&plan.branch))
+            .map_err(|error| failure("setup_failed", error, effects.clone(), true, true))?;
+        return Ok(ExecutionOutcome {
+            destination: plan.destination.clone(),
+            effects,
+            hook_output: execution.output,
+        });
     }
     Ok(ExecutionOutcome {
         destination: plan.destination.clone(),
         effects,
+        hook_output: empty_output(),
     })
 }
 

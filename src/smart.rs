@@ -1325,12 +1325,7 @@ fn resolve_and_switch(
     };
     debug_assert_eq!(plan.intent, intent);
     debug_assert_eq!(plan.branch, branch);
-    if !matches!(plan.source, Source::Registered(_))
-        && plan
-            .config
-            .as_ref()
-            .is_some_and(|config| config.post_create.is_empty())
-    {
+    if !matches!(plan.source, Source::Registered(_)) {
         if let Source::New { base } = &plan.source {
             if let Some(output) = base
                 .fetch_output
@@ -1344,14 +1339,40 @@ fn resolve_and_switch(
                 Intent::Create => announce_new_branch(repository, branch, base, &plan.destination)?,
             }
         }
-        let outcome = ui::run_timed_completing(
-            true,
-            "Creating worktree...",
-            "Created worktree",
-            "Failed to create worktree",
-            ui::Completion::Outro,
-            |_| worktree_plan::execute(repository, &plan).map_err(|failure| failure.error),
-        )?;
+        let has_hooks = plan
+            .config
+            .as_ref()
+            .is_some_and(|config| !config.post_create.is_empty());
+        if !has_hooks {
+            let outcome = ui::run_timed_completing(
+                true,
+                "Creating worktree...",
+                "Created worktree",
+                "Failed to create worktree",
+                ui::Completion::Outro,
+                |_| {
+                    worktree_plan::execute(repository, &plan, OutputPolicy::Streamed, || Ok(()))
+                        .map_err(|failure| failure.error)
+                },
+            )?;
+            return write_destination(&outcome.destination);
+        }
+        let execution = worktree_plan::execute(repository, &plan, OutputPolicy::Streamed, || {
+            ui::step("Created worktree")
+        });
+        let outcome = match execution {
+            Ok(outcome) => outcome,
+            Err(failure) => {
+                if failure.created
+                    && failure.setup_incomplete
+                    && failure.hook_outcome != Some(HookOutcome::Interrupted)
+                {
+                    write_destination(&plan.destination)?;
+                }
+                return Err(failure.error);
+            }
+        };
+        ui::finish("Post-create setup complete")?;
         return write_destination(&outcome.destination);
     }
     match plan.source {
