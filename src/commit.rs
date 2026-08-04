@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use crate::{
     WorktreeKind,
     config::{EffectiveConfig, GenerationSource},
-    git::{self, LifecycleMutation, Repository},
+    git::{self, LifecycleMutation, Repository, RepositoryObservation},
     protocol::{self, Diagnostic, Effect, ErrorBody, NextStep, Response},
     render, trust, ui,
 };
@@ -218,7 +218,7 @@ fn read_request() -> std::result::Result<CommitRequestEnvelope, String> {
 
 fn run_human(invocation: &Invocation, source: &MessageSource) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = git::repository(&cwd)?;
+    let repository = RepositoryObservation::new(&cwd).repository()?;
     ensure_worktree(&repository)?;
     let mut stage_all = invocation.stage_all;
     let staged = git::HistoryObservation::new(&repository.current().path).has_staged_changes()?;
@@ -312,7 +312,7 @@ fn execute_json(
             return outcome;
         }
     };
-    let repository = match git::repository(&cwd) {
+    let repository = match RepositoryObservation::new(&cwd).repository() {
         Ok(value) => value,
         Err(error) => {
             outcome.result = Err(commit_error("repository.invalid", format!("{error:#}")));

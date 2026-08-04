@@ -5,7 +5,8 @@
 //! outcomes, writes responses, and selects the process status.
 
 use crate::{
-    git, install,
+    git::{Repository, RepositoryObservation},
+    install,
     protocol::{self, EmptyInput},
     read_only::{self, GetProperty, GetRequest},
     trust,
@@ -139,8 +140,9 @@ struct DryRunInput {
     dry_run: bool,
 }
 
-fn repository() -> Result<git::Repository> {
-    git::repository(&env::current_dir().context("failed to read current directory")?)
+fn repository() -> Result<Repository> {
+    let cwd = env::current_dir().context("failed to read current directory")?;
+    RepositoryObservation::new(&cwd).repository()
 }
 
 fn read_list_request(request_mode: bool) -> Result<Option<String>> {

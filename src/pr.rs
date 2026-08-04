@@ -236,7 +236,7 @@ fn execute(
     requested_remote: Option<String>,
 ) -> Result<PrOutcome> {
     let cwd = env::current_dir()?;
-    let repo = crate::git::repository(&cwd)?;
+    let repo = crate::git::RepositoryObservation::new(&cwd).repository()?;
     let config = crate::config::EffectiveConfig::load(&repo)?;
     let metadata_required = title.is_none() || body.is_none();
     if metadata_required {
@@ -348,7 +348,9 @@ fn execute(
             &format!("an open pull request already exists: {url}"),
         );
     }
-    let dirty = crate::git::is_dirty(&repo.current().path)?;
+    let dirty = crate::git::HistoryObservation::new(&repo.current().path)
+        .status()?
+        .is_dirty();
     if dirty {
         if force && !yolo {
             return fail_dirty(json_mode);
@@ -381,7 +383,10 @@ fn execute(
                             json: false,
                             request_mode: false,
                         })?;
-                        if !crate::git::is_dirty(&repo.current().path)? {
+                        if !crate::git::HistoryObservation::new(&repo.current().path)
+                            .status()?
+                            .is_dirty()
+                        {
                             break;
                         }
                     }

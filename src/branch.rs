@@ -1,12 +1,12 @@
 //! Authoritative branch classification for worktree navigation and creation.
 
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 
 use crate::{
     BaseMode, Worktree,
-    git::{self, BaseRef, NewBranchBase, PushPlan, Repository, RepositoryObservation},
+    git::{BaseRef, BranchRepository, NewBranchBase, PushPlan, Repository, RepositoryObservation},
     worktree_for_branch,
 };
 
@@ -146,12 +146,12 @@ impl<'repository> Resolver<'repository> {
         Self { repository }
     }
 
-    fn cwd(self) -> &'repository Path {
-        &self.repository.current().path
+    fn git(self) -> BranchRepository<'repository> {
+        BranchRepository::new(&self.repository.current().path)
     }
 
     pub(crate) fn validate(self, branch: &str) -> Result<()> {
-        git::validate_branch(self.cwd(), branch)
+        self.git().validate(branch)
     }
 
     pub(crate) fn reject_registered_fetch(requested: bool) -> Result<()> {
@@ -163,24 +163,28 @@ impl<'repository> Resolver<'repository> {
     }
 
     pub(crate) fn target(self, configured: Option<&str>) -> Result<String> {
-        git::resolve_target_branch(self.cwd(), configured)
+        self.git().target(configured)
     }
 
     pub(crate) fn upstream_remote(self, branch: &str) -> Result<Option<String>> {
-        Ok(git::branch_upstream(self.cwd(), branch)?
+        Ok(self
+            .git()
+            .upstream(branch)?
             .as_deref()
             .and_then(|upstream| upstream.split_once('/'))
             .map(|(remote, _)| remote.to_owned()))
     }
 
     pub(crate) fn remote_url(self, remote: &str) -> Result<String> {
-        git::remote_url(self.cwd(), remote)
+        self.git().remote_url(remote)
     }
 
     /// Plans an ordinary push without prompting or choosing among ambiguous remotes.
     pub(crate) fn push(self, branch: &str, requested: Option<&str>) -> Result<PushResolution> {
         if let Some(remote) = requested {
-            if !git::configured_remotes(self.cwd())?
+            if !self
+                .git()
+                .configured_remotes()?
                 .iter()
                 .any(|name| name == remote)
             {
@@ -193,7 +197,9 @@ impl<'repository> Resolver<'repository> {
             }));
         }
         if let Some(remote) = self.upstream_remote(branch)? {
-            let upstream = git::branch_upstream(self.cwd(), branch)?
+            let upstream = self
+                .git()
+                .upstream(branch)?
                 .context("configured upstream is not a remote branch")?;
             let (_, upstream_branch) = upstream
                 .split_once('/')
@@ -207,7 +213,7 @@ impl<'repository> Resolver<'repository> {
                 set_upstream: false,
             }));
         }
-        let remotes = git::configured_remotes(self.cwd())?;
+        let remotes = self.git().configured_remotes()?;
         if remotes.iter().any(|remote| remote == "origin") {
             return Ok(PushResolution::Planned(PushPlan {
                 remote: "origin".into(),
@@ -229,7 +235,7 @@ impl<'repository> Resolver<'repository> {
     }
 
     pub(crate) fn publish(self, plan: &PushPlan, display_output: bool) -> Result<()> {
-        git::push(self.cwd(), plan, display_output)
+        self.git().publish(plan, display_output)
     }
 
     pub(crate) fn new_branch_base(
@@ -238,11 +244,11 @@ impl<'repository> Resolver<'repository> {
         configured_target: Option<&str>,
         fetch: bool,
     ) -> Result<NewBranchBase> {
-        git::plan_new_branch_base(self.cwd(), mode, configured_target, fetch)
+        self.git().new_branch_base(mode, configured_target, fetch)
     }
 
     pub(crate) fn base_commit(self, base: &BaseRef) -> Result<String> {
-        git::base_ref_commit(self.cwd(), base)
+        self.git().base_commit(base)
     }
 }
 
@@ -253,7 +259,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{PushResolution, Resolver};
-    use crate::git;
+    use crate::git::RepositoryObservation;
 
     fn run(cwd: &Path, args: &[&str]) {
         let status = Command::new("git")
@@ -290,7 +296,9 @@ mod tests {
             directory.path(),
             &["remote", "add", "alpha", "https://example.com/alpha.git"],
         );
-        let repository = git::repository(directory.path()).expect("repository observation");
+        let repository = RepositoryObservation::new(directory.path())
+            .repository()
+            .expect("repository observation");
 
         assert_eq!(
             Resolver::new(&repository)
@@ -311,7 +319,9 @@ mod tests {
             directory.path(),
             &["remote", "add", "alpha", "https://example.com/alpha.git"],
         );
-        let repository = git::repository(directory.path()).expect("repository observation");
+        let repository = RepositoryObservation::new(directory.path())
+            .repository()
+            .expect("repository observation");
 
         let PushResolution::Planned(plan) = Resolver::new(&repository)
             .push("main", Some("zeta"))

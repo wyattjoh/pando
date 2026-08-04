@@ -349,9 +349,9 @@ impl<'cwd> LifecycleMutation<'cwd> {
 }
 
 #[derive(Debug)]
-pub struct Discovery {
-    pub worktrees: Vec<Worktree>,
-    pub metadata_warning: Option<String>,
+struct Discovery {
+    worktrees: Vec<Worktree>,
+    metadata_warning: Option<String>,
 }
 
 /// One byte-safe entry from Git's NUL-delimited porcelain status.
@@ -534,13 +534,13 @@ impl<'cwd> HistoryObservation<'cwd> {
 /// This interface owns discovery and enrichment choreography so callers receive
 /// typed snapshots without learning command order or structured-output formats.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RepositoryObservation<'cwd> {
+pub struct RepositoryObservation<'cwd> {
     cwd: &'cwd Path,
 }
 
 impl<'cwd> RepositoryObservation<'cwd> {
     #[must_use]
-    pub(crate) fn new(cwd: &'cwd Path) -> Self {
+    pub fn new(cwd: &'cwd Path) -> Self {
         Self { cwd }
     }
 
@@ -563,7 +563,12 @@ impl<'cwd> RepositoryObservation<'cwd> {
         repository_from_worktrees(self.cwd, self.discover()?)
     }
 
-    pub(crate) fn repository_with_metadata(self) -> Result<Repository> {
+    /// Resolves repository context and enriches worktrees with commit timestamps.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when base discovery or repository path resolution fails.
+    pub fn repository_with_metadata(self) -> Result<Repository> {
         repository_from_worktrees(self.cwd, self.discover_with_metadata()?)
     }
 
@@ -682,30 +687,6 @@ impl Repository {
     }
 }
 
-/// Discovers the worktrees for the repository containing `cwd`.
-///
-/// This base discovery does not query commit objects. Navigation surfaces that
-/// display commit timestamps should use [`discover_with_metadata`] instead.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot run or its worktree output is invalid.
-pub fn discover(cwd: &Path) -> Result<Discovery> {
-    RepositoryObservation::new(cwd).discover()
-}
-
-/// Discovers worktrees and enriches them with HEAD commit timestamps.
-///
-/// Metadata failures are systemic but non-fatal. They are returned as one
-/// warning while every unavailable timestamp remains `None`.
-///
-/// # Errors
-///
-/// Returns an error when base Git discovery fails or its output is invalid.
-pub fn discover_with_metadata(cwd: &Path) -> Result<Discovery> {
-    RepositoryObservation::new(cwd).discover_with_metadata()
-}
-
 fn discover_worktrees(cwd: &Path) -> Result<Vec<Worktree>> {
     let output = run_git(cwd, ["worktree", "list", "--porcelain", "-z"])
         .context("failed to list Git worktrees for the current repository")?;
@@ -718,27 +699,6 @@ fn discover_worktrees(cwd: &Path) -> Result<Vec<Worktree>> {
         worktree.condition = inspect_condition(worktree);
     }
     Ok(worktrees)
-}
-
-/// Resolves repository-level worktree and common-directory context.
-///
-/// This base repository does not query commit objects. Navigation surfaces that
-/// display commit timestamps should use [`repository_with_metadata`] instead.
-///
-/// # Errors
-///
-/// Returns an error when Git context or a required path cannot be resolved.
-pub fn repository(cwd: &Path) -> Result<Repository> {
-    RepositoryObservation::new(cwd).repository()
-}
-
-/// Resolves repository context and enriches worktrees with commit timestamps.
-///
-/// # Errors
-///
-/// Returns an error when base repository discovery or path resolution fails.
-pub fn repository_with_metadata(cwd: &Path) -> Result<Repository> {
-    RepositoryObservation::new(cwd).repository_with_metadata()
 }
 
 fn repository_from_worktrees(cwd: &Path, discovery: Discovery) -> Result<Repository> {
@@ -817,10 +777,10 @@ fn resolve_commit_timestamps(
 
 /// One local branch (`refs/heads`) as reported by `git for-each-ref`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchRecord {
-    pub branch: String,
-    pub head: String,
-    pub last_commit_at: Option<DateTime<FixedOffset>>,
+pub(crate) struct BranchRecord {
+    pub(crate) branch: String,
+    pub(crate) head: String,
+    pub(crate) last_commit_at: Option<DateTime<FixedOffset>>,
 }
 
 /// A repository's worktrees together with its local branches.
@@ -829,22 +789,9 @@ pub struct BranchRecord {
 /// so building this costs exactly one additional Git subprocess (`for-each-ref`)
 /// over [`repository_with_metadata`].
 #[derive(Debug)]
-pub struct RepositoryBranches {
-    pub repository: Repository,
-    pub branches: Vec<BranchRecord>,
-}
-
-/// Discovers the repository's worktrees and local branches together.
-///
-/// Only `refs/heads` is inspected; no fetch happens and no remote-tracking
-/// refs are considered. A ref whose short name is not valid UTF-8 is excluded
-/// and reported in the metadata warning rather than silently dropped.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot run or its worktree or ref output is invalid.
-pub fn repository_with_branches(cwd: &Path) -> Result<RepositoryBranches> {
-    RepositoryObservation::new(cwd).repository_with_branches()
+pub(crate) struct RepositoryBranches {
+    pub(crate) repository: Repository,
+    pub(crate) branches: Vec<BranchRecord>,
 }
 
 fn repository_with_branches_observed(cwd: &Path) -> Result<RepositoryBranches> {
@@ -895,28 +842,6 @@ fn repository_with_branches_observed(cwd: &Path) -> Result<RepositoryBranches> {
         repository,
         branches,
     })
-}
-
-/// Discovers local branches without resolving commit timestamps.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot list local refs.
-pub fn discover_branches(cwd: &Path) -> Result<Vec<BranchRecord>> {
-    RepositoryObservation::new(cwd).branches()
-}
-
-/// Lists remote-tracking branches as short names such as `origin/feature`.
-///
-/// Only `refs/remotes` is inspected; no fetch happens. Symbolic refs such as
-/// `origin/HEAD` are excluded because they point at a branch rather than being
-/// one. A ref whose short name is not valid UTF-8 is dropped.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot run or fails to list remote refs.
-pub fn discover_remote_branches(cwd: &Path) -> Result<Vec<String>> {
-    RepositoryObservation::new(cwd).remote_branches()
 }
 
 fn discover_branch_refs(cwd: &Path) -> Result<(Vec<BranchRecord>, Vec<String>)> {
@@ -1067,16 +992,12 @@ fn parse_committer_timestamp(commit: &[u8]) -> Option<DateTime<FixedOffset>> {
 ///
 /// # Errors
 /// Returns an error when origin is missing or Git cannot be invoked.
-pub fn origin_url(cwd: &Path) -> Result<String> {
-    git_stdout(cwd, ["remote", "get-url", "origin"])
-}
-
 /// Asks Git to validate a proposed branch name.
 ///
 /// # Errors
 ///
 /// Returns an error when Git cannot run or rejects the name.
-pub(crate) fn validate_branch(cwd: &Path, branch: &str) -> Result<()> {
+fn validate_branch(cwd: &Path, branch: &str) -> Result<()> {
     if branch.is_empty() {
         bail!("branch name cannot be empty");
     }
@@ -1123,7 +1044,57 @@ pub(crate) struct PushPlan {
     pub(crate) set_upstream: bool,
 }
 
-pub(crate) fn branch_upstream(cwd: &Path, branch: &str) -> Result<Option<String>> {
+/// Installed-Git operations used by branch policy and ref resolution.
+#[derive(Clone, Copy)]
+pub(crate) struct BranchRepository<'cwd> {
+    cwd: &'cwd Path,
+}
+
+impl<'cwd> BranchRepository<'cwd> {
+    #[must_use]
+    pub(crate) fn new(cwd: &'cwd Path) -> Self {
+        Self { cwd }
+    }
+
+    pub(crate) fn validate(self, branch: &str) -> Result<()> {
+        validate_branch(self.cwd, branch)
+    }
+
+    pub(crate) fn target(self, configured: Option<&str>) -> Result<String> {
+        resolve_target_branch(self.cwd, configured)
+    }
+
+    pub(crate) fn upstream(self, branch: &str) -> Result<Option<String>> {
+        branch_upstream(self.cwd, branch)
+    }
+
+    pub(crate) fn configured_remotes(self) -> Result<Vec<String>> {
+        configured_remotes(self.cwd)
+    }
+
+    pub(crate) fn remote_url(self, remote: &str) -> Result<String> {
+        remote_url(self.cwd, remote)
+    }
+
+    pub(crate) fn publish(self, plan: &PushPlan, display_output: bool) -> Result<()> {
+        push(self.cwd, plan, display_output)
+    }
+
+    pub(crate) fn new_branch_base(
+        self,
+        mode: BaseMode,
+        configured_target: Option<&str>,
+        fetch: bool,
+    ) -> Result<NewBranchBase> {
+        plan_new_branch_base(self.cwd, mode, configured_target, fetch)
+    }
+
+    pub(crate) fn base_commit(self, base: &BaseRef) -> Result<String> {
+        base_ref_commit(self.cwd, base)
+    }
+}
+
+fn branch_upstream(cwd: &Path, branch: &str) -> Result<Option<String>> {
     let output = run_git(
         cwd,
         [
@@ -1141,7 +1112,7 @@ pub(crate) fn branch_upstream(cwd: &Path, branch: &str) -> Result<Option<String>
     ))
 }
 
-pub(crate) fn configured_remotes(cwd: &Path) -> Result<Vec<String>> {
+fn configured_remotes(cwd: &Path) -> Result<Vec<String>> {
     let output = run_git(cwd, ["remote"])?;
     ensure_success(&output, "git remote")?;
     let mut remotes: Vec<_> = String::from_utf8_lossy(&output.stdout)
@@ -1158,7 +1129,7 @@ pub(crate) fn configured_remotes(cwd: &Path) -> Result<Vec<String>> {
 ///
 /// # Errors
 /// Returns an error when Git cannot inspect refs or no fallback branch exists.
-pub(crate) fn resolve_target_branch(cwd: &Path, configured: Option<&str>) -> Result<String> {
+fn resolve_target_branch(cwd: &Path, configured: Option<&str>) -> Result<String> {
     if let Some(branch) = configured {
         return Ok(branch.to_owned());
     }
@@ -1288,7 +1259,7 @@ pub(crate) struct NewBranchBase {
 ///
 /// # Errors
 /// Returns an error when `HEAD`, the base ref, or its commit cannot be resolved.
-pub(crate) fn plan_new_branch_base(
+fn plan_new_branch_base(
     cwd: &Path,
     mode: BaseMode,
     configured_target: Option<&str>,
@@ -1296,7 +1267,7 @@ pub(crate) fn plan_new_branch_base(
 ) -> Result<NewBranchBase> {
     if mode == BaseMode::Head {
         return Ok(NewBranchBase {
-            commit: head_commit(cwd)?,
+            commit: head_commit_observed(cwd)?,
             base_ref: None,
             fetch_output: None,
         });
@@ -1314,7 +1285,7 @@ pub(crate) fn plan_new_branch_base(
 ///
 /// # Errors
 /// Returns an error naming the fix when the ref has never been fetched.
-pub(crate) fn base_ref_commit(cwd: &Path, base: &BaseRef) -> Result<String> {
+fn base_ref_commit(cwd: &Path, base: &BaseRef) -> Result<String> {
     let reference = base.reference();
     git_stdout(
         cwd,
@@ -1355,7 +1326,7 @@ fn fetch_base_ref(cwd: &Path, base: &BaseRef) -> Result<String> {
 ///
 /// # Errors
 /// Returns an error when the remote is missing or Git cannot read it.
-pub(crate) fn remote_url(cwd: &Path, remote: &str) -> Result<String> {
+fn remote_url(cwd: &Path, remote: &str) -> Result<String> {
     let output = run_git(cwd, ["remote", "get-url", remote])?;
     ensure_success(&output, "git remote get-url")?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
@@ -1365,7 +1336,7 @@ pub(crate) fn remote_url(cwd: &Path, remote: &str) -> Result<String> {
 ///
 /// # Errors
 /// Returns an error when Git rejects or cannot execute the push.
-pub(crate) fn push(cwd: &Path, plan: &PushPlan, inherit: bool) -> Result<()> {
+fn push(cwd: &Path, plan: &PushPlan, inherit: bool) -> Result<()> {
     let refspec = format!("{}:{}", plan.branch, plan.branch);
     if inherit {
         let status = GitProcess::new(cwd, ["push", "-u", &plan.remote, &refspec])
@@ -1383,67 +1354,20 @@ pub(crate) fn push(cwd: &Path, plan: &PushPlan, inherit: bool) -> Result<()> {
     }
 }
 
-/// Returns already-fetched remote-tracking refs matching a branch name.
-///
-/// # Errors
-/// Returns an error when Git cannot inspect configured remotes or remote-tracking refs.
-pub fn remote_matches(cwd: &Path, branch: &str) -> Result<Vec<String>> {
-    let output = run_git(cwd, ["remote"]).context("failed to inspect configured remotes")?;
-    ensure_success(&output, "git remote")?;
-    let mut matches = Vec::new();
-    for remote in String::from_utf8_lossy(&output.stdout).lines() {
-        let short_name = format!("{remote}/{branch}");
-        let reference = format!("refs/remotes/{short_name}");
-        let output = run_git(cwd, ["show-ref", "--verify", "--quiet", &reference])
-            .context("failed to inspect remote-tracking branches")?;
-        match output.status.code() {
-            Some(0) => matches.push(short_name),
-            Some(1) => {}
-            _ => bail!(
-                "failed to inspect remote-tracking branch {reference:?}: {}",
-                stderr_detail(&output)
-            ),
-        }
-    }
-    matches.sort();
-    Ok(matches)
-}
-
 /// Resolves the stable Git administrative directory for one worktree.
 ///
 /// # Errors
 ///
 /// Returns an error when Git cannot resolve the worktree's administrative directory.
-pub fn worktree_identity(cwd: &Path) -> Result<PathBuf> {
+fn worktree_identity(cwd: &Path) -> Result<PathBuf> {
     let git_dir = git_stdout(cwd, ["rev-parse", "--path-format=absolute", "--git-dir"])
         .context("failed to resolve the worktree's Git administrative directory")?;
     canonical_or_normalized(Path::new(&git_dir))
 }
 
-/// Resolves the invoking worktree's committed `HEAD`.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot resolve `HEAD`.
-pub fn head_commit(cwd: &Path) -> Result<String> {
-    HistoryObservation::new(cwd).head_commit()
-}
-
 fn head_commit_observed(cwd: &Path) -> Result<String> {
     git_stdout(cwd, ["rev-parse", "--verify", "HEAD"])
         .context("failed to resolve the invoking worktree's HEAD")
-}
-
-/// Resolves the commit a branch points at.
-///
-/// Unlike [`head_commit`] this never depends on what is checked out, so a
-/// lifecycle running inside the primary worktree can still read its target.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot resolve the branch.
-pub fn branch_commit(cwd: &Path, branch: &str) -> Result<String> {
-    HistoryObservation::new(cwd).commit(branch)
 }
 
 fn branch_commit_observed(cwd: &Path, branch: &str) -> Result<String> {
@@ -1516,15 +1440,6 @@ fn combined_output(output: &Output) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Reports whether `ancestor` is an ancestor of `descendant`.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot inspect ancestry.
-pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
-    HistoryObservation::new(cwd).is_ancestor(ancestor, descendant)
 }
 
 fn ancestry_observed(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
@@ -1776,21 +1691,12 @@ fn parse_status_porcelain(raw: &[u8]) -> Result<StatusSnapshot> {
     Ok(StatusSnapshot { entries })
 }
 
-/// Reports whether the invoking worktree has staged, unstaged, or untracked changes.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot inspect status.
-pub fn is_dirty(cwd: &Path) -> Result<bool> {
-    Ok(HistoryObservation::new(cwd).status()?.is_dirty())
-}
-
 /// Reports whether Git ignores an existing, untracked path.
 ///
 /// # Errors
 ///
 /// Returns an error when Git cannot inspect ignore rules.
-pub fn is_ignored(cwd: &Path, path: &Path) -> Result<bool> {
+fn is_ignored(cwd: &Path, path: &Path) -> Result<bool> {
     check_ignored(cwd, path, false)
 }
 
@@ -1799,7 +1705,7 @@ pub fn is_ignored(cwd: &Path, path: &Path) -> Result<bool> {
 /// # Errors
 ///
 /// Returns an error when Git cannot inspect ignore rules.
-pub fn would_be_ignored(cwd: &Path, path: &Path) -> Result<bool> {
+fn would_be_ignored(cwd: &Path, path: &Path) -> Result<bool> {
     check_ignored(cwd, path, true)
 }
 
@@ -1938,7 +1844,7 @@ fn ensure_success(output: &Output, operation: &str) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error when no existing ancestor or canonical path can be resolved.
-pub fn canonical_or_normalized(path: &Path) -> Result<PathBuf> {
+fn canonical_or_normalized(path: &Path) -> Result<PathBuf> {
     if path.exists() {
         return path.canonicalize().map_err(Into::into);
     }
@@ -1965,7 +1871,7 @@ pub fn canonical_or_normalized(path: &Path) -> Result<PathBuf> {
 /// # Errors
 ///
 /// Returns an error for malformed or empty Git output.
-pub fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>> {
+fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>> {
     let mut records = Vec::new();
     let mut current: Option<Worktree> = None;
 

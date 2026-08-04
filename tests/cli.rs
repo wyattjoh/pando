@@ -1065,8 +1065,10 @@ fn switch_picker_uses_semantic_styles_and_keeps_stdout_pure() {
         "the picker's own closing bar ends the sequence: {}",
         output.stderr
     );
-    let discovery = pando::git::discover_with_metadata(&repo.main).unwrap();
-    let choices: Vec<_> = discovery
+    let repository = pando::git::RepositoryObservation::new(&repo.main)
+        .repository_with_metadata()
+        .unwrap();
+    let choices: Vec<_> = repository
         .worktrees
         .iter()
         .filter(|worktree| worktree.navigable())
