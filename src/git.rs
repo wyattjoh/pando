@@ -91,6 +91,170 @@ impl GitProcess {
     }
 }
 
+/// A typed source for creating a registered worktree.
+///
+/// Keeping these variants semantic prevents command callers from assembling
+/// `git worktree add` arguments or accidentally changing tracking behavior.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorktreeSource<'source> {
+    Existing,
+    Tracking { remote_ref: &'source str },
+    New { start_point: &'source str },
+}
+
+/// Whether removal may discard uncommitted worktree changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemovalMode {
+    Safe,
+    Force,
+}
+
+/// Whether removal diagnostics are rendered by Git or returned to the owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemovalOutput {
+    Captured,
+    Displayed,
+}
+
+/// Captured diagnostics from a worktree removal.
+#[derive(Debug)]
+pub(crate) struct RemovalDiagnostics {
+    pub(crate) status: ExitStatus,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+}
+
+/// Concrete interface for safe worktree creation, description, and removal.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WorktreeMutation<'cwd> {
+    cwd: &'cwd Path,
+}
+
+impl<'cwd> WorktreeMutation<'cwd> {
+    #[must_use]
+    pub(crate) fn new(cwd: &'cwd Path) -> Self {
+        Self { cwd }
+    }
+
+    /// Creates a worktree from a semantic branch source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git cannot create the worktree. Git remains the
+    /// safety authority and refuses destination collisions rather than
+    /// adopting, repairing, pruning, moving, or deleting an existing path.
+    pub(crate) fn create(
+        self,
+        destination: &Path,
+        branch: &str,
+        source: WorktreeSource<'_>,
+    ) -> Result<()> {
+        match source {
+            WorktreeSource::Existing => run_worktree_add(
+                self.cwd,
+                vec![
+                    OsStr::new("worktree"),
+                    OsStr::new("add"),
+                    destination.as_os_str(),
+                    OsStr::new(branch),
+                ],
+                branch,
+                destination,
+            ),
+            WorktreeSource::Tracking { remote_ref } => run_worktree_add(
+                self.cwd,
+                vec![
+                    OsStr::new("worktree"),
+                    OsStr::new("add"),
+                    OsStr::new("--track"),
+                    OsStr::new("-b"),
+                    OsStr::new(branch),
+                    destination.as_os_str(),
+                    OsStr::new(remote_ref),
+                ],
+                branch,
+                destination,
+            ),
+            WorktreeSource::New { start_point } => run_worktree_add(
+                self.cwd,
+                vec![
+                    OsStr::new("worktree"),
+                    OsStr::new("add"),
+                    OsStr::new("-b"),
+                    OsStr::new(branch),
+                    destination.as_os_str(),
+                    OsStr::new(start_point),
+                ],
+                branch,
+                destination,
+            ),
+        }
+    }
+
+    /// Sets the repository-local description after creation succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git cannot update the local configuration.
+    pub(crate) fn describe(self, branch: &str, description: &str) -> Result<()> {
+        let key = format!("branch.{branch}.description");
+        let output = GitProcess::new(
+            self.cwd,
+            ["config", "--local", "--replace-all", &key, description],
+        )
+        .captured()
+        .context("failed to start Git while setting the branch description")?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            bail!(
+                "Git failed to set the description for branch {branch:?}: {}",
+                stderr_detail(&output)
+            )
+        }
+    }
+
+    /// Removes a registered worktree while retaining its branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when displayed removal fails or Git cannot start.
+    pub(crate) fn remove(
+        self,
+        path: &Path,
+        mode: RemovalMode,
+        output: RemovalOutput,
+    ) -> Result<Option<RemovalDiagnostics>> {
+        let mut args = vec![OsStr::new("worktree"), OsStr::new("remove")];
+        if mode == RemovalMode::Force {
+            args.push(OsStr::new("--force"));
+        }
+        args.push(path.as_os_str());
+        match output {
+            RemovalOutput::Displayed => {
+                let status = GitProcess::new(self.cwd, args)
+                    .displayed()
+                    .context("failed to start git worktree remove")?;
+                if status.success() {
+                    Ok(None)
+                } else {
+                    bail!("git worktree remove failed with {status}")
+                }
+            }
+            RemovalOutput::Captured => {
+                let output = GitProcess::new(self.cwd, args)
+                    .captured()
+                    .context("failed to start git worktree remove")?;
+                Ok(Some(RemovalDiagnostics {
+                    status: output.status,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                }))
+            }
+        }
+    }
+}
+
 /// Controls whether a lifecycle operation is rendered directly or captured
 /// for an owning adapter. The operation still chooses stdin and environment
 /// policy, so callers cannot accidentally inherit an editor or prompt.
@@ -1284,42 +1448,6 @@ fn combined_output(output: &Output) -> String {
         .join("\n")
 }
 
-/// Removes a registered worktree without deleting its branch.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot remove the worktree.
-pub fn remove_worktree(cwd: &Path, path: &Path, force: bool) -> Result<()> {
-    let mut args = vec![OsStr::new("worktree"), OsStr::new("remove")];
-    if force {
-        args.push(OsStr::new("--force"));
-    }
-    args.push(path.as_os_str());
-    let status = GitProcess::new(cwd, args)
-        .displayed()
-        .context("failed to start git worktree remove")?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("git worktree remove failed with {status}")
-    }
-}
-
-/// Removes a worktree while capturing Git diagnostics for JSON execution.
-///
-/// # Errors
-/// Returns an error only when Git cannot be started.
-pub fn remove_worktree_captured(cwd: &Path, path: &Path, force: bool) -> Result<Output> {
-    let mut args = vec![OsStr::new("worktree"), OsStr::new("remove")];
-    if force {
-        args.push(OsStr::new("--force"));
-    }
-    args.push(path.as_os_str());
-    GitProcess::new(cwd, args)
-        .captured()
-        .context("failed to start git worktree remove")
-}
-
 /// Reports whether `ancestor` is an ancestor of `descendant`.
 ///
 /// # Errors
@@ -1736,102 +1864,7 @@ fn check_ignored(cwd: &Path, path: &Path, no_index: bool) -> Result<bool> {
     }
 }
 
-/// Sets a branch description in the repository's local Git configuration.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot update the local configuration.
-pub fn set_branch_description(cwd: &Path, branch: &str, description: &str) -> Result<()> {
-    let key = format!("branch.{branch}.description");
-    let output = GitProcess::new(
-        cwd,
-        ["config", "--local", "--replace-all", &key, description],
-    )
-    .captured()
-    .context("failed to start Git while setting the branch description")?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        bail!(
-            "Git failed to set the description for branch {branch:?}: {}",
-            stderr_detail(&output)
-        )
-    }
-}
-
-/// Adds a worktree for an existing local branch.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot create the worktree.
-pub fn add_existing_worktree(cwd: &Path, destination: &Path, branch: &str) -> Result<()> {
-    run_worktree_add(
-        cwd,
-        [
-            OsStr::new("worktree"),
-            OsStr::new("add"),
-            destination.as_os_str(),
-            OsStr::new(branch),
-        ],
-        branch,
-        destination,
-    )
-}
-
-/// Adds a local tracking branch and its worktree.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot create the branch or worktree.
-pub fn add_tracking_worktree(
-    cwd: &Path,
-    destination: &Path,
-    branch: &str,
-    remote: &str,
-) -> Result<()> {
-    run_worktree_add(
-        cwd,
-        [
-            OsStr::new("worktree"),
-            OsStr::new("add"),
-            OsStr::new("--track"),
-            OsStr::new("-b"),
-            OsStr::new(branch),
-            destination.as_os_str(),
-            OsStr::new(remote),
-        ],
-        branch,
-        destination,
-    )
-}
-
-/// Adds a new branch at `head` and its worktree.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot create the branch or worktree.
-pub fn add_new_worktree(cwd: &Path, destination: &Path, branch: &str, head: &str) -> Result<()> {
-    run_worktree_add(
-        cwd,
-        [
-            OsStr::new("worktree"),
-            OsStr::new("add"),
-            OsStr::new("-b"),
-            OsStr::new(branch),
-            destination.as_os_str(),
-            OsStr::new(head),
-        ],
-        branch,
-        destination,
-    )
-}
-
-fn run_worktree_add<const N: usize>(
-    cwd: &Path,
-    args: [&OsStr; N],
-    branch: &str,
-    destination: &Path,
-) -> Result<()> {
+fn run_worktree_add(cwd: &Path, args: Vec<&OsStr>, branch: &str, destination: &Path) -> Result<()> {
     let output = GitProcess::new(cwd, args).captured().with_context(|| {
         format!(
             "failed to start Git while creating worktree for {branch:?} at {}",

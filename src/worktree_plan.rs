@@ -1051,24 +1051,18 @@ pub(crate) fn execute(
     if let Some(index) = branch_index {
         effects[index].attempted = true;
     }
-    let creation = match &plan.source {
+    let mutation = git::WorktreeMutation::new(&repository.current().path);
+    let source = match &plan.source {
         Source::Registered(_) => unreachable!(),
-        Source::Local { .. } => {
-            git::add_existing_worktree(&repository.current().path, &plan.destination, &plan.branch)
-        }
-        Source::Remote { reference, .. } => git::add_tracking_worktree(
-            &repository.current().path,
-            &plan.destination,
-            &plan.branch,
-            reference,
-        ),
-        Source::New { base } => git::add_new_worktree(
-            &repository.current().path,
-            &plan.destination,
-            &plan.branch,
-            &base.commit,
-        ),
+        Source::Local { .. } => git::WorktreeSource::Existing,
+        Source::Remote { reference, .. } => git::WorktreeSource::Tracking {
+            remote_ref: reference,
+        },
+        Source::New { base } => git::WorktreeSource::New {
+            start_point: &base.commit,
+        },
     };
+    let creation = mutation.create(&plan.destination, &plan.branch, source);
     if let Err(error) = creation {
         if let Some(pending) = pending
             && let Err(cancel_error) = pending.cancel()
@@ -1114,7 +1108,8 @@ pub(crate) fn execute(
             .position(|effect| effect.action == "set_branch_description")
             .expect("described plans carry a description effect");
         effects[index].attempted = true;
-        git::set_branch_description(&repository.current().path, &plan.branch, description)
+        mutation
+            .describe(&plan.branch, description)
             .map_err(|error| {
                 failure(
                     "description_failed",

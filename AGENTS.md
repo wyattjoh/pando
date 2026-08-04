@@ -31,7 +31,7 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 | Module | Responsibility |
 |---|---|
 | `lib.rs` | `Worktree`/`WorktreeKind`/`Condition`/`SortMode` domain types, display/navigability rules, and stable worktree sorting |
-| `git.rs` | Private Git execution and parsing internals; parses `worktree list --porcelain -z`; batches HEAD committer metadata; `Repository` context |
+| `git.rs` | Private Git execution and parsing internals plus concrete repository observation, worktree mutation, history observation, and lifecycle mutation interfaces |
 | `branch.rs` | Concrete branch/ref resolution interface; classification, targets, bases, fetch applicability, upstreams, remotes, and push planning |
 | `config.rs` | Strict three-layer YAML config parsing and effective value resolution |
 | `pr.rs`, `pr/provider.rs` | PR orchestration and metadata generation; pluggable `gh` and `tea` forge adapters |
@@ -73,6 +73,8 @@ Shared hooks run before local hooks; the local root and default sort override th
 **Branch resolution order** in `resolve_and_switch`: existing registered worktree → existing local branch → single already-fetched remote match → prompt among multiple remotes → confirm a genuinely new branch from the base `worktrees.base` selects. `branch::Resolver` owns that order and never prompts or implicitly selects an ambiguous remote, so dry runs and adapters share the same typed resolution; only the new-branch arm's start point is configurable. The tool never adopts, repairs, prunes, moves, or deletes an existing destination or a broken worktree record.
 
 **One planner owns the new-branch start point.** `git::plan_new_branch_base` is the single place any interface resolves it, so human `switch`/`create`, their dry runs, and both JSON variants cannot drift. Dry runs call it with fetching disabled and report the refresh as an unattempted effect instead.
+
+**Worktree mutation consumes semantic plans.** `git::WorktreeMutation` is the only interface for creating, describing, or removing worktrees. Callers select `WorktreeSource`, `RemovalMode`, and `RemovalOutput`; they never assemble `git worktree` arguments or expose generic stream booleans. Git remains the destination-safety authority, descriptions stay after creation callbacks, and removal always retains the branch.
 
 **Machine mode is only a protocol adapter.** `machine.rs` parses strict requests, routes them to command-owned typed interfaces, adapts outcomes through `protocol.rs`, writes one response, and selects the exit status. Planning, mutation, effect construction, diagnostics, recovery actions, stable error catalogs, and stable action catalogs belong to command modules. Do not reconstruct command state in the adapter or capture human output to produce JSON.
 

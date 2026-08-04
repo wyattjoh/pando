@@ -1213,54 +1213,51 @@ pub(crate) fn execute_removal_with_policy(
 
         let remove_effect = hook_effect + 1;
         effects[remove_effect].attempted = true;
-        match output_policy {
-            setup::OutputPolicy::Captured => {
-                let output = match git::remove_worktree_captured(
-                    &plan.primary,
-                    &target.worktree.path,
-                    plan.force,
-                ) {
-                    Ok(output) => output,
-                    Err(error) => {
-                        targets[index].status = RemovalTargetStatus::Failed;
-                        return removal_failure(
-                            plan,
-                            targets,
-                            effects,
-                            diagnostics,
-                            RemovalFailureKind::GitStart,
-                            error,
-                        );
-                    }
-                };
-                push_removal_git_diagnostic(&mut diagnostics, "stdout", &output.stdout);
-                push_removal_git_diagnostic(&mut diagnostics, "stderr", &output.stderr);
-                if !output.status.success() {
-                    targets[index].status = RemovalTargetStatus::Failed;
-                    return removal_failure(
-                        plan,
-                        targets,
-                        effects,
-                        diagnostics,
-                        RemovalFailureKind::Git,
-                        format!("git worktree remove failed with {}", output.status),
-                    );
-                }
+        let removal_output = match output_policy {
+            setup::OutputPolicy::Captured => git::RemovalOutput::Captured,
+            setup::OutputPolicy::Streamed => git::RemovalOutput::Displayed,
+        };
+        let removal_mode = if plan.force {
+            git::RemovalMode::Force
+        } else {
+            git::RemovalMode::Safe
+        };
+        let removal = git::WorktreeMutation::new(&plan.primary).remove(
+            &target.worktree.path,
+            removal_mode,
+            removal_output,
+        );
+        let captured = match removal {
+            Ok(captured) => captured,
+            Err(error) => {
+                targets[index].status = RemovalTargetStatus::Failed;
+                return removal_failure(
+                    plan,
+                    targets,
+                    effects,
+                    diagnostics,
+                    if matches!(output_policy, setup::OutputPolicy::Captured) {
+                        RemovalFailureKind::GitStart
+                    } else {
+                        RemovalFailureKind::Git
+                    },
+                    error,
+                );
             }
-            setup::OutputPolicy::Streamed => {
-                if let Err(error) =
-                    git::remove_worktree(&plan.primary, &target.worktree.path, plan.force)
-                {
-                    targets[index].status = RemovalTargetStatus::Failed;
-                    return removal_failure(
-                        plan,
-                        targets,
-                        effects,
-                        diagnostics,
-                        RemovalFailureKind::Git,
-                        error,
-                    );
-                }
+        };
+        if let Some(output) = captured {
+            push_removal_git_diagnostic(&mut diagnostics, "stdout", &output.stdout);
+            push_removal_git_diagnostic(&mut diagnostics, "stderr", &output.stderr);
+            if !output.status.success() {
+                targets[index].status = RemovalTargetStatus::Failed;
+                return removal_failure(
+                    plan,
+                    targets,
+                    effects,
+                    diagnostics,
+                    RemovalFailureKind::Git,
+                    format!("git worktree remove failed with {}", output.status),
+                );
             }
         }
         effects[remove_effect].completed = true;
@@ -2367,10 +2364,23 @@ fn execute_merge_cleanup(
         .as_ref()
         .expect("a merge plan always has a primary worktree");
     mark_effect(&mut effects, "remove_worktree", true, false);
+    let mutation = git::WorktreeMutation::new(primary);
     let removal = match mode {
-        MergeExecutionMode::Human => git::remove_worktree(primary, &state.topic_path, false),
-        MergeExecutionMode::Captured => {
-            git::remove_worktree_captured(primary, &state.topic_path, false).and_then(|output| {
+        MergeExecutionMode::Human => mutation
+            .remove(
+                &state.topic_path,
+                git::RemovalMode::Safe,
+                git::RemovalOutput::Displayed,
+            )
+            .map(|_| ()),
+        MergeExecutionMode::Captured => mutation
+            .remove(
+                &state.topic_path,
+                git::RemovalMode::Safe,
+                git::RemovalOutput::Captured,
+            )
+            .and_then(|output| {
+                let output = output.expect("captured removal returns diagnostics");
                 push_merge_diagnostic(&mut diagnostics, "cleanup", "stdout", &output.stdout);
                 push_merge_diagnostic(&mut diagnostics, "cleanup", "stderr", &output.stderr);
                 if output.status.success() {
@@ -2378,8 +2388,7 @@ fn execute_merge_cleanup(
                 } else {
                     Err(anyhow::anyhow!("git worktree remove failed"))
                 }
-            })
-        }
+            }),
     };
     if let Err(error) = removal {
         if matches!(mode, MergeExecutionMode::Human) {
@@ -2799,7 +2808,11 @@ fn cleanup_merge(repository: &Repository, state: &MergeJournal) -> Result<()> {
         .primary
         .as_ref()
         .context("cleanup requires a primary worktree")?;
-    git::remove_worktree(primary, &state.topic_path, false)?;
+    git::WorktreeMutation::new(primary).remove(
+        &state.topic_path,
+        git::RemovalMode::Safe,
+        git::RemovalOutput::Displayed,
+    )?;
     remove_journal(&repository.common_dir, &state.topic_identity)?;
     write_destination(primary)?;
     ui::finish(merge_summary(state, MergeWorktreeOutcome::Removed))
