@@ -637,13 +637,14 @@ fn merge_trust_recovery(
 #[allow(clippy::too_many_lines)]
 pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = git::repository(&cwd)?;
+    let repository = RepositoryObservation::new(&cwd).repository()?;
     let primary = repository
         .primary
         .as_ref()
         .context("cannot merge from a bare repository")?;
     let in_place = repository.current().path == *primary;
-    let identity = git::worktree_identity(&repository.current().path)?;
+    let current_history = HistoryObservation::new(&repository.current().path);
+    let identity = RepositoryObservation::new(&repository.current().path).worktree_identity()?;
     let journal = read_journal(&repository.common_dir, &identity)?;
     let rebase_active = LifecycleMutation::new(&repository.current().path).rebase_in_progress()?;
     if rebase_active && journal.is_none() {
@@ -672,7 +673,7 @@ pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
             ));
         }
     }
-    if !rebase_active && git::is_dirty(&repository.current().path)? {
+    if !rebase_active && current_history.status()?.is_dirty() {
         return Err(preflight(
             PreflightFailureKind::Dirty,
             "the topic worktree has local changes; commit or discard them before merging",
@@ -705,12 +706,11 @@ pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
         )
         .into());
     }
-    let source_commit = git::head_commit(&repository.current().path)?;
-    let target_commit = git::branch_commit(primary, &target)?;
+    let source_commit = current_history.head_commit()?;
+    let target_commit = HistoryObservation::new(primary).commit(&target)?;
     let cleanup_pending = journal.as_ref().is_some_and(|s| s.cleanup_pending);
-    let needs_rebase = !cleanup_pending
-        && !rebase_active
-        && !git::is_ancestor(&repository.current().path, &target, &source)?;
+    let needs_rebase =
+        !cleanup_pending && !rebase_active && !current_history.is_ancestor(&target, &source)?;
     if needs_rebase && policy.no_rebase {
         return Err(preflight(
             PreflightFailureKind::NotFastForwardable,
@@ -1721,10 +1721,18 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
         .primary
         .as_ref()
         .expect("a merge plan always has a primary worktree");
-    if !git::head_commit(&current.path).is_ok_and(|head| head == plan.context.source_commit)
-        || !git::branch_commit(primary, &plan.context.target_branch)
+    let current_history = HistoryObservation::new(&current.path);
+    let primary_history = HistoryObservation::new(primary);
+    if !current_history
+        .head_commit()
+        .is_ok_and(|head| head == plan.context.source_commit)
+        || !primary_history
+            .commit(&plan.context.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
-        || (!plan.context.rebase_active && git::is_dirty(&current.path).unwrap_or(true))
+        || (!plan.context.rebase_active
+            && current_history
+                .status()
+                .map_or(true, |status| status.is_dirty()))
     {
         return execution_failure(
             plan,
@@ -1735,7 +1743,7 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
             "repository state changed after merge planning; retry to create a fresh plan",
         );
     }
-    let identity = match git::worktree_identity(&current.path) {
+    let identity = match RepositoryObservation::new(&current.path).worktree_identity() {
         Ok(identity) => identity,
         Err(error) => {
             return execution_failure(
@@ -1998,7 +2006,7 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
         }
         mark_effect(&mut effects, "squash", true, true);
     }
-    let mut candidate = match git::head_commit(&current.path) {
+    let mut candidate = match current_history.head_commit() {
         Ok(candidate) => candidate,
         Err(error) => {
             return execution_failure(
@@ -2067,7 +2075,10 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                 error,
             );
         }
-        if git::is_dirty(&current.path).unwrap_or(true) {
+        if current_history
+            .status()
+            .map_or(true, |status| status.is_dirty())
+        {
             return execution_failure(
                 plan,
                 effects,
@@ -2077,7 +2088,7 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                 "pre-merge hooks left the candidate worktree dirty; clean it before retrying",
             );
         }
-        let refreshed = match git::head_commit(&current.path) {
+        let refreshed = match current_history.head_commit() {
             Ok(refreshed) => refreshed,
             Err(error) => {
                 return execution_failure(
@@ -2090,7 +2101,8 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                 );
             }
         };
-        if !git::branch_commit(primary, &plan.context.target_branch)
+        if !primary_history
+            .commit(&plan.context.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
         {
             return execution_failure(
@@ -2121,12 +2133,18 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
         );
     }
 
-    if !git::head_commit(&current.path).is_ok_and(|head| head == candidate)
-        || !git::branch_commit(primary, &plan.context.source_branch)
+    if !current_history
+        .head_commit()
+        .is_ok_and(|head| head == candidate)
+        || !primary_history
+            .commit(&plan.context.source_branch)
             .is_ok_and(|head| head == candidate)
-        || !git::branch_commit(primary, &plan.context.target_branch)
+        || !primary_history
+            .commit(&plan.context.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
-        || !git::is_ancestor(primary, &plan.context.target_branch, &candidate).unwrap_or(false)
+        || !primary_history
+            .is_ancestor(&plan.context.target_branch, &candidate)
+            .unwrap_or(false)
     {
         return execution_failure(
             plan,
@@ -2168,7 +2186,7 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
             );
         }
     }
-    let refreshed_repository = match git::repository(primary) {
+    let refreshed_repository = match RepositoryObservation::new(primary).repository() {
         Ok(repository) => repository,
         Err(error) => {
             return execution_failure(
@@ -2186,10 +2204,15 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
         .iter()
         .any(|worktree| worktree.path == current.path)
         || refreshed_repository.current_branch().ok() != Some(state.target_branch.as_str())
-        || !git::branch_commit(primary, &state.source_branch).is_ok_and(|head| head == candidate)
-        || !git::branch_commit(primary, &state.target_branch)
+        || !primary_history
+            .commit(&state.source_branch)
+            .is_ok_and(|head| head == candidate)
+        || !primary_history
+            .commit(&state.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
-        || !git::is_ancestor(primary, &state.target_branch, &candidate).unwrap_or(false)
+        || !primary_history
+            .is_ancestor(&state.target_branch, &candidate)
+            .unwrap_or(false)
     {
         return execution_failure(
             plan,
@@ -2534,20 +2557,22 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     }
     let yolo_stage_all = matches!(intent, MergeIntent::StageAll);
     let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = git::repository(&cwd)?;
+    let repository = RepositoryObservation::new(&cwd).repository()?;
     let primary = repository
         .primary
         .as_ref()
         .context("cannot merge from a bare repository")?;
     let in_place = repository.current().path == *primary;
-    let identity = git::worktree_identity(&repository.current().path)?;
+    let current_history = HistoryObservation::new(&repository.current().path);
+    let primary_history = HistoryObservation::new(primary);
+    let identity = RepositoryObservation::new(&repository.current().path).worktree_identity()?;
     let mut journal = read_journal(&repository.common_dir, &identity)?;
     let rebase_active = LifecycleMutation::new(&repository.current().path).rebase_in_progress()?;
     let source = match &journal {
         Some(state) => state.source_branch.clone(),
         None => repository.current_branch()?.to_owned(),
     };
-    let dirty = !rebase_active && git::is_dirty(&repository.current().path)?;
+    let dirty = !rebase_active && current_history.status()?.is_dirty();
     if dirty && !yolo_stage_all {
         bail!("the topic worktree has local changes; commit or discard them before merging");
     }
@@ -2633,7 +2658,7 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
 
     if yolo_stage_all
         && journal.as_ref().is_some_and(|state| !state.squashed)
-        && git::is_dirty(&repository.current().path)?
+        && current_history.status()?.is_dirty()
     {
         // Preflight and journal creation must precede this mutation.
         ui::run_timed(
@@ -2656,7 +2681,7 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             },
         )?)?;
     }
-    if !git::is_ancestor(&repository.current().path, &target, &source)? {
+    if !current_history.is_ancestor(&target, &source)? {
         if policy.no_rebase {
             bail!(
                 "the topic is not fast-forwardable onto {target:?}; rerun without --no-rebase to rebase it"
@@ -2680,7 +2705,7 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     }
     if yolo_stage_all
         && journal.as_ref().is_some_and(|state| !state.squashed)
-        && git::is_dirty(&repository.current().path)?
+        && current_history.status()?.is_dirty()
     {
         ui::run_timed(
             true,
@@ -2718,8 +2743,8 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             write_journal(&repository.common_dir, &state)?;
         }
     }
-    let refreshed = git::head_commit(&repository.current().path)?;
-    let target_commit = git::branch_commit(primary, &target)?;
+    let refreshed = current_history.head_commit()?;
+    let target_commit = primary_history.commit(&target)?;
     if state.validated_source.as_deref() != Some(&refreshed)
         || state.validated_target.as_deref() != Some(&target_commit)
     {
@@ -2733,19 +2758,19 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             MergeExecutionMode::Human,
             &mut Vec::new(),
         )?;
-        if git::is_dirty(&repository.current().path)? {
+        if current_history.status()?.is_dirty() {
             bail!(
                 "pre-merge hooks left the topic worktree dirty; restore cleanliness before retrying"
             );
         }
-        if git::head_commit(&repository.current().path)? != refreshed {
+        if current_history.head_commit()? != refreshed {
             return merge_inner(policy, intent);
         }
         state.validated_source = Some(refreshed.clone());
         state.validated_target = Some(target_commit);
         write_journal(&repository.common_dir, &state)?;
     }
-    if !git::is_ancestor(&repository.current().path, &target, &refreshed)? {
+    if !current_history.is_ancestor(&target, &refreshed)? {
         bail!("the target advanced during validation; rerun merge to revalidate the new candidate");
     }
     // In place, the target is not checked out anywhere yet; claim it in the

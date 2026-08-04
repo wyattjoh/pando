@@ -463,7 +463,7 @@ impl<'cwd> HistoryObservation<'cwd> {
         branch_commit_observed(self.cwd, reference)
     }
 
-    fn is_ancestor(self, ancestor: &str, descendant: &str) -> Result<bool> {
+    pub(crate) fn is_ancestor(self, ancestor: &str, descendant: &str) -> Result<bool> {
         ancestry_observed(self.cwd, ancestor, descendant)
     }
 
