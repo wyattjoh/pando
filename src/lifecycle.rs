@@ -418,10 +418,50 @@ fn merge_approval_context(candidate: &hook_approval::Candidate) -> MergeApproval
     }
 }
 
+/// Plans and executes one merge request as a command-owned protocol outcome.
+///
+/// This is the complete machine adapter seam. It owns planning and approval
+/// inspection so protocol adapters never infer lifecycle state from Git or the
+/// journal.
+#[must_use]
+pub fn execute_merge_request(input: &MergeInput, mode: MergeExecutionMode) -> MergeOutcome {
+    let plan = match plan_merge(input.policy()) {
+        Ok(plan) => plan,
+        Err(error) => return merge_preflight_outcome(&error),
+    };
+    let approval = if plan.context.cleanup_pending {
+        None
+    } else {
+        match hook_approval::evaluate(
+            &plan.repository,
+            HookPhase::PreMerge,
+            &plan.config.pre_merge,
+        ) {
+            Ok(hook_approval::Evaluation::ApprovalRequired(candidate)) => Some(candidate),
+            Ok(
+                hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted { .. },
+            ) => None,
+            Err(error) => {
+                return MergeOutcome {
+                    result: Err(MergeError {
+                        code: "trust.read_failed".into(),
+                        message: format!("{error:#}"),
+                    }),
+                    context: MergeOutcomeContext::Lifecycle(plan.context.clone()),
+                    effects: plan.effects.clone(),
+                    diagnostics: Vec::new(),
+                    recovery: Vec::new(),
+                };
+            }
+        }
+    };
+    merge_outcome(&plan, input, approval.as_ref(), mode)
+}
+
 /// Converts one validated merge plan into the command-owned protocol outcome.
 ///
-/// The same function handles previews, trust blockers, and execution so adapters
-/// cannot infer lifecycle progress from Git or rebuild retry policy.
+/// Human presentation uses this lower seam after gathering any interactive
+/// approval. Machine adapters must call [`execute_merge_request`] instead.
 #[must_use]
 #[allow(clippy::too_many_lines)] // The outcome records every version 1 lifecycle contract in one seam.
 pub fn merge_outcome(
@@ -2242,13 +2282,29 @@ fn execute_merge_cleanup(
         .as_ref()
         .expect("a merge plan always has a primary worktree");
     mark_effect(&mut effects, "remove_worktree", true, false);
-    if let Err(error) = git::remove_worktree(primary, &state.topic_path, false) {
-        push_merge_diagnostic(
-            &mut diagnostics,
-            "cleanup",
-            "stderr",
-            error.to_string().as_bytes(),
-        );
+    let removal = match mode {
+        MergeExecutionMode::Human => git::remove_worktree(primary, &state.topic_path, false),
+        MergeExecutionMode::Captured => {
+            git::remove_worktree_captured(primary, &state.topic_path, false).and_then(|output| {
+                push_merge_diagnostic(&mut diagnostics, "cleanup", "stdout", &output.stdout);
+                push_merge_diagnostic(&mut diagnostics, "cleanup", "stderr", &output.stderr);
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("git worktree remove failed"))
+                }
+            })
+        }
+    };
+    if let Err(error) = removal {
+        if matches!(mode, MergeExecutionMode::Human) {
+            push_merge_diagnostic(
+                &mut diagnostics,
+                "cleanup",
+                "stderr",
+                error.to_string().as_bytes(),
+            );
+        }
         return failure(
             effects,
             diagnostics,

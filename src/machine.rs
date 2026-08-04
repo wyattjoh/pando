@@ -1,6 +1,5 @@
 use crate::{
-    config::HookPhase,
-    git, hook_approval, install,
+    git, install,
     protocol::{self, EmptyInput},
     read_only::{self, GetProperty, GetRequest},
     setup::OutputPolicy,
@@ -510,44 +509,8 @@ pub fn merge(
             },
         )
     };
-    let policy = input.policy();
-    let plan = match crate::lifecycle::plan_merge(policy) {
-        Ok(plan) => plan,
-        Err(error) => {
-            let outcome = crate::lifecycle::merge_preflight_outcome(&error);
-            let response = protocol::adapt(
-                "merge",
-                id,
-                outcome.result,
-                outcome.context,
-                outcome.effects,
-                outcome.diagnostics,
-                outcome.recovery,
-            )?;
-            return emit(response, true);
-        }
-    };
-    let pre_merge_approval = if plan.context.cleanup_pending {
-        None
-    } else {
-        match hook_approval::evaluate(
-            &plan.repository,
-            HookPhase::PreMerge,
-            &plan.config.pre_merge,
-        ) {
-            Ok(hook_approval::Evaluation::ApprovalRequired(candidate)) => Some(candidate),
-            Ok(
-                hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted { .. },
-            ) => None,
-            Err(error) => {
-                return emit_err("merge", id, "trust.read_failed", format!("{error:#}"));
-            }
-        }
-    };
-    let outcome = crate::lifecycle::merge_outcome(
-        &plan,
+    let outcome = crate::lifecycle::execute_merge_request(
         &input,
-        pre_merge_approval.as_ref(),
         crate::lifecycle::MergeExecutionMode::Captured,
     );
     let failed = outcome.result.is_err();

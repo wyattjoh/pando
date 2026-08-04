@@ -1934,6 +1934,151 @@ fn json_merge_cleanup_failure_preserves_topic_and_retries_captured_hooks() {
 }
 
 #[test]
+fn json_merge_reports_generation_failure_without_adapter_inference() {
+    let repo = Repository::new();
+    commit_three_on_topic(&repo);
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        "merge:\n  generation:\n    command: 'cat >/dev/null; printf generation-failed >&2; exit 41'\n",
+    )
+    .unwrap();
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--no-remove", "--output", "json"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = command.output().unwrap();
+
+    assert!(!output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["error"]["code"], "merge.execution_failed");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("generation-failed")
+    );
+    assert_eq!(value["context"]["phase"], "squash");
+    assert_eq!(value["next_steps"][0]["action"], "merge.retry");
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn json_merge_reports_integration_failure_from_the_lifecycle_outcome() {
+    let repo = Repository::new();
+    let (fake_bin, path, real_git) = failing_git("merge", "--ff-only");
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {"no_remove": true, "no_squash": true}
+    });
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--input-output", "json"])
+        .current_dir(&repo.linked)
+        .env("PATH", path)
+        .env("REAL_GIT", real_git)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(serde_json::to_string(&request).unwrap().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    drop(fake_bin);
+
+    assert!(!output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["error"]["code"], "merge.execution_failed");
+    assert_eq!(value["context"]["phase"], "integration");
+    assert_eq!(value["next_steps"][0]["action"], "merge.retry");
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn json_merge_reports_removal_failure_from_the_lifecycle_outcome() {
+    let repo = Repository::new();
+    let (fake_bin, path, real_git) = failing_git("worktree", "remove");
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {"no_squash": true}
+    });
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--input-output", "json"])
+        .current_dir(&repo.linked)
+        .env("PATH", path)
+        .env("REAL_GIT", real_git)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(serde_json::to_string(&request).unwrap().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    drop(fake_bin);
+
+    assert!(!output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["error"]["code"], "merge.remove_failed");
+    assert_eq!(value["context"]["phase"], "cleanup");
+    assert!(
+        value["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry["stream"] == "stderr"
+                    && entry["content"]
+                        .as_str()
+                        .unwrap()
+                        .contains("injected git failure")
+            })
+    );
+    assert_eq!(value["next_steps"][0]["action"], "merge.retry");
+    assert!(repo.linked.exists());
+}
+
+fn failing_git(first: &str, second: &str) -> (TempDir, String, PathBuf) {
+    let real_git = PathBuf::from(
+        String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
+            .unwrap()
+            .trim(),
+    );
+    let bin = tempfile::tempdir().unwrap();
+    let wrapper = bin.path().join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = {} ] && [ \"$2\" = {} ]; then printf 'injected git failure\\n' >&2; exit 91; fi\nexec \"$REAL_GIT\" \"$@\"\n",
+            shell_quote(Path::new(first)),
+            shell_quote(Path::new(second)),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    (bin, path, real_git)
+}
+
+#[test]
 fn merge_rejects_an_unrelated_in_progress_rebase_without_journaling() {
     let repo = Repository::new();
     fs::write(repo.main.join("README.md"), "main version\n").unwrap();
