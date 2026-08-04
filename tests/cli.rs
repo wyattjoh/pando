@@ -5717,6 +5717,16 @@ fn json_create_request(
     run_json_command(command, Some(request))
 }
 
+fn run_raw_json_command(mut command: Command, stdin: &[u8]) -> std::process::Output {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    child.wait_with_output().unwrap()
+}
+
 fn run_json_command(
     mut command: Command,
     stdin: Option<&serde_json::Value>,
@@ -5738,6 +5748,186 @@ fn assert_json_pure(output: &std::process::Output) -> serde_json::Value {
     );
     assert_eq!(output.stdout.last(), Some(&b'\n'));
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn json_version_one_request_envelope_is_strict_and_preserves_identity() {
+    let repo = Repository::new();
+    let cases: &[(&[u8], &str, Option<&str>)] = &[
+        (b"{", "json.invalid_request", None),
+        (
+            b"{\"schema_version\":1,\"input\":{\"property\":\"branch\"}} {}",
+            "json.invalid_request",
+            None,
+        ),
+        (
+            b"{\"schema_version\":2,\"request_id\":\"unsupported-2\",\"input\":{\"property\":\"branch\"}}",
+            "json.unsupported_schema_version",
+            Some("unsupported-2"),
+        ),
+        (
+            b"{\"schema_version\":1,\"input\":{\"property\":\"branch\"},\"extra\":true}",
+            "json.invalid_request",
+            None,
+        ),
+        (b"{\"schema_version\":1}", "json.invalid_request", None),
+    ];
+
+    for (stdin, code, request_id) in cases {
+        let mut command = Command::cargo_bin("pando").unwrap();
+        command
+            .args(["get", "--input-output", "json"])
+            .current_dir(&repo.main);
+        let output = run_raw_json_command(command, stdin);
+        assert!(
+            !output.status.success(),
+            "{}",
+            String::from_utf8_lossy(stdin)
+        );
+        let value = assert_json_pure(&output);
+        assert_eq!(value["error"]["code"], *code, "{value}");
+        assert_eq!(value["request_id"].as_str(), *request_id, "{value}");
+    }
+
+    let mixed = json_command(
+        &repo.main,
+        &["get", "branch", "--input-output", "json"],
+        Some(&serde_json::json!({
+            "schema_version": 1,
+            "request_id": "mixed-1",
+            "input": {"property": "branch"}
+        })),
+    );
+    assert!(!mixed.status.success());
+    let mixed = assert_json_pure(&mixed);
+    assert_eq!(mixed["error"]["code"], "json.invalid_request");
+    assert!(mixed.get("request_id").is_none());
+}
+
+#[test]
+fn json_version_one_responses_are_exclusive_single_documents() {
+    let repo = Repository::new();
+    let success = json_command(&repo.main, &["list", "--output", "json"], None);
+    assert!(success.status.success());
+    let success = assert_json_pure(&success);
+    assert_eq!(success["status"], "success");
+    assert!(success["result"].is_object());
+    assert!(success["error"].is_null());
+
+    let failure = json_command(
+        &repo.main,
+        &["get", "not-a-property", "--output", "json"],
+        None,
+    );
+    assert!(!failure.status.success());
+    let failure = assert_json_pure(&failure);
+    assert_eq!(failure["status"], "error");
+    assert!(failure["result"].is_null());
+    assert!(failure["error"].is_object());
+
+    for response in [&success, &failure] {
+        assert_eq!(response["schema_version"], 1);
+        assert!(response["context"].is_object());
+        assert!(response["effects"].is_array());
+        assert!(response["diagnostics"].is_array());
+        assert!(response["next_steps"].is_array());
+    }
+}
+
+#[test]
+fn json_version_one_schema_help_matches_runtime_envelopes() {
+    let repo = Repository::new();
+    let help = json_command(&repo.main, &["get", "--help", "--output", "json"], None);
+    assert!(help.status.success());
+    let help = assert_json_pure(&help);
+    let request_schema = &help["result"]["request_schema"];
+    assert_eq!(request_schema["additionalProperties"], false);
+    let request_properties = request_schema["properties"].as_object().unwrap();
+    assert_eq!(
+        request_properties
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["input", "request_id", "schema_version"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    assert_eq!(
+        request_schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["input", "schema_version"].into_iter().collect()
+    );
+
+    let output = json_command(&repo.main, &["get", "branch", "--output", "json"], None);
+    let response = assert_json_pure(&output);
+    let response_properties = help["result"]["response_schema"]["properties"]
+        .as_object()
+        .unwrap();
+    for key in response.as_object().unwrap().keys() {
+        assert!(
+            response_properties.contains_key(key),
+            "missing schema for {key}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn json_version_one_byte_paths_effects_diagnostics_and_recovery_are_public() {
+    let repo = Repository::new();
+    let non_utf8_parent = repo
+        .temp
+        .path()
+        .join(OsString::from_vec(b"protocol-\xff".to_vec()));
+    fs::create_dir(&non_utf8_parent).unwrap();
+    let path = non_utf8_parent.join("topic");
+    let output = Command::new("git")
+        .args(["worktree", "add", "-b", "protocol-byte-path"])
+        .arg(&path)
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let list = json_command(&path, &["list", "--output", "json"], None);
+    assert!(list.status.success());
+    let list = assert_json_pure(&list);
+    let record = list["result"]["worktrees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["branch"] == "protocol-byte-path")
+        .unwrap();
+    assert_eq!(record["path"]["encoding"], "base64");
+    assert!(
+        record["path"]["value"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+
+    let create = json_command(
+        &path,
+        &["create", "protocol-byte-path", "--output", "json"],
+        None,
+    );
+    assert!(!create.status.success());
+    let create = assert_json_pure(&create);
+    assert_eq!(create["error"]["code"], "create.branch_registered");
+    assert!(create["effects"].as_array().unwrap().is_empty());
+    assert_eq!(
+        create["next_steps"][0]["invocation"]["working_directory"]["encoding"],
+        "base64"
+    );
+    assert!(create["diagnostics"].as_array().unwrap().is_empty());
 }
 
 #[test]
