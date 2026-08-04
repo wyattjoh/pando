@@ -152,10 +152,7 @@ impl MergePlan {
     /// Whether the shared executor can run this retained-topic lifecycle.
     #[must_use]
     pub const fn is_retained_execution(&self) -> bool {
-        self.context.policy.no_remove
-            && !self.context.in_place
-            && !self.context.cleanup_pending
-            && !self.squash.applicable
+        self.context.policy.no_remove && !self.context.in_place && !self.context.cleanup_pending
     }
 }
 
@@ -181,6 +178,7 @@ pub enum MergeExecutionFailureKind {
     StalePlan,
     Journal,
     Rebase,
+    Squash,
     Validation,
     Integration,
     JournalCleanup,
@@ -889,6 +887,23 @@ fn mark_effect(effects: &mut [Effect], action: &str, attempted: bool, completed:
     effect.completed = completed;
 }
 
+fn push_merge_diagnostic(
+    diagnostics: &mut Vec<MergeDiagnostic>,
+    phase: &'static str,
+    stream: &'static str,
+    content: &[u8],
+) {
+    const LIMIT: usize = 16 * 1024;
+    if content.is_empty() {
+        return;
+    }
+    diagnostics.push(MergeDiagnostic {
+        phase,
+        stream,
+        content: content[..content.len().min(LIMIT)].to_vec(),
+    });
+}
+
 fn execution_failure(
     plan: &MergePlan,
     effects: Vec<Effect>,
@@ -1085,6 +1100,129 @@ pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> Mer
             }
         }
     }
+    if plan.squash.applicable && !state.squashed {
+        mark_effect(&mut effects, "squash", true, false);
+        let refreshed = match squash::plan(
+            &plan.repository,
+            &plan.config,
+            &state.target_branch,
+            true,
+            true,
+            false,
+        ) {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                return execution_failure(
+                    plan,
+                    effects,
+                    diagnostics,
+                    MergePhase::Squash,
+                    MergeExecutionFailureKind::Squash,
+                    error,
+                );
+            }
+        };
+        if refreshed.approval_required() || !refreshed.generator_configured {
+            return execution_failure(
+                plan,
+                effects,
+                diagnostics,
+                MergePhase::Squash,
+                MergeExecutionFailureKind::StalePlan,
+                "squash generator readiness changed after merge planning; retry after resolving trust or configuration",
+            );
+        }
+        if refreshed.applicable {
+            let message = match mode {
+                MergeExecutionMode::Human => ui::run_timed(
+                    true,
+                    "Generating squash commit message...",
+                    "Generated squash commit message:",
+                    "Failed to generate the squash commit message",
+                    |_| {
+                        squash::generate_message(
+                            &plan.repository,
+                            &plan.config,
+                            &state.target_branch,
+                            false,
+                        )
+                    },
+                )
+                .and_then(|message| {
+                    ui::step(render::commit_message(&message))?;
+                    Ok(message)
+                }),
+                MergeExecutionMode::Captured => squash::generate_message(
+                    &plan.repository,
+                    &plan.config,
+                    &state.target_branch,
+                    false,
+                ),
+            };
+            let message = match message {
+                Ok(message) => message,
+                Err(error) => {
+                    push_merge_diagnostic(
+                        &mut diagnostics,
+                        "squash",
+                        "stderr",
+                        error.to_string().as_bytes(),
+                    );
+                    return execution_failure(
+                        plan,
+                        effects,
+                        diagnostics,
+                        MergePhase::Squash,
+                        MergeExecutionFailureKind::Squash,
+                        error,
+                    );
+                }
+            };
+            if matches!(mode, MergeExecutionMode::Captured) {
+                push_merge_diagnostic(&mut diagnostics, "squash", "stderr", message.as_bytes());
+            }
+            let collapse = match mode {
+                MergeExecutionMode::Human => ui::run_timed(
+                    true,
+                    &format!("Squashing {} commits...", refreshed.commit_count),
+                    "Squashed the topic into a single commit",
+                    "Failed to squash the topic",
+                    |_| squash::collapse(&plan.repository, &state.target_branch, &message),
+                ),
+                MergeExecutionMode::Captured => {
+                    squash::collapse(&plan.repository, &state.target_branch, &message)
+                }
+            };
+            if let Err(error) = collapse {
+                push_merge_diagnostic(
+                    &mut diagnostics,
+                    "squash",
+                    "stderr",
+                    error.to_string().as_bytes(),
+                );
+                return execution_failure(
+                    plan,
+                    effects,
+                    diagnostics,
+                    MergePhase::Squash,
+                    MergeExecutionFailureKind::Squash,
+                    error,
+                );
+            }
+            state.squashed = true;
+            if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
+                return execution_failure(
+                    plan,
+                    effects,
+                    diagnostics,
+                    MergePhase::Squash,
+                    MergeExecutionFailureKind::Journal,
+                    error,
+                );
+            }
+        }
+        mark_effect(&mut effects, "squash", true, true);
+    }
     let candidate = match git::head_commit(&current.path) {
         Ok(candidate) => candidate,
         Err(error) => {
@@ -1092,7 +1230,7 @@ pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> Mer
                 plan,
                 effects,
                 diagnostics,
-                MergePhase::Rebase,
+                MergePhase::Squash,
                 MergeExecutionFailureKind::StalePlan,
                 error,
             );
@@ -1258,6 +1396,11 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     if matches!(intent, MergeIntent::Normal) {
         let plan = plan_merge(policy)?;
         if plan.is_retained_execution() {
+            if plan.squash.approval_required() {
+                bail!(
+                    "shared squash message generator approval is required; run pando trust merge-approve, or rerun with --no-squash"
+                );
+            }
             hook_approval::approve_interactively(
                 &plan.repository,
                 HookPhase::PreMerge,
@@ -1270,10 +1413,15 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             if let Some((_, message)) = outcome.failure {
                 bail!(message);
             }
+            let squashed = outcome
+                .effects
+                .iter()
+                .find(|effect| effect.action == "squash")
+                .is_some_and(|effect| effect.completed);
             return ui::finish(styled_merge_summary(
                 &plan.context.source_branch,
                 &plan.context.target_branch,
-                false,
+                squashed,
                 "; worktree retained.",
             ));
         }

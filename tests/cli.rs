@@ -2760,7 +2760,7 @@ fn json_merge_dry_run_reports_the_squash_effect_without_mutating() {
 }
 
 /// Agents only ever see JSON, so pin down where the generated squash message
-/// is reachable from: the captured `merge` stderr diagnostic, not `result`.
+/// is reachable from: a bounded, squash-attributed diagnostic, not `result`.
 #[test]
 fn json_merge_exposes_the_squash_message_only_in_diagnostics() {
     let repo = Repository::new();
@@ -2787,16 +2787,17 @@ fn json_merge_exposes_the_squash_message_only_in_diagnostics() {
     // The structured result stays a lifecycle outcome; it carries no message.
     assert!(value["result"].get("message").is_none());
     let diagnostics = value["diagnostics"].as_array().unwrap();
-    let merged = diagnostics
+    let squash = diagnostics
         .iter()
-        .filter(|d| d["source"] == "merge")
+        .filter(|d| d["source"] == "squash")
         .map(|d| d["content"].as_str().unwrap())
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        merged.contains("feat: squashed topic"),
-        "the generated message is not recoverable from diagnostics:\n{merged}"
+        squash.contains("feat: squashed topic"),
+        "the generated message is not recoverable from diagnostics:\n{squash}"
     );
+    assert!(squash.len() <= 16 * 1024, "squash diagnostic was unbounded");
 }
 
 #[test]

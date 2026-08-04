@@ -1489,11 +1489,12 @@ pub fn merge(
             let code = match kind {
                 crate::lifecycle::MergeExecutionFailureKind::StalePlan => "merge.stale_plan",
                 crate::lifecycle::MergeExecutionFailureKind::Rebase => "merge.rebase_conflict",
+                crate::lifecycle::MergeExecutionFailureKind::Squash
+                | crate::lifecycle::MergeExecutionFailureKind::Integration => {
+                    "merge.execution_failed"
+                }
                 crate::lifecycle::MergeExecutionFailureKind::Validation => {
                     "merge.validation_failed"
-                }
-                crate::lifecycle::MergeExecutionFailureKind::Integration => {
-                    "merge.execution_failed"
                 }
                 crate::lifecycle::MergeExecutionFailureKind::Journal
                 | crate::lifecycle::MergeExecutionFailureKind::JournalCleanup => {
