@@ -14,7 +14,10 @@ use crate::{
     Condition, Worktree, WorktreeKind,
     branch::Resolver,
     config::{EffectiveConfig, HookPhase},
-    git::{self, LifecycleMutation, LifecycleOutput, Repository},
+    git::{
+        self, HistoryObservation, LifecycleMutation, LifecycleOutput, Repository,
+        RepositoryObservation,
+    },
     hash, hook_approval,
     protocol::{
         self, BytePath, Diagnostic, Effect, ErrorBody, MutationClass, RecoveryAction,
@@ -2860,7 +2863,7 @@ const fn plural(count: usize) -> &'static str {
 /// Returns an error for invalid repository state, targets, journals, or force policy.
 pub fn plan_remove(branches: &[String], force: bool) -> PreflightResult<RemovalPlan> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = git::repository(&cwd)?;
+    let repository = RepositoryObservation::new(&cwd).repository()?;
     let primary = repository
         .primary
         .clone()
@@ -2997,7 +3000,7 @@ fn select_removal_targets(
 }
 
 fn inspect_removal_state(repository: &Repository, target: &Worktree) -> Result<Option<PathBuf>> {
-    let identity = git::worktree_identity(&target.path)?;
+    let identity = RepositoryObservation::new(&target.path).worktree_identity()?;
     let Some(state) = read_journal(&repository.common_dir, &identity)? else {
         return Ok(None);
     };
@@ -3031,7 +3034,7 @@ fn check_removable(target: &Worktree, force: bool) -> Result<()> {
             target.state_label()
         );
     }
-    if !force && git::is_dirty(&target.path)? {
+    if !force && HistoryObservation::new(&target.path).status()?.is_dirty() {
         return Err(preflight(PreflightFailureKind::ForceRequired, format!("worktree {} has local changes; rerun with --force to discard only worktree contents", target.path.display())).into());
     }
     if !matches!(target.condition, Condition::Clean | Condition::Dirty) {
