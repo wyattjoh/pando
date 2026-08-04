@@ -6267,6 +6267,141 @@ fn json_switch_and_create_report_post_create_approval_before_mutation() {
 }
 
 #[test]
+fn json_create_and_switch_capture_post_create_streams_in_order() {
+    let repo = Repository::new();
+    let root = repo.temp.path().join("topics");
+    let xdg = config_home_with_root(&root);
+    fs::write(
+        repo.main.join(".pando.yaml"),
+        "hooks:\n  post-create:\n    - name: shared\n      command: 'if read request; then test \"$request\" = human; fi; printf \"%020000d\" 0; pwd > hook-cwd; printf shared > setup-order'\n",
+    )
+    .unwrap();
+    fs::write(repo.main.join(".gitignore"), "/.pando.local.yaml\n").unwrap();
+    fs::write(
+        repo.main.join(".pando.local.yaml"),
+        "hooks:\n  post-create:\n    - name: local\n      command: 'printf \"%020001d\" 0 >&2; printf local >> setup-order'\n",
+    )
+    .unwrap();
+
+    let mut approval = Command::cargo_bin("pando").unwrap();
+    approval
+        .args(["create", "approval-seed"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let approved = run_pty_command(approval, b"y\rhuman\n");
+    assert!(approved.status.success(), "{}", approved.stderr);
+
+    git(&repo.main, ["branch", "switch-topic"]);
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {"branch":"create-topic","dry_run":false}
+    });
+    let outputs = [
+        json_create_request(&repo, &xdg, &request),
+        create_command(&repo, &xdg, &["switch", "switch-topic", "--output", "json"]),
+    ];
+
+    for (output, branch) in outputs.into_iter().zip(["create-topic", "switch-topic"]) {
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.ends_with(b"\n"));
+        assert!(!output.stdout[..output.stdout.len() - 1].contains(&b'\n'));
+        let value = assert_json_pure(&output);
+        assert_eq!(value["status"], "success");
+        assert_eq!(value["diagnostics"].as_array().unwrap().len(), 2);
+        assert_eq!(value["diagnostics"][0]["source"], "hook");
+        assert_eq!(value["diagnostics"][0]["stream"], "stdout");
+        assert_eq!(value["diagnostics"][0]["original_size"], 20_000);
+        assert_eq!(value["diagnostics"][0]["truncated"], true);
+        assert_eq!(
+            value["diagnostics"][0]["content"].as_str().unwrap().len(),
+            16 * 1024
+        );
+        assert_eq!(value["diagnostics"][1]["stream"], "stderr");
+        assert_eq!(value["diagnostics"][1]["original_size"], 20_001);
+        assert_eq!(value["diagnostics"][1]["truncated"], true);
+        assert_eq!(
+            fs::read_to_string(root.join(branch).join("setup-order")).unwrap(),
+            "sharedlocal"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(branch).join("hook-cwd"))
+                .unwrap()
+                .trim(),
+            fs::canonicalize(root.join(branch))
+                .unwrap()
+                .to_str()
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn json_post_create_failure_and_interruption_preserve_recovery_contracts() {
+    for (branch, command, outcome) in [
+        (
+            "failed-topic",
+            "printf out; printf err >&2; exit 23",
+            "Failed(23)",
+        ),
+        (
+            "interrupted-topic",
+            "printf before; kill -TERM $$",
+            "Interrupted",
+        ),
+    ] {
+        let repo = Repository::new();
+        let root = repo.temp.path().join("topics");
+        let xdg = config_home_with_root(&root);
+        fs::write(
+            repo.main.join(".pando.yaml"),
+            format!("hooks:\n  post-create:\n    - command: '{command}'\n"),
+        )
+        .unwrap();
+
+        let mut approval = Command::cargo_bin("pando").unwrap();
+        approval
+            .args(["create", "approval-seed"])
+            .current_dir(&repo.main)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", repo.temp.path());
+        let approved = run_pty_command(approval, b"y\r");
+        assert!(!approved.status.success());
+
+        let request = serde_json::json!({
+            "schema_version": 1,
+            "input": {"branch":branch,"dry_run":false}
+        });
+        let output = json_create_request(&repo, &xdg, &request);
+
+        assert!(!output.status.success());
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.ends_with(b"\n"));
+        assert!(!output.stdout[..output.stdout.len() - 1].contains(&b'\n'));
+        let value = assert_json_pure(&output);
+        assert_eq!(value["error"]["code"], "create.setup_failed");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(outcome)
+        );
+        assert_eq!(value["context"]["setup"], "incomplete");
+        assert_eq!(value["effects"][0]["action"], "create_branch");
+        assert_eq!(value["effects"][0]["completed"], true);
+        assert_eq!(value["effects"][1]["action"], "create_worktree");
+        assert_eq!(value["effects"][1]["completed"], true);
+        assert_eq!(value["next_steps"][0]["action"], "create.recover_setup");
+        assert_eq!(value["next_steps"][0]["mutation"], "setup");
+        assert_eq!(value["diagnostics"][0]["source"], "hook");
+        assert_eq!(value["diagnostics"][0]["stream"], "stdout");
+        assert!(root.join(branch).join(".git").exists());
+        assert!(repo.main.join(".git/pando-state/incomplete").exists());
+    }
+}
+
+#[test]
 fn json_create_refuses_a_registered_branch_and_points_at_switch() {
     let repo = Repository::new();
     let root = repo.temp.path().join("topics");

@@ -738,22 +738,29 @@ fn resolve(
             effects[effect_index].completed = true;
         }
         if !config.post_create.is_empty() {
-            let (outcome, output) =
-                crate::setup::run_steps_captured(&config.post_create, &destination)?;
+            let execution = crate::setup::execute(
+                HookPhase::PostCreate,
+                &config.post_create,
+                &destination,
+                crate::setup::OutputPolicy::Captured,
+            )?;
+            let crate::setup::HookOutput::Captured(output) = execution.output else {
+                unreachable!("captured policy always returns captured output");
+            };
             diagnostics = output;
-            if outcome != crate::setup::HookOutcome::Success {
+            if execution.outcome != crate::setup::HookOutcome::Success {
                 let mut response = protocol::failure(
                     command,
                     id,
                     &format!("{command}.setup_failed"),
-                    format!("post-create hook outcome: {outcome:?}; setup remains incomplete"),
+                    format!(
+                        "post-create hook outcome: {:?}; setup remains incomplete",
+                        execution.outcome
+                    ),
                 );
                 response.context = json!({"branch":branch,"destination":BytePath::path(&destination),"setup":"incomplete"});
                 response.effects = effects;
-                for (stdout, stderr) in diagnostics {
-                    push_diagnostic(&mut response, "hook", "stdout", &stdout);
-                    push_diagnostic(&mut response, "hook", "stderr", &stderr);
-                }
+                push_hook_diagnostics(&mut response, diagnostics);
                 response.next_steps.push(protocol::NextStep { action:format!("{command}.recover_setup"), description:"Inspect the worktree and retry or explicitly complete setup interactively".into(), mutation:"setup".into(), requires_human_approval:true, invocation:json!({"argv":["pando","switch",branch],"stdin":null,"working_directory":BytePath::path(&repo.current().path)}) });
                 return emit(response, true);
             }
@@ -769,10 +776,7 @@ fn resolve(
         }
     }
     let mut response = protocol::success(command, id, result, json!({}), effects);
-    for (stdout, stderr) in diagnostics {
-        push_diagnostic(&mut response, "hook", "stdout", &stdout);
-        push_diagnostic(&mut response, "hook", "stderr", &stderr);
-    }
+    push_hook_diagnostics(&mut response, diagnostics);
     emit(response, false)
 }
 
@@ -1525,6 +1529,26 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
         json!({"outcome":"removed","targets":plan.targets.iter().map(|t|json!({"branch":t.worktree.branch_label(),"path":BytePath::path(&t.worktree.path),"branch_retained":true})).collect::<Vec<_>>(),"destination":if removed_current{Some(BytePath::path(&plan.primary))}else{None}}),
     );
     emit(response, false)
+}
+
+fn push_hook_diagnostics(
+    response: &mut protocol::Response,
+    steps: Vec<crate::setup::CapturedStep>,
+) {
+    for step in steps {
+        for (stream, captured) in [("stdout", step.stdout), ("stderr", step.stderr)] {
+            if captured.original_size == 0 {
+                continue;
+            }
+            response.diagnostics.push(crate::protocol::Diagnostic {
+                source: "hook".into(),
+                stream: stream.into(),
+                content: String::from_utf8_lossy(&captured.content).into_owned(),
+                original_size: captured.original_size,
+                truncated: captured.truncated,
+            });
+        }
+    }
 }
 
 fn push_diagnostic(response: &mut protocol::Response, source: &str, stream: &str, bytes: &[u8]) {
