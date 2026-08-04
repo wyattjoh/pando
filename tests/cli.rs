@@ -6117,6 +6117,153 @@ fn json_remove_execution_removes_multiple_worktrees_and_retains_branches() {
 }
 
 #[test]
+fn json_remove_reports_later_target_approval_before_any_mutation() {
+    let repo = Repository::new();
+    let second = repo.add_worktree("second topic", "second");
+    let xdg = tempfile::tempdir().unwrap();
+    let second_output = repo.temp.path().join("second-hook-ran");
+    fs::write(
+        second.join(".pando.yaml"),
+        format!(
+            "hooks:\n  pre-remove:\n    - name: Second removal\n      command: printf second > {}\n",
+            second_output.display()
+        ),
+    )
+    .unwrap();
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {"branches": ["feature", "second"]}
+    });
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["remove", "--force", "--input-output", "json"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = run_json_command(command, Some(&request));
+
+    assert!(!output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["error"]["code"], "trust.approval_required");
+    assert_eq!(value["context"]["branch"], "second");
+    assert_eq!(value["context"]["approval"]["phase"], "pre-remove");
+    assert_eq!(
+        value["context"]["approval"]["commands"],
+        serde_json::json!([{
+            "name": "Second removal",
+            "command": format!("printf second > {}", second_output.display())
+        }])
+    );
+    assert!(
+        value["context"]["approval"]["repository"]
+            .as_str()
+            .is_some_and(|identity| identity.starts_with("hex:"))
+    );
+    assert!(
+        value["context"]["approval"]["identity"]
+            .as_str()
+            .is_some_and(|identity| !identity.is_empty())
+    );
+    assert_eq!(
+        value["next_steps"][0]["invocation"]["argv"],
+        serde_json::json!(["pando", "remove", "second"])
+    );
+    assert!(repo.linked.exists());
+    assert!(second.exists());
+    assert!(!second_output.exists());
+    assert!(!xdg.path().join("pando/trust.json").exists());
+    assert!(git_output(&repo.main, ["branch", "--list", "feature"]).contains("feature"));
+    assert!(git_output(&repo.main, ["branch", "--list", "second"]).contains("second"));
+}
+
+#[test]
+fn declining_later_remove_approval_preserves_every_target() {
+    let repo = Repository::new();
+    let second = repo.add_worktree("second topic", "second");
+    let xdg = tempfile::tempdir().unwrap();
+    let first_output = repo.temp.path().join("first-hook-ran");
+    let second_output = repo.temp.path().join("second-hook-ran");
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        format!(
+            "hooks:\n  pre-remove:\n    - command: printf first > {}\n",
+            first_output.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        second.join(".pando.yaml"),
+        format!(
+            "hooks:\n  pre-remove:\n    - command: printf second > {}\n",
+            second_output.display()
+        ),
+    )
+    .unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["remove", "--force", "feature", "second"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = run_pty_command(command, b"y\rn\r");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.contains("approval declined"),
+        "{}",
+        output.stderr
+    );
+    assert!(repo.linked.exists());
+    assert!(second.exists());
+    assert!(!first_output.exists());
+    assert!(!second_output.exists());
+    assert!(git_output(&repo.main, ["branch", "--list", "feature"]).contains("feature"));
+    assert!(git_output(&repo.main, ["branch", "--list", "second"]).contains("second"));
+}
+
+#[test]
+fn approved_remove_hooks_run_in_target_order_and_retain_branches() {
+    let repo = Repository::new();
+    let second = repo.add_worktree("second topic", "second");
+    let xdg = tempfile::tempdir().unwrap();
+    let hook_order = repo.temp.path().join("hook-order");
+    let hook = format!(
+        "hooks:\n  pre-remove:\n    - command: printf %s \"$(basename \"$PWD\")\" >> {}\n",
+        hook_order.display()
+    );
+    fs::write(repo.linked.join(".pando.yaml"), &hook).unwrap();
+    fs::write(second.join(".pando.yaml"), hook).unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["remove", "--force", "feature", "second"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = run_pty_command(command, b"y\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        fs::read_to_string(hook_order).unwrap(),
+        "feature worktreesecond topic"
+    );
+    assert!(!repo.linked.exists());
+    assert!(!second.exists());
+    assert_eq!(
+        git_output(&repo.main, ["branch", "--list", "feature"]),
+        "feature"
+    );
+    assert_eq!(
+        git_output(&repo.main, ["branch", "--list", "second"]),
+        "second"
+    );
+}
+
+#[test]
 fn json_forced_remove_requires_explicit_force_and_reports_retention() {
     let repo = Repository::new();
     fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();

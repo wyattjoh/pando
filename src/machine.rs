@@ -1348,29 +1348,47 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
         }
     };
     for target in &plan.targets {
-        let trusted = if input.dry_run || target.config.pre_remove.is_empty() {
-            true
-        } else {
-            match trust::is_trusted(
-                &plan.repository,
-                HookPhase::PreRemove,
-                &target.config.pre_remove,
-            ) {
-                Ok(value) => value,
-                Err(error) => {
-                    return emit_err("remove", id, "trust.read_failed", format!("{error:#}"));
-                }
+        let evaluation = match hook_approval::evaluate(
+            &plan.repository,
+            HookPhase::PreRemove,
+            &target.config.pre_remove,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                return emit_err("remove", id, "trust.read_failed", format!("{error:#}"));
             }
         };
-        if !trusted {
+        if let hook_approval::Evaluation::ApprovalRequired(candidate) = evaluation {
             let mut response = protocol::failure(
                 "remove",
                 id,
                 "trust.approval_required",
-                "pre-remove hooks require manual review and approval",
+                "pre-remove hooks require manual review and approval before mutation",
             );
-            response.context = json!({"branch":target.worktree.branch_label(),"commands":target.config.pre_remove.iter().map(|s| &s.command).collect::<Vec<_>>()});
-            response.next_steps.push(crate::protocol::NextStep { action:"trust.approve_hooks".into(), description:"Review and approve pre-remove hooks interactively".into(), mutation:"trust".into(), requires_human_approval:true, invocation:json!({"argv":["pando","remove",target.worktree.branch_label()],"stdin":null,"working_directory":BytePath::path(&plan.current)}) });
+            response.context = json!({
+                "approval": {
+                    "phase": candidate.phase().key(),
+                    "commands": candidate.commands().iter().map(|step| json!({
+                        "name": step.name,
+                        "command": step.command,
+                    })).collect::<Vec<_>>(),
+                    "repository": candidate.repository(),
+                    "identity": candidate.identity(),
+                },
+                "branch": target.worktree.branch_label(),
+                "path": BytePath::path(&target.worktree.path),
+            });
+            response.next_steps.push(crate::protocol::NextStep {
+                action: "trust.approve_hooks".into(),
+                description: "Review and approve pre-remove hooks interactively".into(),
+                mutation: "trust".into(),
+                requires_human_approval: true,
+                invocation: json!({
+                    "argv": ["pando", "remove", target.worktree.branch_label()],
+                    "stdin": null,
+                    "working_directory": BytePath::path(&plan.current),
+                }),
+            });
             return emit(response, true);
         }
     }
