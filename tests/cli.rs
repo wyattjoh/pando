@@ -7287,6 +7287,60 @@ fn json_create_description_does_not_modify_a_registered_branch() {
 }
 
 #[test]
+fn json_create_revalidates_the_planned_source_before_mutation() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "topic/race"]);
+    fs::write(repo.main.join("advanced.txt"), "advanced\n").unwrap();
+    git(&repo.main, ["add", "advanced.txt"]);
+    git(&repo.main, ["commit", "-m", "advance source"]);
+    let advanced = git_output(&repo.main, ["rev-parse", "HEAD"]);
+    git(&repo.main, ["reset", "--hard", "HEAD~1"]);
+
+    let root = repo.temp.path().join("topics");
+    let xdg = config_home_with_root(&root);
+    let fake_bin = repo.temp.path().join("source-race-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        "#!/bin/sh\ncase \"$*\" in\n  *topic/race*commit*)\n    if [ -f \"$COUNT_FILE\" ]; then IFS= read -r count < \"$COUNT_FILE\"; else count=0; fi\n    count=$((count + 1))\n    printf '%s' \"$count\" > \"$COUNT_FILE\"\n    if [ \"$count\" -eq 2 ]; then \"$REAL_GIT\" update-ref refs/heads/topic/race \"$ADVANCED\"; fi\n  ;;\nesac\nexec \"$REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["create", "--input-output", "json"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .env("PATH", &fake_bin)
+        .env("REAL_GIT", find_executable("git"))
+        .env("ADVANCED", advanced)
+        .env("COUNT_FILE", repo.temp.path().join("source-count"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": { "branch": "topic/race" }
+    });
+
+    let output = run_json_command(command, Some(&request));
+
+    assert!(!output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["error"]["code"], "create.plan_stale");
+    assert!(
+        value["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|effect| { effect["attempted"] == false && effect["completed"] == false })
+    );
+    assert!(!root.join("topic/race").exists());
+}
+
+#[test]
 fn json_create_description_failure_reports_partial_creation_and_recovery() {
     let repo = Repository::new();
     let root = repo.temp.path().join("topics");

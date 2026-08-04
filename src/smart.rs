@@ -169,7 +169,7 @@ fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> 
     }
     // Resolve the same start point the real run would, but never fetch: a dry
     // run reports the refresh as something it would have done.
-    let plan = worktree_plan::plan(&repository, intent, branch, None, fetch)?
+    let plan = worktree_plan::plan(&repository, intent, branch, None, fetch, None, true)?
         .map_err(|blocker| render_plan_blocker(branch, blocker))?;
     let Source::New { base } = plan.source else {
         unreachable!("new classification produces a new-branch plan")
@@ -1296,7 +1296,15 @@ fn resolve_and_switch(
     git::validate_branch(&repository.current().path, branch)?;
     let mut remote = None;
     let plan = loop {
-        match worktree_plan::plan(repository, intent, branch, remote.as_deref(), fetch)? {
+        match worktree_plan::plan(
+            repository,
+            intent,
+            branch,
+            remote.as_deref(),
+            fetch,
+            None,
+            false,
+        )? {
             Ok(plan) => break plan,
             Err(PlanBlocker::RemoteSelectionRequired { remotes }) => {
                 remote = Some(choose_remote(&remotes, branch)?);
@@ -1313,13 +1321,42 @@ fn resolve_and_switch(
     };
     debug_assert_eq!(plan.intent, intent);
     debug_assert_eq!(plan.branch, branch);
+    if !matches!(plan.source, Source::Registered(_))
+        && plan
+            .config
+            .as_ref()
+            .is_some_and(|config| config.post_create.is_empty())
+    {
+        if let Source::New { base } = &plan.source {
+            if let Some(output) = base
+                .fetch_output
+                .as_deref()
+                .filter(|output| !output.trim().is_empty())
+            {
+                ui::step(render::git_output(output))?;
+            }
+            match intent {
+                Intent::Switch => confirm_new_branch(repository, branch, base, &plan.destination)?,
+                Intent::Create => announce_new_branch(repository, branch, base, &plan.destination)?,
+            }
+        }
+        let outcome = ui::run_timed_completing(
+            true,
+            "Creating worktree...",
+            "Created worktree",
+            "Failed to create worktree",
+            ui::Completion::Outro,
+            |_| worktree_plan::execute(repository, &plan).map_err(|failure| failure.error),
+        )?;
+        return write_destination(&outcome.destination);
+    }
     match plan.source {
         Source::Registered(worktree) => {
             git::reject_fetch(fetch.requested(), git::FETCH_REGISTERED_WORKTREE)?;
             debug_assert_eq!(plan.destination, worktree.path);
             enter_existing(repository, &plan.destination, Some(branch))
         }
-        Source::Local => {
+        Source::Local { .. } => {
             git::reject_fetch(fetch.requested(), git::FETCH_LOCAL_BRANCH)?;
             create_worktree(
                 repository,
@@ -1330,7 +1367,9 @@ fn resolve_and_switch(
                 intent,
             )
         }
-        Source::Remote(remote) => {
+        Source::Remote {
+            reference: remote, ..
+        } => {
             git::reject_fetch(fetch.requested(), git::FETCH_REMOTE_BRANCH)?;
             create_worktree(
                 repository,

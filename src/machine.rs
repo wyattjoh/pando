@@ -480,6 +480,8 @@ fn resolve(
         &branch,
         selected,
         crate::worktree_plan::FetchIntent::new(input.fetch, input.dry_run),
+        input.description.clone(),
+        input.dry_run,
     )? {
         Ok(plan) => plan,
         Err(crate::worktree_plan::Blocker::FetchNotApplicable { message }) => {
@@ -504,7 +506,7 @@ fn resolve(
     };
     debug_assert_eq!(shared_plan.intent, intent);
     debug_assert_eq!(shared_plan.branch, branch);
-    let destination = shared_plan.destination;
+    let destination = shared_plan.destination.clone();
     let new_base = match &shared_plan.source {
         crate::worktree_plan::Source::New { base } => Some(base.clone()),
         _ => None,
@@ -569,6 +571,60 @@ fn resolve(
             }),
         });
         return emit(response, true);
+    }
+    if config.post_create.is_empty() {
+        let execution = crate::worktree_plan::execute(&repo, &shared_plan);
+        let effects = match execution {
+            Ok(outcome) => outcome.effects,
+            Err(failure) => {
+                let code = match failure.code {
+                    "description_failed" => "create.description_failed".to_owned(),
+                    "plan_stale" => format!("{command}.plan_stale"),
+                    _ => format!("{command}.creation_failed"),
+                };
+                let mut response =
+                    protocol::failure(command, id, &code, format!("{:#}", failure.error));
+                response.context = json!({
+                    "branch": branch,
+                    "destination": BytePath::path(&destination),
+                    "created": failure.created,
+                });
+                response.effects = failure.effects;
+                if code == "create.description_failed" {
+                    if let Some(description) = input.description.as_deref() {
+                        response.next_steps.push(protocol::NextStep {
+                            action: "git.set_branch_description".into(),
+                            description: "Set the requested branch description in repository-local Git configuration".into(),
+                            mutation: "config".into(),
+                            requires_human_approval: false,
+                            invocation: json!({
+                                "argv":["git","config","--local","--replace-all",format!("branch.{branch}.description"),description],
+                                "stdin":null,
+                                "working_directory":BytePath::path(&repo.current().path)
+                            }),
+                        });
+                    }
+                }
+                return emit(response, true);
+            }
+        };
+        let mut result = json!({
+            "outcome": if input.dry_run { "creation_plan" } else { "created" },
+            "branch": branch,
+            "destination": BytePath::path(&destination),
+            "remote": selected_remote,
+        });
+        if let Some(base) = new_base {
+            result["kind"] = json!("new");
+            result["start_point"] = json!(base.commit);
+            if let Some(base_ref) = &base.base_ref {
+                result["base_ref"] = json!(base_ref.reference());
+            }
+        }
+        return emit(
+            protocol::success(command, id, result, json!({}), effects),
+            false,
+        );
     }
     let mut effects = Vec::new();
     if let Some(base) = &new_base {

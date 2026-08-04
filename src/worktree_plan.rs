@@ -1,8 +1,11 @@
 //! Shared destination and source planning for worktree navigation and creation.
 
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
+use serde_json::json;
+
+use crate::protocol::Effect;
 
 use crate::{
     Worktree,
@@ -31,8 +34,8 @@ impl Intent {
 #[derive(Clone, Debug)]
 pub(crate) enum Source {
     Registered(Worktree),
-    Local,
-    Remote(String),
+    Local { commit: String },
+    Remote { reference: String, commit: String },
     New { base: git::NewBranchBase },
 }
 
@@ -70,6 +73,24 @@ pub(crate) struct Plan {
     pub(crate) destination: PathBuf,
     pub(crate) source: Source,
     pub(crate) config: Option<EffectiveConfig>,
+    pub(crate) description: Option<String>,
+    pub(crate) dry_run: bool,
+}
+
+/// The result of executing a navigation or hook-free creation plan.
+#[derive(Debug)]
+pub(crate) struct ExecutionOutcome {
+    pub(crate) destination: PathBuf,
+    pub(crate) effects: Vec<Effect>,
+}
+
+/// A failed execution together with effects advanced only at real transitions.
+#[derive(Debug)]
+pub(crate) struct ExecutionFailure {
+    pub(crate) code: &'static str,
+    pub(crate) error: anyhow::Error,
+    pub(crate) effects: Vec<Effect>,
+    pub(crate) created: bool,
 }
 
 /// A caller decision or safety condition that prevents an executable plan.
@@ -103,6 +124,8 @@ pub(crate) fn plan(
     branch: &str,
     remote: Option<&str>,
     fetch: FetchIntent,
+    description: Option<String>,
+    dry_run: bool,
 ) -> Result<Result<Plan, Blocker>> {
     let classification = branch::classify(repository, branch)?;
     if let Classification::Registered(worktree) = classification {
@@ -126,6 +149,8 @@ pub(crate) fn plan(
             destination: worktree.path.clone(),
             source: Source::Registered(worktree),
             config: None,
+            description,
+            dry_run,
         }));
     }
 
@@ -176,6 +201,8 @@ pub(crate) fn plan(
         destination,
         source,
         config: Some(config),
+        description,
+        dry_run,
     }))
 }
 
@@ -194,7 +221,10 @@ fn plan_source(
             if remote.is_some() {
                 return Err(Box::new(Blocker::IrrelevantRemote));
             }
-            Ok(Source::Local)
+            Ok(Source::Local {
+                commit: git::branch_commit(&repository.current().path, branch)
+                    .expect("classified local branch must remain resolvable while planning"),
+            })
         }
         Classification::New => {
             if remote.is_some() {
@@ -224,13 +254,213 @@ fn plan_source(
                     .find(|candidate| {
                         candidate == remote || candidate == &format!("{remote}/{branch}")
                     })
-                    .map(Source::Remote)
+                    .map(|reference| Source::Remote {
+                        commit: git::branch_commit(&repository.current().path, &reference)
+                            .expect("classified remote ref must remain resolvable while planning"),
+                        reference,
+                    })
                     .ok_or_else(|| Box::new(Blocker::UnknownRemote)),
-                None if remotes.len() == 1 => Ok(Source::Remote(remotes[0].clone())),
+                None if remotes.len() == 1 => Ok(Source::Remote {
+                    commit: git::branch_commit(&repository.current().path, &remotes[0])
+                        .expect("classified remote ref must remain resolvable while planning"),
+                    reference: remotes[0].clone(),
+                }),
                 None => Err(Box::new(Blocker::RemoteSelectionRequired { remotes })),
             }
         }
     }
+}
+
+/// Executes a navigation or creation plan without reclassifying its branch.
+///
+/// Hook-bearing plans remain owned by the setup executor and are rejected here.
+#[allow(clippy::too_many_lines)] // This is the single explicit worktree execution boundary.
+pub(crate) fn execute(
+    repository: &Repository,
+    plan: &Plan,
+) -> std::result::Result<ExecutionOutcome, ExecutionFailure> {
+    let mut effects = planned_effects(plan);
+    if let Source::Registered(worktree) = &plan.source {
+        return Ok(ExecutionOutcome {
+            destination: worktree.path.clone(),
+            effects,
+        });
+    }
+    let config = plan.config.as_ref().expect("creation plan has config");
+    if !config.post_create.is_empty() {
+        return Err(ExecutionFailure {
+            code: "hooks_present",
+            error: anyhow::anyhow!("hook-bearing plan requires the setup executor"),
+            effects,
+            created: false,
+        });
+    }
+    if plan.dry_run {
+        return Ok(ExecutionOutcome {
+            destination: plan.destination.clone(),
+            effects,
+        });
+    }
+    if let Err(error) = revalidate(repository, plan) {
+        return Err(ExecutionFailure {
+            code: "plan_stale",
+            error,
+            effects,
+            created: false,
+        });
+    }
+    if let Some(parent) = plan.destination.parent() {
+        if let Err(error) = fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create destination parent {}", parent.display()))
+        {
+            return Err(ExecutionFailure {
+                code: "creation_failed",
+                error,
+                effects,
+                created: false,
+            });
+        }
+    }
+    let creation_index = effects
+        .iter()
+        .position(|effect| effect.action == "create_worktree")
+        .expect("creation plans carry a worktree effect");
+    effects[creation_index].attempted = true;
+    let branch_index = effects
+        .iter()
+        .position(|effect| effect.action == "create_branch");
+    if let Some(index) = branch_index {
+        effects[index].attempted = true;
+    }
+    let creation = match &plan.source {
+        Source::Registered(_) => unreachable!(),
+        Source::Local { .. } => {
+            git::add_existing_worktree(&repository.current().path, &plan.destination, &plan.branch)
+        }
+        Source::Remote { reference, .. } => git::add_tracking_worktree(
+            &repository.current().path,
+            &plan.destination,
+            &plan.branch,
+            reference,
+        ),
+        Source::New { base } => git::add_new_worktree(
+            &repository.current().path,
+            &plan.destination,
+            &plan.branch,
+            &base.commit,
+        ),
+    };
+    if let Err(error) = creation {
+        return Err(ExecutionFailure {
+            code: "creation_failed",
+            error,
+            effects,
+            created: false,
+        });
+    }
+    effects[creation_index].completed = true;
+    if let Some(index) = branch_index {
+        effects[index].completed = true;
+    }
+    if let Some(description) = plan.description.as_deref() {
+        let index = effects
+            .iter()
+            .position(|effect| effect.action == "set_branch_description")
+            .expect("described plans carry a description effect");
+        effects[index].attempted = true;
+        if let Err(error) =
+            git::set_branch_description(&repository.current().path, &plan.branch, description)
+        {
+            return Err(ExecutionFailure {
+                code: "description_failed",
+                error,
+                effects,
+                created: true,
+            });
+        }
+        effects[index].completed = true;
+    }
+    Ok(ExecutionOutcome {
+        destination: plan.destination.clone(),
+        effects,
+    })
+}
+
+fn revalidate(repository: &Repository, plan: &Plan) -> Result<()> {
+    if plan.destination.exists()
+        || repository
+            .worktrees
+            .iter()
+            .any(|worktree| worktree.path == plan.destination)
+    {
+        bail!("the planned destination became occupied before worktree creation");
+    }
+    let (reference, expected) = match &plan.source {
+        Source::Local { commit } => (plan.branch.as_str(), commit),
+        Source::Remote { reference, commit } => (reference.as_str(), commit),
+        Source::New { base } => return revalidate_new(repository, base),
+        Source::Registered(_) => return Ok(()),
+    };
+    let actual = git::branch_commit(&repository.current().path, reference)?;
+    if actual != *expected {
+        bail!("planned source {reference:?} moved from {expected} to {actual}");
+    }
+    Ok(())
+}
+
+fn revalidate_new(repository: &Repository, base: &git::NewBranchBase) -> Result<()> {
+    let actual = match &base.base_ref {
+        Some(base_ref) => git::base_ref_commit(&repository.current().path, base_ref)?,
+        None => git::head_commit(&repository.current().path)?,
+    };
+    if actual != base.commit {
+        bail!(
+            "planned new-branch source moved from {} to {actual}",
+            base.commit
+        );
+    }
+    Ok(())
+}
+
+fn planned_effects(plan: &Plan) -> Vec<Effect> {
+    if matches!(plan.source, Source::Registered(_)) {
+        return Vec::new();
+    }
+    let mut effects = Vec::new();
+    if let Source::New { base } = &plan.source {
+        if base.fetch_output.is_some() {
+            effects.push(Effect {
+                action: "fetch_base_ref".into(),
+                attempted: true,
+                completed: true,
+                details: base
+                    .base_ref
+                    .as_ref()
+                    .map(|value| json!({"ref":value.reference()})),
+            });
+        }
+        effects.push(Effect {
+            action: "create_branch".into(),
+            attempted: false,
+            completed: false,
+            details: Some(json!({"branch":plan.branch,"start_point":base.commit})),
+        });
+    }
+    effects.push(Effect {
+        action: "create_worktree".into(),
+        attempted: false,
+        completed: false,
+        details: Some(json!({"destination":crate::protocol::BytePath::path(&plan.destination)})),
+    });
+    if let Some(description) = &plan.description {
+        effects.push(Effect {
+            action: "set_branch_description".into(),
+            attempted: false,
+            completed: false,
+            details: Some(json!({"branch":plan.branch,"description":description})),
+        });
+    }
+    effects
 }
 
 fn reject_fetch(fetch: FetchIntent, because: &str) -> Result<(), Box<Blocker>> {
