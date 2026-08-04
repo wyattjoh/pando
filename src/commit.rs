@@ -2,7 +2,6 @@ use std::{
     env,
     ffi::OsString,
     io::Write,
-    os::unix::ffi::OsStringExt,
     path::Path,
     process::{Command, Output, Stdio},
 };
@@ -733,30 +732,31 @@ fn render_prompt(repository: &Repository, template: &str) -> Result<String> {
         || "(unknown)".into(),
         |value| value.to_string_lossy().into_owned(),
     );
-    environment.get_template("commit")?.render(context! { git_diff => git::staged_diff(&repository.current().path)?, git_diff_stat => git::staged_diff_stat(&repository.current().path)?, branch, repo, recent_commits => git::recent_subjects(&repository.current().path)? }).context("failed to render commit generation template")
+    let history = git::HistoryObservation::new(&repository.current().path);
+    let staged = history.staged(None)?;
+    environment.get_template("commit")?.render(context! { git_diff => staged.patch, git_diff_stat => staged.statistics, branch, repo, recent_commits => git::recent_subjects(&repository.current().path)? }).context("failed to render commit generation template")
 }
 fn context_for(repository: &Repository) -> CommitContext {
     let path = &repository.current().path;
-    let status = status_bytes(path).unwrap_or_default();
+    let status = git::HistoryObservation::new(path)
+        .status()
+        .unwrap_or_default();
     let mut changes = ChangesContext {
         staged_diffstat: git::staged_diff_stat(path).unwrap_or_default(),
         ..ChangesContext::default()
     };
-    for entry in status
-        .split(|byte| *byte == 0)
-        .filter(|entry| entry.len() >= 4)
-    {
+    for entry in status.entries {
         let value = ChangeEntry {
-            status: String::from_utf8_lossy(&entry[..2]).into_owned(),
-            path: protocol::BytePath::new(&OsString::from_vec(entry[3..].to_vec())),
+            status: String::from_utf8_lossy(&entry.code).into_owned(),
+            path: protocol::BytePath::new(&entry.path),
         };
-        if &entry[..2] == b"??" {
+        if entry.is_untracked() {
             changes.untracked.push(value);
         } else {
-            if entry[0] != b' ' {
+            if entry.is_staged() {
                 changes.staged.push(value.clone());
             }
-            if entry[1] != b' ' {
+            if entry.is_unstaged() {
                 changes.unstaged.push(value);
             }
         }

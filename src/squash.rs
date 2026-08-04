@@ -273,6 +273,12 @@ fn render_prompt(
         .context("failed to parse the squash generation template")?;
     let cwd = &repository.current().path;
     let head = git::head_commit(cwd)?;
+    let diff_source = if include_staged {
+        git::RangeDiffSource::Staged
+    } else {
+        git::RangeDiffSource::Committed
+    };
+    let range = git::HistoryObservation::new(cwd).range(target, &head, diff_source)?;
     let branch = match &repository.current().kind {
         WorktreeKind::Branch(value) => value.as_str(),
         WorktreeKind::Detached => "(detached)",
@@ -288,18 +294,10 @@ fn render_prompt(
             branch,
             target,
             repo,
-            commit_count => git::count_commits_between(cwd, target, &head)?,
-            commits => git::range_messages(cwd, target, &head)?,
-            git_diff => if include_staged {
-                git::staged_diff_against(cwd, target)?
-            } else {
-                git::range_diff(cwd, target, &head)?
-            },
-            git_diff_stat => if include_staged {
-                git::staged_diff_stat_against(cwd, target)?
-            } else {
-                git::range_diff_stat(cwd, target, &head)?
-            },
+            commit_count => range.commit_count,
+            commits => range.messages,
+            git_diff => range.patch,
+            git_diff_stat => range.statistics,
         })
         .context("failed to render the squash generation template")
 }

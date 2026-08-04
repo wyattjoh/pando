@@ -3,7 +3,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::Write,
-    os::unix::ffi::OsStringExt,
+    os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Output, Stdio},
     thread,
@@ -97,6 +97,152 @@ pub struct Discovery {
     pub metadata_warning: Option<String>,
 }
 
+/// One byte-safe entry from Git's NUL-delimited porcelain status.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StatusEntry {
+    pub(crate) code: [u8; 2],
+    pub(crate) path: OsString,
+    pub(crate) original_path: Option<OsString>,
+}
+
+impl StatusEntry {
+    #[must_use]
+    pub(crate) fn is_staged(&self) -> bool {
+        self.code != *b"??" && self.code[0] != b' '
+    }
+
+    #[must_use]
+    pub(crate) fn is_unstaged(&self) -> bool {
+        self.code != *b"??" && self.code[1] != b' '
+    }
+
+    #[must_use]
+    pub(crate) fn is_untracked(&self) -> bool {
+        self.code == *b"??"
+    }
+}
+
+/// A semantic snapshot of staged, unstaged, and untracked paths.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StatusSnapshot {
+    pub(crate) entries: Vec<StatusEntry>,
+}
+
+impl StatusSnapshot {
+    #[must_use]
+    pub(crate) fn is_dirty(&self) -> bool {
+        !self.entries.is_empty()
+    }
+
+    fn into_porcelain(self) -> Vec<u8> {
+        let mut output = Vec::new();
+        for entry in self.entries {
+            output.extend_from_slice(&entry.code);
+            output.push(b' ');
+            output.extend_from_slice(entry.path.as_bytes());
+            output.push(0);
+            if let Some(original_path) = entry.original_path {
+                output.extend_from_slice(original_path.as_bytes());
+                output.push(0);
+            }
+        }
+        output
+    }
+}
+
+/// A patch and its statistics observed from the Git index.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StagedChanges {
+    pub(crate) patch: String,
+    pub(crate) statistics: String,
+}
+
+/// Selects whether a range snapshot observes committed or staged tree changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RangeDiffSource {
+    Committed,
+    Staged,
+}
+
+/// Commit messages and diff material for `ancestor..descendant`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CommitRange {
+    pub(crate) commit_count: usize,
+    pub(crate) messages: Vec<String>,
+    pub(crate) patch: String,
+    pub(crate) statistics: String,
+}
+
+/// Concrete interface to commit graph, index, status, and diff observations.
+///
+/// Range construction, stable diff flags, message ordering, and byte-safe
+/// status parsing stay behind this capability rather than leaking Git command
+/// choreography into command modules.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HistoryObservation<'cwd> {
+    cwd: &'cwd Path,
+}
+
+impl<'cwd> HistoryObservation<'cwd> {
+    #[must_use]
+    pub(crate) fn new(cwd: &'cwd Path) -> Self {
+        Self { cwd }
+    }
+
+    fn head_commit(self) -> Result<String> {
+        head_commit_observed(self.cwd)
+    }
+
+    fn branch_commit(self, branch: &str) -> Result<String> {
+        branch_commit_observed(self.cwd, branch)
+    }
+
+    fn is_ancestor(self, ancestor: &str, descendant: &str) -> Result<bool> {
+        ancestry_observed(self.cwd, ancestor, descendant)
+    }
+
+    pub(crate) fn status(self) -> Result<StatusSnapshot> {
+        status_observed(self.cwd)
+    }
+
+    pub(crate) fn staged(self, target: Option<&str>) -> Result<StagedChanges> {
+        Ok(StagedChanges {
+            patch: staged_patch(self.cwd, target)?,
+            statistics: staged_statistics(self.cwd, target)?,
+        })
+    }
+
+    pub(crate) fn range(
+        self,
+        ancestor: &str,
+        descendant: &str,
+        diff_source: RangeDiffSource,
+    ) -> Result<CommitRange> {
+        let commit_count = range_commit_count(self.cwd, ancestor, descendant)?;
+        let messages = range_commit_messages(self.cwd, ancestor, descendant)?;
+        let (patch, statistics) = match diff_source {
+            RangeDiffSource::Committed => (
+                range_patch(self.cwd, ancestor, descendant, None)?,
+                range_patch(self.cwd, ancestor, descendant, Some("--stat"))?,
+            ),
+            RangeDiffSource::Staged => (
+                staged_patch(self.cwd, Some(ancestor))?,
+                staged_statistics(self.cwd, Some(ancestor))?,
+            ),
+        };
+        Ok(CommitRange {
+            commit_count,
+            messages,
+            patch,
+            statistics,
+        })
+    }
+
+    fn recent_subjects(self) -> Result<Vec<String>> {
+        recent_subjects_observed(self.cwd)
+    }
+}
+
 /// Concrete read-only interface to facts reported by the installed Git executable.
 ///
 /// This interface owns discovery and enrichment choreography so callers receive
@@ -155,16 +301,6 @@ impl<'cwd> RepositoryObservation<'cwd> {
         .context("failed to list remote branches")?;
         ensure_success(&output, "git for-each-ref")?;
         Ok(parse_remote_branch_refs(&output.stdout))
-    }
-
-    fn is_dirty(self) -> Result<bool> {
-        let output = run_git(
-            self.cwd,
-            ["status", "--porcelain", "--untracked-files=normal"],
-        )
-        .context("failed to inspect invoking worktree changes")?;
-        ensure_success(&output, "git status")?;
-        Ok(!output.stdout.is_empty())
     }
 }
 
@@ -963,6 +1099,10 @@ pub fn worktree_identity(cwd: &Path) -> Result<PathBuf> {
 ///
 /// Returns an error when Git cannot resolve `HEAD`.
 pub fn head_commit(cwd: &Path) -> Result<String> {
+    HistoryObservation::new(cwd).head_commit()
+}
+
+fn head_commit_observed(cwd: &Path) -> Result<String> {
     git_stdout(cwd, ["rev-parse", "--verify", "HEAD"])
         .context("failed to resolve the invoking worktree's HEAD")
 }
@@ -976,6 +1116,10 @@ pub fn head_commit(cwd: &Path) -> Result<String> {
 ///
 /// Returns an error when Git cannot resolve the branch.
 pub fn branch_commit(cwd: &Path, branch: &str) -> Result<String> {
+    HistoryObservation::new(cwd).branch_commit(branch)
+}
+
+fn branch_commit_observed(cwd: &Path, branch: &str) -> Result<String> {
     git_stdout(
         cwd,
         ["rev-parse", "--verify", &format!("{branch}^{{commit}}")],
@@ -1129,6 +1273,10 @@ pub fn remove_worktree_captured(cwd: &Path, path: &Path, force: bool) -> Result<
 ///
 /// Returns an error when Git cannot inspect ancestry.
 pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    HistoryObservation::new(cwd).is_ancestor(ancestor, descendant)
+}
+
+fn ancestry_observed(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
     let output = run_git(cwd, ["merge-base", "--is-ancestor", ancestor, descendant])
         .context("failed to inspect commit ancestry")?;
     match output.status.code() {
@@ -1172,6 +1320,10 @@ pub fn stage_all(cwd: &Path) -> Result<()> {
 ///
 /// Returns an error when Git cannot inspect the index.
 pub fn has_staged_changes(cwd: &Path) -> Result<bool> {
+    staged_changes_present(cwd)
+}
+
+fn staged_changes_present(cwd: &Path) -> Result<bool> {
     let output = run_git(cwd, ["diff", "--cached", "--quiet"])
         .context("failed to inspect staged changes")?;
     match output.status.code() {
@@ -1190,16 +1342,7 @@ pub fn has_staged_changes(cwd: &Path) -> Result<bool> {
 ///
 /// Returns an error when Git cannot produce the staged diff.
 pub fn staged_diff(cwd: &Path) -> Result<String> {
-    git_stdout(
-        cwd,
-        [
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--cached",
-        ],
-    )
+    staged_patch(cwd, None)
 }
 
 /// Returns stable staged diff statistics.
@@ -1208,17 +1351,7 @@ pub fn staged_diff(cwd: &Path) -> Result<String> {
 ///
 /// Returns an error when Git cannot produce staged diff statistics.
 pub fn staged_diff_stat(cwd: &Path) -> Result<String> {
-    git_stdout(
-        cwd,
-        [
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--cached",
-            "--stat",
-        ],
-    )
+    staged_statistics(cwd, None)
 }
 
 /// Returns a stable staged patch against `target`.
@@ -1227,17 +1360,7 @@ pub fn staged_diff_stat(cwd: &Path) -> Result<String> {
 ///
 /// Returns an error when Git cannot produce the staged diff.
 pub fn staged_diff_against(cwd: &Path, target: &str) -> Result<String> {
-    git_stdout(
-        cwd,
-        [
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--cached",
-            target,
-        ],
-    )
+    staged_patch(cwd, Some(target))
 }
 
 /// Returns stable staged diff statistics against `target`.
@@ -1246,18 +1369,61 @@ pub fn staged_diff_against(cwd: &Path, target: &str) -> Result<String> {
 ///
 /// Returns an error when Git cannot produce the staged diff statistics.
 pub fn staged_diff_stat_against(cwd: &Path, target: &str) -> Result<String> {
-    git_stdout(
-        cwd,
-        [
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--cached",
-            "--stat",
-            target,
-        ],
-    )
+    staged_statistics(cwd, Some(target))
+}
+
+fn staged_patch(cwd: &Path, target: Option<&str>) -> Result<String> {
+    match target {
+        Some(target) => git_stdout(
+            cwd,
+            [
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--cached",
+                target,
+            ],
+        ),
+        None => git_stdout(
+            cwd,
+            [
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--cached",
+            ],
+        ),
+    }
+}
+
+fn staged_statistics(cwd: &Path, target: Option<&str>) -> Result<String> {
+    match target {
+        Some(target) => git_stdout(
+            cwd,
+            [
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--cached",
+                "--stat",
+                target,
+            ],
+        ),
+        None => git_stdout(
+            cwd,
+            [
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--cached",
+                "--stat",
+            ],
+        ),
+    }
 }
 
 /// Counts the commits reachable from `descendant` but not from `ancestor`.
@@ -1266,6 +1432,10 @@ pub fn staged_diff_stat_against(cwd: &Path, target: &str) -> Result<String> {
 ///
 /// Returns an error when Git cannot walk the range.
 pub fn count_commits_between(cwd: &Path, ancestor: &str, descendant: &str) -> Result<usize> {
+    range_commit_count(cwd, ancestor, descendant)
+}
+
+fn range_commit_count(cwd: &Path, ancestor: &str, descendant: &str) -> Result<usize> {
     let range = format!("{ancestor}..{descendant}");
     git_stdout(cwd, ["rev-list", "--count", &range])
         .with_context(|| format!("failed to count commits in {range}"))?
@@ -1283,6 +1453,10 @@ pub fn count_commits_between(cwd: &Path, ancestor: &str, descendant: &str) -> Re
 ///
 /// Returns an error when Git cannot walk the range.
 pub fn range_messages(cwd: &Path, ancestor: &str, descendant: &str) -> Result<Vec<String>> {
+    range_commit_messages(cwd, ancestor, descendant)
+}
+
+fn range_commit_messages(cwd: &Path, ancestor: &str, descendant: &str) -> Result<Vec<String>> {
     let range = format!("{ancestor}..{descendant}");
     // %x00 terminates each record so a multi-line body cannot be mistaken for
     // a record boundary the way a newline separator would be.
@@ -1302,7 +1476,7 @@ pub fn range_messages(cwd: &Path, ancestor: &str, descendant: &str) -> Result<Ve
 ///
 /// Returns an error when Git cannot produce the diff.
 pub fn range_diff(cwd: &Path, ancestor: &str, descendant: &str) -> Result<String> {
-    range_diff_args(cwd, ancestor, descendant, None)
+    range_patch(cwd, ancestor, descendant, None)
 }
 
 /// Returns stable diff statistics for `ancestor..descendant`.
@@ -1311,10 +1485,10 @@ pub fn range_diff(cwd: &Path, ancestor: &str, descendant: &str) -> Result<String
 ///
 /// Returns an error when Git cannot produce the statistics.
 pub fn range_diff_stat(cwd: &Path, ancestor: &str, descendant: &str) -> Result<String> {
-    range_diff_args(cwd, ancestor, descendant, Some("--stat"))
+    range_patch(cwd, ancestor, descendant, Some("--stat"))
 }
 
-fn range_diff_args(
+fn range_patch(
     cwd: &Path,
     ancestor: &str,
     descendant: &str,
@@ -1395,6 +1569,10 @@ pub fn commit_message_stdin(cwd: &Path, message: &str) -> Result<String> {
 ///
 /// Returns an error when Git cannot read commit history other than an unborn `HEAD`.
 pub fn recent_subjects(cwd: &Path) -> Result<Vec<String>> {
+    HistoryObservation::new(cwd).recent_subjects()
+}
+
+fn recent_subjects_observed(cwd: &Path) -> Result<Vec<String>> {
     let output =
         run_git(cwd, ["log", "-10", "--format=%s"]).context("failed to read recent commits")?;
     if output.status.success() {
@@ -1444,13 +1622,49 @@ pub fn commit_captured(cwd: &Path, message: &str) -> Result<Output> {
 ///
 /// Returns an error when Git cannot inspect status.
 pub fn status_porcelain(cwd: &Path) -> Result<Vec<u8>> {
+    Ok(HistoryObservation::new(cwd).status()?.into_porcelain())
+}
+
+fn status_observed(cwd: &Path) -> Result<StatusSnapshot> {
     let output = GitProcess::new(cwd, ["status", "--porcelain=v1", "-z"])
         .captured()
         .context("failed to start git status")?;
     if !output.status.success() {
         bail!("git status failed");
     }
-    Ok(output.stdout)
+    parse_status_porcelain(&output.stdout)
+}
+
+fn parse_status_porcelain(raw: &[u8]) -> Result<StatusSnapshot> {
+    let mut records = raw.split(|byte| *byte == 0).peekable();
+    let mut entries = Vec::new();
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            if records.peek().is_none() {
+                break;
+            }
+            bail!("git status returned an empty porcelain record");
+        }
+        if record.len() < 4 || record[2] != b' ' {
+            bail!("git status returned a malformed porcelain record");
+        }
+        let code = [record[0], record[1]];
+        let original_path = if code.into_iter().any(|byte| matches!(byte, b'R' | b'C')) {
+            let path = records
+                .next()
+                .filter(|path| !path.is_empty())
+                .context("git status omitted the original path for a rename or copy")?;
+            Some(OsString::from_vec(path.to_vec()))
+        } else {
+            None
+        };
+        entries.push(StatusEntry {
+            code,
+            path: OsString::from_vec(record[3..].to_vec()),
+            original_path,
+        });
+    }
+    Ok(StatusSnapshot { entries })
 }
 
 /// Reports whether the invoking worktree has staged, unstaged, or untracked changes.
@@ -1459,7 +1673,7 @@ pub fn status_porcelain(cwd: &Path) -> Result<Vec<u8>> {
 ///
 /// Returns an error when Git cannot inspect status.
 pub fn is_dirty(cwd: &Path) -> Result<bool> {
-    RepositoryObservation::new(cwd).is_dirty()
+    Ok(HistoryObservation::new(cwd).status()?.is_dirty())
 }
 
 /// Reports whether Git ignores an existing, untracked path.
@@ -1796,11 +2010,11 @@ pub fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, os::unix::ffi::OsStrExt};
 
     use super::{
         parse_branch_refs, parse_commit_batch, parse_committer_timestamp, parse_porcelain,
-        parse_remote_branch_refs,
+        parse_remote_branch_refs, parse_status_porcelain,
     };
     use crate::WorktreeKind;
 
@@ -1828,6 +2042,36 @@ mod tests {
 
         assert!(records.is_empty());
         assert_eq!(excluded.len(), 1);
+    }
+
+    #[test]
+    fn status_snapshot_preserves_byte_paths_and_change_distinctions() {
+        let mut input = b"M  staged\0 M unstaged\0?? untracked\0R  renamed\0original".to_vec();
+        input.extend_from_slice(&[0xFF, 0]);
+
+        let status = parse_status_porcelain(&input).unwrap();
+
+        assert_eq!(status.entries.len(), 4);
+        assert!(status.entries[0].is_staged());
+        assert!(!status.entries[0].is_unstaged());
+        assert!(status.entries[1].is_unstaged());
+        assert!(status.entries[2].is_untracked());
+        assert_eq!(status.entries[3].path.as_bytes(), b"renamed");
+        assert_eq!(
+            status.entries[3]
+                .original_path
+                .as_deref()
+                .unwrap()
+                .as_bytes(),
+            b"original\xff"
+        );
+    }
+
+    #[test]
+    fn status_snapshot_rejects_a_rename_without_its_original_path() {
+        let error = parse_status_porcelain(b"R  renamed\0").unwrap_err();
+
+        assert!(error.to_string().contains("omitted the original path"));
     }
 
     #[test]
