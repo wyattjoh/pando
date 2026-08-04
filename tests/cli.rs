@@ -2313,6 +2313,127 @@ fn merge_approval_persists_before_the_lifecycle_runs() {
 }
 
 #[test]
+fn merge_revalidates_a_hook_created_commit_without_replanning() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let marker = repo.temp.path().join("hook-created-commit");
+    let runs = repo.temp.path().join("validation-runs");
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        format!(
+            "hooks:\n  pre-merge:\n    - name: create generated commit once\n      command: printf 'run\\n' >> {}; test -f {} || (touch {}; touch generated.txt; git add generated.txt; git commit -m 'hook generated commit')\n",
+            shell_quote(&runs),
+            shell_quote(&marker),
+            shell_quote(&marker),
+        ),
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(
+        &repo.linked,
+        ["commit", "-m", "configure generating validation"],
+    );
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--no-remove", "--no-squash"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = run_pty_command(command, b"y\n");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(fs::read_to_string(&runs).unwrap(), "run\nrun\n");
+    assert_eq!(
+        git_output(&repo.main, ["log", "-1", "--format=%s"]),
+        "hook generated commit"
+    );
+    assert!(repo.main.join("generated.txt").exists());
+}
+
+#[test]
+fn merge_rechecks_hook_trust_before_revalidating_a_new_commit() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let marker = repo.temp.path().join("hook-created-commit");
+    let runs = repo.temp.path().join("validation-runs");
+    let trust = xdg.path().join("pando/trust.json");
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        format!(
+            "hooks:\n  pre-merge:\n    - name: revoke trust after generating\n      command: printf 'run\\n' >> {}; test -f {} || (touch {}; touch generated.txt; git add generated.txt; git commit -m 'hook generated commit'; rm {})\n",
+            shell_quote(&runs),
+            shell_quote(&marker),
+            shell_quote(&marker),
+            shell_quote(&trust),
+        ),
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(&repo.linked, ["commit", "-m", "configure trust revocation"]);
+    let target = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--no-remove", "--no-squash"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = run_pty_command(command, b"y\n");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output
+            .stderr
+            .contains("hook trust changed before execution"),
+        "{}",
+        output.stderr
+    );
+    assert_eq!(fs::read_to_string(&runs).unwrap(), "run\n");
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), target);
+}
+
+#[test]
+fn merge_invalidates_validation_when_the_target_advances() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let target = repo.main.canonicalize().unwrap();
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        format!(
+            "hooks:\n  pre-merge:\n    - name: advance target\n      command: cd {} && git commit --allow-empty -m 'target advanced during validation'\n",
+            shell_quote(&target),
+        ),
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(
+        &repo.linked,
+        ["commit", "-m", "configure target advancement"],
+    );
+    let topic = git_output(&repo.linked, ["rev-parse", "HEAD"]);
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--no-remove", "--no-squash"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = run_pty_command(command, b"y\n");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.contains("target advanced during validation"),
+        "{}",
+        output.stderr
+    );
+    assert_ne!(git_output(&repo.main, ["rev-parse", "HEAD"]), topic);
+    assert_eq!(git_output(&repo.linked, ["rev-parse", "HEAD"]), topic);
+}
+
+#[test]
 fn json_merge_reports_pre_merge_approval_before_mutation() {
     let repo = Repository::new();
     let xdg = tempfile::tempdir().unwrap();

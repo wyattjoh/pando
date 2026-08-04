@@ -1461,7 +1461,7 @@ pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> Mer
         }
         mark_effect(&mut effects, "squash", true, true);
     }
-    let candidate = match git::head_commit(&current.path) {
+    let mut candidate = match git::head_commit(&current.path) {
         Ok(candidate) => candidate,
         Err(error) => {
             return execution_failure(
@@ -1475,66 +1475,130 @@ pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> Mer
         }
     };
 
-    mark_effect(&mut effects, "pre_merge_hooks", true, false);
-    let hook_result = match mode {
-        MergeExecutionMode::Human => {
-            run_hooks(HookPhase::PreMerge, &plan.config.pre_merge, &current.path)
-        }
-        MergeExecutionMode::Captured => {
-            match setup::run_steps_captured(&plan.config.pre_merge, &current.path) {
-                Ok((outcome, output)) => {
-                    for (stdout, stderr) in output {
-                        diagnostics.push(MergeDiagnostic {
-                            phase: "validation",
-                            stream: "stdout",
-                            content: stdout,
-                        });
-                        diagnostics.push(MergeDiagnostic {
-                            phase: "validation",
-                            stream: "stderr",
-                            content: stderr,
-                        });
-                    }
-                    match outcome {
-                        HookOutcome::Success => Ok(()),
-                        HookOutcome::Failed(status) => Err(anyhow::anyhow!(
-                            "pre-merge hook failed with status {status}"
-                        )),
-                        HookOutcome::Interrupted => {
-                            Err(anyhow::anyhow!("pre-merge hook interrupted"))
-                        }
-                    }
-                }
-                Err(error) => Err(error),
+    loop {
+        match hook_approval::evaluate(
+            &plan.repository,
+            HookPhase::PreMerge,
+            &plan.config.pre_merge,
+        ) {
+            Ok(
+                hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted { .. },
+            ) => {}
+            Ok(hook_approval::Evaluation::ApprovalRequired(_)) => {
+                return execution_failure(
+                    plan,
+                    effects,
+                    diagnostics,
+                    MergePhase::Validation,
+                    MergeExecutionFailureKind::StalePlan,
+                    "pre-merge hook trust changed before execution; retry after approving the current commands",
+                );
+            }
+            Err(error) => {
+                return execution_failure(
+                    plan,
+                    effects,
+                    diagnostics,
+                    MergePhase::Validation,
+                    MergeExecutionFailureKind::Validation,
+                    error,
+                );
             }
         }
-    };
-    if let Err(error) = hook_result {
-        return execution_failure(
-            plan,
-            effects,
-            diagnostics,
-            MergePhase::Validation,
-            MergeExecutionFailureKind::Validation,
-            error,
-        );
-    }
-    if git::is_dirty(&current.path).unwrap_or(true)
-        || !git::head_commit(&current.path).is_ok_and(|head| head == candidate)
-        || !git::branch_commit(primary, &plan.context.target_branch)
+        mark_effect(&mut effects, "pre_merge_hooks", true, false);
+        let hook_result = match mode {
+            MergeExecutionMode::Human => {
+                run_hooks(HookPhase::PreMerge, &plan.config.pre_merge, &current.path)
+            }
+            MergeExecutionMode::Captured => {
+                match setup::run_steps_captured(&plan.config.pre_merge, &current.path) {
+                    Ok((outcome, output)) => {
+                        for (stdout, stderr) in output {
+                            push_merge_diagnostic(
+                                &mut diagnostics,
+                                "validation",
+                                "stdout",
+                                &stdout,
+                            );
+                            push_merge_diagnostic(
+                                &mut diagnostics,
+                                "validation",
+                                "stderr",
+                                &stderr,
+                            );
+                        }
+                        match outcome {
+                            HookOutcome::Success => Ok(()),
+                            HookOutcome::Failed(status) => Err(anyhow::anyhow!(
+                                "pre-merge hook failed with status {status}"
+                            )),
+                            HookOutcome::Interrupted => {
+                                Err(anyhow::anyhow!("pre-merge hook interrupted"))
+                            }
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        };
+        if let Err(error) = hook_result {
+            push_merge_diagnostic(
+                &mut diagnostics,
+                "validation",
+                "stderr",
+                error.to_string().as_bytes(),
+            );
+            return execution_failure(
+                plan,
+                effects,
+                diagnostics,
+                MergePhase::Validation,
+                MergeExecutionFailureKind::Validation,
+                error,
+            );
+        }
+        if git::is_dirty(&current.path).unwrap_or(true) {
+            return execution_failure(
+                plan,
+                effects,
+                diagnostics,
+                MergePhase::Validation,
+                MergeExecutionFailureKind::StalePlan,
+                "pre-merge hooks left the candidate worktree dirty; clean it before retrying",
+            );
+        }
+        let refreshed = match git::head_commit(&current.path) {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                return execution_failure(
+                    plan,
+                    effects,
+                    diagnostics,
+                    MergePhase::Validation,
+                    MergeExecutionFailureKind::StalePlan,
+                    error,
+                );
+            }
+        };
+        if !git::branch_commit(primary, &plan.context.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
-    {
-        return execution_failure(
-            plan,
-            effects,
-            diagnostics,
-            MergePhase::Validation,
-            MergeExecutionFailureKind::StalePlan,
-            "repository state changed during validation; retry to revalidate the candidate",
-        );
+        {
+            return execution_failure(
+                plan,
+                effects,
+                diagnostics,
+                MergePhase::Validation,
+                MergeExecutionFailureKind::StalePlan,
+                "the target advanced during validation; retry to validate the new candidate",
+            );
+        }
+        if refreshed == candidate {
+            break;
+        }
+        candidate = refreshed;
     }
     mark_effect(&mut effects, "pre_merge_hooks", true, true);
-    state.validated_source = Some(candidate);
+    state.validated_source = Some(candidate.clone());
     state.validated_target = Some(plan.context.target_commit.clone());
     if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
         return execution_failure(
@@ -1547,6 +1611,19 @@ pub fn execute_retained_merge(plan: &MergePlan, mode: MergeExecutionMode) -> Mer
         );
     }
 
+    if !git::head_commit(&current.path).is_ok_and(|head| head == candidate)
+        || !git::branch_commit(primary, &plan.context.target_branch)
+            .is_ok_and(|head| head == plan.context.target_commit)
+    {
+        return execution_failure(
+            plan,
+            effects,
+            diagnostics,
+            MergePhase::Validation,
+            MergeExecutionFailureKind::StalePlan,
+            "repository state changed after validation; retry before fast-forwarding",
+        );
+    }
     mark_effect(&mut effects, "fast_forward_merge", true, false);
     let merge_result = match mode {
         MergeExecutionMode::Human => ui::run_timed(
