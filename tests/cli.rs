@@ -1478,6 +1478,81 @@ fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
 }
 
 #[test]
+fn human_and_json_execute_the_same_clean_retained_topic_plan() {
+    let human = Repository::new();
+    let json = Repository::new();
+    for repo in [&human, &json] {
+        fs::write(repo.linked.join("topic.txt"), "topic\n").unwrap();
+        git(&repo.linked, ["add", "topic.txt"]);
+        git(&repo.linked, ["commit", "-m", "add topic"]);
+    }
+
+    let mut human_command = Command::cargo_bin("pando").unwrap();
+    human_command
+        .args(["merge", "--no-remove", "--no-squash"])
+        .current_dir(&human.linked);
+    let human_output = run_pty_command(human_command, b"");
+    assert!(human_output.status.success(), "{}", human_output.stderr);
+    assert!(human_output.stdout.is_empty());
+    assert!(human_output.stderr.contains("worktree retained"));
+
+    let json_output = json_command(
+        &json.linked,
+        &["merge", "--no-remove", "--no-squash", "--output", "json"],
+        None,
+    );
+    assert!(
+        json_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let value = assert_json_pure(&json_output);
+    assert_eq!(value["result"]["outcome"], "retained");
+    assert_eq!(value["result"]["destination"], serde_json::Value::Null);
+    for action in ["journal", "pre_merge_hooks", "fast_forward_merge"] {
+        let effect = value["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|effect| effect["action"] == action)
+            .unwrap_or_else(|| panic!("missing {action} effect"));
+        assert_eq!(effect["attempted"], true, "{action}");
+        assert_eq!(effect["completed"], true, "{action}");
+    }
+    for action in [
+        "rebase",
+        "squash",
+        "pre_remove_hooks",
+        "remove_worktree",
+        "destination",
+    ] {
+        let effect = value["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|effect| effect["action"] == action)
+            .unwrap_or_else(|| panic!("missing {action} effect"));
+        assert_eq!(effect["attempted"], false, "{action}");
+        assert_eq!(effect["completed"], false, "{action}");
+    }
+
+    assert_eq!(
+        git_output(&human.main, ["show", "HEAD:topic.txt"]),
+        git_output(&json.main, ["show", "HEAD:topic.txt"])
+    );
+    assert_eq!(
+        git_output(&human.main, ["rev-list", "--count", "main"]),
+        git_output(&json.main, ["rev-list", "--count", "main"])
+    );
+    assert!(human.linked.exists());
+    assert!(json.linked.exists());
+    for repo in [&human, &json] {
+        let journal_dir = repo.main.join(".git/pando-state/lifecycle");
+        assert_eq!(fs::read_dir(journal_dir).unwrap().count(), 0);
+    }
+}
+
+#[test]
 fn merge_renders_git_output_inside_the_terminal_ui_rail() {
     let repo = Repository::new();
     fs::write(repo.main.join("main.txt"), "main\n").unwrap();

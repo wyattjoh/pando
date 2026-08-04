@@ -1773,6 +1773,51 @@ pub fn merge(
         });
         return emit(response, true);
     }
+    if plan.is_clean_retained() {
+        let outcome = crate::lifecycle::execute_clean_retained_merge(
+            &plan,
+            crate::lifecycle::MergeExecutionMode::Captured,
+        );
+        let mut response = if let Some((kind, message)) = &outcome.failure {
+            let code = match kind {
+                crate::lifecycle::MergeExecutionFailureKind::StalePlan => "merge.stale_plan",
+                crate::lifecycle::MergeExecutionFailureKind::Validation => {
+                    "merge.validation_failed"
+                }
+                crate::lifecycle::MergeExecutionFailureKind::Integration => {
+                    "merge.execution_failed"
+                }
+                crate::lifecycle::MergeExecutionFailureKind::Journal
+                | crate::lifecycle::MergeExecutionFailureKind::JournalCleanup => {
+                    "merge.journal_failed"
+                }
+            };
+            protocol::failure("merge", id, code, message)
+        } else {
+            protocol::success(
+                "merge",
+                id,
+                json!({"outcome":"retained","destination":outcome.destination}),
+                json!({"initial":plan.context,"phase":outcome.context.phase}),
+                outcome.effects.clone(),
+            )
+        };
+        if outcome.failure.is_some() {
+            response.context = serde_json::to_value(&outcome.context)?;
+            response.effects = outcome.effects;
+            response.next_steps.push(protocol::NextStep { action:"merge.retry".into(), description:"Resolve the reported blocker and retry the journaled lifecycle with its pinned policy".into(), mutation:"repository".into(), requires_human_approval:false, invocation:json!({"argv":["pando","merge","--input-output","json"],"stdin":{"schema_version":1,"input":input},"working_directory":plan.context.topic_worktree}) });
+        }
+        for diagnostic in outcome.diagnostics {
+            push_diagnostic(
+                &mut response,
+                diagnostic.phase,
+                diagnostic.stream,
+                &diagnostic.content,
+            );
+        }
+        let failed = outcome.failure.is_some();
+        return emit(response, failed);
+    }
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command
         .arg("merge")
