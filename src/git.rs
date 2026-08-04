@@ -97,6 +97,77 @@ pub struct Discovery {
     pub metadata_warning: Option<String>,
 }
 
+/// Concrete read-only interface to facts reported by the installed Git executable.
+///
+/// This interface owns discovery and enrichment choreography so callers receive
+/// typed snapshots without learning command order or structured-output formats.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RepositoryObservation<'cwd> {
+    cwd: &'cwd Path,
+}
+
+impl<'cwd> RepositoryObservation<'cwd> {
+    #[must_use]
+    pub(crate) fn new(cwd: &'cwd Path) -> Self {
+        Self { cwd }
+    }
+
+    fn discover(self) -> Result<Discovery> {
+        Ok(Discovery {
+            worktrees: discover_worktrees(self.cwd)?,
+            metadata_warning: None,
+        })
+    }
+
+    fn discover_with_metadata(self) -> Result<Discovery> {
+        let mut discovery = self.discover()?;
+        discovery.metadata_warning = enrich_last_commit_at(self.cwd, &mut discovery.worktrees)
+            .err()
+            .map(|error| format!("failed to load last-commit metadata: {error:#}"));
+        Ok(discovery)
+    }
+
+    fn repository(self) -> Result<Repository> {
+        repository_from_worktrees(self.cwd, self.discover()?)
+    }
+
+    fn repository_with_metadata(self) -> Result<Repository> {
+        repository_from_worktrees(self.cwd, self.discover_with_metadata()?)
+    }
+
+    fn repository_with_branches(self) -> Result<RepositoryBranches> {
+        repository_with_branches_observed(self.cwd)
+    }
+
+    pub(crate) fn branches(self) -> Result<Vec<BranchRecord>> {
+        Ok(discover_branch_refs(self.cwd)?.0)
+    }
+
+    pub(crate) fn remote_branches(self) -> Result<Vec<String>> {
+        let output = run_git(
+            self.cwd,
+            [
+                "for-each-ref",
+                "--format=%(refname:short)%00%(symref)%00",
+                "refs/remotes",
+            ],
+        )
+        .context("failed to list remote branches")?;
+        ensure_success(&output, "git for-each-ref")?;
+        Ok(parse_remote_branch_refs(&output.stdout))
+    }
+
+    fn is_dirty(self) -> Result<bool> {
+        let output = run_git(
+            self.cwd,
+            ["status", "--porcelain", "--untracked-files=normal"],
+        )
+        .context("failed to inspect invoking worktree changes")?;
+        ensure_success(&output, "git status")?;
+        Ok(!output.stdout.is_empty())
+    }
+}
+
 #[derive(Debug)]
 pub struct Repository {
     pub worktrees: Vec<Worktree>,
@@ -125,6 +196,27 @@ impl Repository {
         canonical_or_normalized(primary)
             .with_context(|| format!("failed to resolve repository path {}", primary.display()))
     }
+
+    /// Returns the current named branch from this repository snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for detached, bare, or unknown current worktree states.
+    pub fn current_branch(&self) -> Result<&str> {
+        match &self.current().kind {
+            WorktreeKind::Branch(branch) => Ok(branch),
+            WorktreeKind::Detached => bail!(
+                "the current worktree at {} is detached; this query requires a named branch",
+                self.current().path.display()
+            ),
+            WorktreeKind::Bare => {
+                bail!("the current repository is bare; this query requires a worktree")
+            }
+            WorktreeKind::Unknown => {
+                bail!("Git did not report a named branch for the current worktree")
+            }
+        }
+    }
 }
 
 /// Discovers the worktrees for the repository containing `cwd`.
@@ -136,10 +228,7 @@ impl Repository {
 ///
 /// Returns an error when Git cannot run or its worktree output is invalid.
 pub fn discover(cwd: &Path) -> Result<Discovery> {
-    Ok(Discovery {
-        worktrees: discover_worktrees(cwd)?,
-        metadata_warning: None,
-    })
+    RepositoryObservation::new(cwd).discover()
 }
 
 /// Discovers worktrees and enriches them with HEAD commit timestamps.
@@ -151,11 +240,7 @@ pub fn discover(cwd: &Path) -> Result<Discovery> {
 ///
 /// Returns an error when base Git discovery fails or its output is invalid.
 pub fn discover_with_metadata(cwd: &Path) -> Result<Discovery> {
-    let mut discovery = discover(cwd)?;
-    discovery.metadata_warning = enrich_last_commit_at(cwd, &mut discovery.worktrees)
-        .err()
-        .map(|error| format!("failed to load last-commit metadata: {error:#}"));
-    Ok(discovery)
+    RepositoryObservation::new(cwd).discover_with_metadata()
 }
 
 fn discover_worktrees(cwd: &Path) -> Result<Vec<Worktree>> {
@@ -181,7 +266,7 @@ fn discover_worktrees(cwd: &Path) -> Result<Vec<Worktree>> {
 ///
 /// Returns an error when Git context or a required path cannot be resolved.
 pub fn repository(cwd: &Path) -> Result<Repository> {
-    repository_from_worktrees(cwd, discover(cwd)?)
+    RepositoryObservation::new(cwd).repository()
 }
 
 /// Resolves repository context and enriches worktrees with commit timestamps.
@@ -190,7 +275,7 @@ pub fn repository(cwd: &Path) -> Result<Repository> {
 ///
 /// Returns an error when base repository discovery or path resolution fails.
 pub fn repository_with_metadata(cwd: &Path) -> Result<Repository> {
-    repository_from_worktrees(cwd, discover_with_metadata(cwd)?)
+    RepositoryObservation::new(cwd).repository_with_metadata()
 }
 
 fn repository_from_worktrees(cwd: &Path, discovery: Discovery) -> Result<Repository> {
@@ -296,6 +381,10 @@ pub struct RepositoryBranches {
 ///
 /// Returns an error when Git cannot run or its worktree or ref output is invalid.
 pub fn repository_with_branches(cwd: &Path) -> Result<RepositoryBranches> {
+    RepositoryObservation::new(cwd).repository_with_branches()
+}
+
+fn repository_with_branches_observed(cwd: &Path) -> Result<RepositoryBranches> {
     let mut worktrees = discover_worktrees(cwd)?;
     let (mut branches, non_utf8) = discover_branch_refs(cwd)?;
 
@@ -351,7 +440,7 @@ pub fn repository_with_branches(cwd: &Path) -> Result<RepositoryBranches> {
 ///
 /// Returns an error when Git cannot list local refs.
 pub fn discover_branches(cwd: &Path) -> Result<Vec<BranchRecord>> {
-    Ok(discover_branch_refs(cwd)?.0)
+    RepositoryObservation::new(cwd).branches()
 }
 
 /// Lists remote-tracking branches as short names such as `origin/feature`.
@@ -364,17 +453,7 @@ pub fn discover_branches(cwd: &Path) -> Result<Vec<BranchRecord>> {
 ///
 /// Returns an error when Git cannot run or fails to list remote refs.
 pub fn discover_remote_branches(cwd: &Path) -> Result<Vec<String>> {
-    let output = run_git(
-        cwd,
-        [
-            "for-each-ref",
-            "--format=%(refname:short)%00%(symref)%00",
-            "refs/remotes",
-        ],
-    )
-    .context("failed to list remote branches")?;
-    ensure_success(&output, "git for-each-ref")?;
-    Ok(parse_remote_branch_refs(&output.stdout))
+    RepositoryObservation::new(cwd).remote_branches()
 }
 
 fn discover_branch_refs(cwd: &Path) -> Result<(Vec<BranchRecord>, Vec<String>)> {
@@ -534,19 +613,7 @@ pub fn origin_url(cwd: &Path) -> Result<String> {
 /// # Errors
 /// Returns an error for detached, bare, or unknown worktrees.
 pub fn current_branch(repository: &Repository) -> Result<&str> {
-    match &repository.current().kind {
-        WorktreeKind::Branch(branch) => Ok(branch),
-        WorktreeKind::Detached => bail!(
-            "the current worktree at {} is detached; this query requires a named branch",
-            repository.current().path.display()
-        ),
-        WorktreeKind::Bare => {
-            bail!("the current repository is bare; this query requires a worktree")
-        }
-        WorktreeKind::Unknown => {
-            bail!("Git did not report a named branch for the current worktree")
-        }
-    }
+    repository.current_branch()
 }
 
 /// Asks Git to validate a proposed branch name.
@@ -1491,10 +1558,7 @@ pub fn status_porcelain(cwd: &Path) -> Result<Vec<u8>> {
 ///
 /// Returns an error when Git cannot inspect status.
 pub fn is_dirty(cwd: &Path) -> Result<bool> {
-    let output = run_git(cwd, ["status", "--porcelain", "--untracked-files=normal"])
-        .context("failed to inspect invoking worktree changes")?;
-    ensure_success(&output, "git status")?;
-    Ok(!output.stdout.is_empty())
+    RepositoryObservation::new(cwd).is_dirty()
 }
 
 /// Reports whether Git ignores an existing, untracked path.

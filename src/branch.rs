@@ -4,7 +4,11 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::{Worktree, git, git::Repository, worktree_for_branch};
+use crate::{
+    Worktree,
+    git::{Repository, RepositoryObservation},
+    worktree_for_branch,
+};
 
 /// The first matching branch category in Pando's resolution order.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,13 +41,14 @@ impl<'repository> Facts<'repository> {
     ///
     /// Returns an error when Git cannot inspect local or remote-tracking refs.
     pub(crate) fn discover(repository: &'repository Repository) -> Result<Self> {
-        let cwd = &repository.current().path;
-        let local = git::discover_branches(cwd)?
+        let observation = RepositoryObservation::new(&repository.current().path);
+        let local = observation
+            .branches()?
             .into_iter()
             .map(|record| record.branch)
             .collect();
         let mut remotes_by_branch: HashMap<String, Vec<String>> = HashMap::new();
-        for remote_branch in git::discover_remote_branches(cwd)? {
+        for remote_branch in observation.remote_branches()? {
             let Some((_, branch)) = remote_branch.split_once('/') else {
                 continue;
             };
