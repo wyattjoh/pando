@@ -73,9 +73,11 @@ Shared hooks run before local hooks; the local root and default sort override th
 
 **One planner owns the new-branch start point.** `git::plan_new_branch_base` is the single place any interface resolves it, so human `switch`/`create`, their dry runs, and both JSON variants cannot drift. Dry runs call it with fetching disabled and report the refresh as an unattempted effect instead.
 
-**JSON `merge` is an adapter, not a second engine.** `machine::merge` plans, reports effects, then shells out to the human `pando merge` and replans to prove which phases ran. Anything the human lifecycle gains, JSON gains for free — which is why squash needed only a new input flag, a `squash` effect, and two error codes. Effects are addressed by action name rather than index precisely because that list grows.
+**Machine mode is only a protocol adapter.** `machine.rs` parses strict requests, routes them to command-owned typed interfaces, adapts outcomes through `protocol.rs`, writes one response, and selects the exit status. Planning, mutation, effect construction, diagnostics, recovery actions, stable error catalogs, and stable action catalogs belong to command modules. Do not reconstruct command state in the adapter or capture human output to produce JSON.
 
-**`switch` and `create` share one resolver, parameterized by `Intent`** — in `smart.rs` for humans and `machine.rs` for JSON. `Intent::Create` skips only the genuinely-new-branch confirmation and refuses an already-registered branch; remote selection and post-create hook trust still prompt, and `create` is the sole JSON entry point allowed to create a branch unattended (`switch` still answers `switch.approval_required`). Anything `create` changes in the shared path changes `switch` too, so keep the intent checks narrow.
+**JSON `merge` invokes the lifecycle executor directly.** `lifecycle::execute_merge_request` owns planning and execution for the typed request, including phase effects, diagnostics, journal context, and recovery. Human merge rendering and `machine::merge` consume that command-owned result without replanning or inferring completed phases.
+
+**`switch` and `create` share one operation, parameterized by `Intent`.** `worktree_plan::operation` owns classification, planning, execution, effects, and recovery for both adapters. `Intent::Create` skips only the genuinely-new-branch confirmation and refuses an already-registered branch; `create` remains the sole JSON entry point allowed to create a branch unattended, while `switch` returns `switch.approval_required`. Keep intent checks narrow so human and JSON paths cannot drift.
 
 ### Testing
 

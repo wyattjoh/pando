@@ -1,8 +1,13 @@
+//! Versioned JSON request routing and typed outcome adaptation.
+//!
+//! Command modules own planning, execution, effects, diagnostics, recovery, and
+//! stable catalogs. This module only parses and routes requests, adapts typed
+//! outcomes, writes responses, and selects the process status.
+
 use crate::{
     git, install,
     protocol::{self, EmptyInput},
     read_only::{self, GetProperty, GetRequest},
-    setup::OutputPolicy,
     trust,
     worktree_plan::{
         CreateInput, Intent, OperationContext, OperationInput, OperationResult, SwitchInput,
@@ -338,24 +343,19 @@ pub fn trust(command: &str, request_mode: bool, dry_run_flag: bool) -> Result<()
         Ok(v) => v,
         Err(e) => return emit_err(command, id, "repository.invalid", format!("{e:#}")),
     };
-    let leaf = match command {
-        "trust.status" => trust::Command::HooksStatus,
-        "trust.reset" => trust::Command::HooksReset,
-        "trust.commit_status" => trust::Command::CommitStatus,
-        "trust.commit_reset" => trust::Command::CommitReset,
-        "trust.commit_approve" => trust::Command::CommitApprove,
-        "trust.merge_status" => trust::Command::MergeStatus,
-        "trust.merge_reset" => trust::Command::MergeReset,
-        "trust.merge_approve" => trust::Command::MergeApprove,
+    let Some(leaf) = trust::Command::from_id(command).filter(|leaf| {
+        !matches!(
+            leaf,
+            trust::Command::PrStatus | trust::Command::PrReset | trust::Command::PrApprove
+        )
+    }) else {
         // PR trust leaves intentionally retain their published version 1 refusal.
-        _ => {
-            return emit_err(
-                command,
-                id,
-                "trust.json_unsupported",
-                format!("{command} does not support structured output; run it interactively"),
-            );
-        }
+        return emit_err(
+            command,
+            id,
+            "trust.json_unsupported",
+            format!("{command} does not support structured output; run it interactively"),
+        );
     };
     let outcome = trust::execute(&repo, leaf, dry)?;
     let failed = outcome.result.is_err();
@@ -401,51 +401,20 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
         (None, crate::lifecycle::RemovalInput { branches, dry_run })
     };
 
-    let plan = match crate::lifecycle::plan_remove(&input.branches, force) {
-        Ok(plan) => plan,
+    let outcome = match crate::lifecycle::execute_removal_request(
+        &input,
+        force,
+        crate::setup::OutputPolicy::Captured,
+    ) {
+        Ok(outcome) => outcome,
         Err(error) => {
-            let code = match error.kind {
-                crate::lifecycle::PreflightFailureKind::DuplicateTarget => {
-                    "remove.duplicate_target"
-                }
-                crate::lifecycle::PreflightFailureKind::PrimaryForbidden => {
-                    "remove.primary_forbidden"
-                }
-                crate::lifecycle::PreflightFailureKind::ForceRequired => "remove.force_required",
-                crate::lifecycle::PreflightFailureKind::LifecycleActive => {
-                    "remove.lifecycle_active"
-                }
-                crate::lifecycle::PreflightFailureKind::JournalInvalid => "remove.journal_invalid",
-                crate::lifecycle::PreflightFailureKind::UnknownTarget => "remove.unknown_target",
-                _ => "remove.preflight_failed",
-            };
-            return emit_err("remove", id, code, error.to_string());
+            return emit_err(
+                "remove",
+                id,
+                crate::lifecycle::removal_preflight_code(error.kind),
+                error.to_string(),
+            );
         }
-    };
-    let outcome = if input.dry_run {
-        crate::lifecycle::RemovalOutcome {
-            result: Ok(crate::lifecycle::RemovalResult::DryRun {
-                targets: plan.context.targets.clone(),
-                force,
-            }),
-            context: crate::lifecycle::RemovalOutcomeContext {
-                removal: plan.context.clone(),
-                completed_targets: Vec::new(),
-                failed_targets: Vec::new(),
-                pending_targets: plan.context.targets.clone(),
-                branch: None,
-                path: None,
-                approval: None,
-            },
-            effects: plan.effects.clone(),
-            diagnostics: Vec::new(),
-            recovery: Vec::new(),
-        }
-    } else {
-        crate::lifecycle::removal_outcome(
-            crate::lifecycle::execute_removal_with_policy(&plan, OutputPolicy::Captured),
-            &input,
-        )
     };
     let failed = outcome.result.is_err();
     let response = protocol::adapt(
@@ -599,14 +568,10 @@ pub fn help(command: &str) -> Value {
     };
     let (errors, actions): (&[&str], &[&str]) = match command {
         "list" => (read_only::LIST_ERRORS, read_only::ACTIONS),
-        "trust.status" | "trust.commit_status" | "trust.merge_status" => (
-            &[
-                "json.invalid_request",
-                "json.unsupported_schema_version",
-                "repository.invalid",
-            ],
-            &[],
-        ),
+        id if trust::Command::from_id(id).is_some() => {
+            let leaf = trust::Command::from_id(id).unwrap_or(trust::Command::HooksStatus);
+            (leaf.errors(), leaf.actions())
+        }
         "get" => (read_only::GET_ERRORS, read_only::ACTIONS),
         "switch" => (
             crate::worktree_plan::SWITCH_ERRORS,
@@ -617,57 +582,14 @@ pub fn help(command: &str) -> Value {
             crate::worktree_plan::CREATE_ACTIONS,
         ),
         "remove" => (
-            &[
-                "json.invalid_request",
-                "json.unsupported_schema_version",
-                "repository.invalid",
-                "remove.unknown_target",
-                "remove.force_required",
-                "remove.primary_forbidden",
-                "remove.target_unavailable",
-                "trust.approval_required",
-            ],
-            &["pre_remove_hooks", "remove_worktree"],
+            crate::lifecycle::REMOVE_ERRORS,
+            crate::lifecycle::REMOVE_ACTIONS,
         ),
         "merge" => (
             crate::lifecycle::MERGE_ERRORS,
             crate::lifecycle::MERGE_ACTIONS,
         ),
-        "trust.reset" | "trust.commit_reset" | "trust.merge_reset" => (
-            &[
-                "json.invalid_request",
-                "json.unsupported_schema_version",
-                "repository.invalid",
-            ],
-            &[command],
-        ),
-        "trust.commit_approve" => (
-            &[
-                "json.invalid_request",
-                "json.unsupported_schema_version",
-                "repository.invalid",
-                "trust.approval_required",
-            ],
-            &["trust.approve_commit_generator"],
-        ),
-        "trust.merge_approve" => (
-            &[
-                "json.invalid_request",
-                "json.unsupported_schema_version",
-                "repository.invalid",
-                "trust.approval_required",
-            ],
-            &["trust.approve_merge_generator"],
-        ),
-        "install" => (
-            &[
-                "json.invalid_request",
-                "json.unsupported_schema_version",
-                "install.approval_required",
-                "install.write_failed",
-            ],
-            &["file.write", "install.approve"],
-        ),
+        "install" => (install::INSTALL_ERRORS, install::INSTALL_ACTIONS),
         _ => (&[], &[]),
     };
     let result_schema = match command {

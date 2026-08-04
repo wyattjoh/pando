@@ -1,3 +1,14 @@
+/// Stable version 1 installation error catalog.
+pub const INSTALL_ERRORS: &[&str] = &[
+    "json.invalid_request",
+    "json.unsupported_schema_version",
+    "install.approval_required",
+    "install.write_failed",
+];
+
+/// Stable version 1 installation action catalog.
+pub const INSTALL_ACTIONS: &[&str] = &["file.write", "install.approve"];
+
 use std::{
     env,
     ffi::OsStr,

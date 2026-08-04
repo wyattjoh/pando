@@ -945,6 +945,25 @@ pub struct RemovalOutcome {
     pub recovery: Vec<RecoveryAction<protocol::Request<RemovalInput>>>,
 }
 
+/// Stable version 1 removal error catalog.
+pub const REMOVE_ERRORS: &[&str] = &[
+    "json.invalid_request",
+    "json.unsupported_schema_version",
+    "repository.invalid",
+    "remove.duplicate_target",
+    "remove.primary_forbidden",
+    "remove.force_required",
+    "remove.lifecycle_active",
+    "remove.journal_invalid",
+    "remove.unknown_target",
+    "remove.preflight_failed",
+    "remove.target_unavailable",
+    "trust.approval_required",
+];
+
+/// Stable version 1 removal action catalog.
+pub const REMOVE_ACTIONS: &[&str] = &["pre_remove_hooks", "remove_worktree"];
+
 /// Adapter-neutral facts captured by removal preflight.
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 pub struct RemovalContext {
@@ -1258,6 +1277,57 @@ pub(crate) fn execute_removal_with_policy(
         diagnostics,
         failure: None,
         approval: None,
+    }
+}
+
+/// Plans and executes one removal request through the command-owned interface.
+///
+/// # Errors
+///
+/// Returns a typed preflight failure before execution can begin.
+pub(crate) fn execute_removal_request(
+    input: &RemovalInput,
+    force: bool,
+    output_policy: setup::OutputPolicy,
+) -> std::result::Result<RemovalOutcome, PreflightFailure> {
+    let plan = plan_remove(&input.branches, force)?;
+    if input.dry_run {
+        return Ok(RemovalOutcome {
+            result: Ok(RemovalResult::DryRun {
+                targets: plan.context.targets.clone(),
+                force,
+            }),
+            context: RemovalOutcomeContext {
+                removal: plan.context.clone(),
+                completed_targets: Vec::new(),
+                failed_targets: Vec::new(),
+                pending_targets: plan.context.targets.clone(),
+                branch: None,
+                path: None,
+                approval: None,
+            },
+            effects: plan.effects.clone(),
+            diagnostics: Vec::new(),
+            recovery: Vec::new(),
+        });
+    }
+    Ok(removal_outcome(
+        execute_removal_with_policy(&plan, output_policy),
+        input,
+    ))
+}
+
+/// Returns the stable protocol code for a removal preflight failure.
+#[must_use]
+pub const fn removal_preflight_code(kind: PreflightFailureKind) -> &'static str {
+    match kind {
+        PreflightFailureKind::DuplicateTarget => "remove.duplicate_target",
+        PreflightFailureKind::PrimaryForbidden => "remove.primary_forbidden",
+        PreflightFailureKind::ForceRequired => "remove.force_required",
+        PreflightFailureKind::LifecycleActive => "remove.lifecycle_active",
+        PreflightFailureKind::JournalInvalid => "remove.journal_invalid",
+        PreflightFailureKind::UnknownTarget => "remove.unknown_target",
+        _ => "remove.preflight_failed",
     }
 }
 

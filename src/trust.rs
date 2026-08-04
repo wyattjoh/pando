@@ -52,6 +52,56 @@ impl Command {
             Self::MergeApprove => "trust.merge_approve",
         }
     }
+
+    /// Resolves a published version 1 protocol command identifier.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "trust.status" => Some(Self::HooksStatus),
+            "trust.reset" => Some(Self::HooksReset),
+            "trust.commit_status" => Some(Self::CommitStatus),
+            "trust.commit_reset" => Some(Self::CommitReset),
+            "trust.commit_approve" => Some(Self::CommitApprove),
+            "trust.pr_status" => Some(Self::PrStatus),
+            "trust.pr_reset" => Some(Self::PrReset),
+            "trust.pr_approve" => Some(Self::PrApprove),
+            "trust.merge_status" => Some(Self::MergeStatus),
+            "trust.merge_reset" => Some(Self::MergeReset),
+            "trust.merge_approve" => Some(Self::MergeApprove),
+            _ => None,
+        }
+    }
+
+    /// Returns the stable version 1 error catalog for this leaf.
+    #[must_use]
+    pub const fn errors(self) -> &'static [&'static str] {
+        match self {
+            Self::CommitApprove | Self::MergeApprove => &[
+                "json.invalid_request",
+                "json.unsupported_schema_version",
+                "repository.invalid",
+                "trust.approval_required",
+            ],
+            _ => &[
+                "json.invalid_request",
+                "json.unsupported_schema_version",
+                "repository.invalid",
+            ],
+        }
+    }
+
+    /// Returns the stable version 1 action catalog for this leaf.
+    #[must_use]
+    pub const fn actions(self) -> &'static [&'static str] {
+        match self {
+            Self::HooksReset => &["trust.reset"],
+            Self::CommitReset => &["trust.commit_reset"],
+            Self::CommitApprove => &["trust.approve_commit_generator"],
+            Self::MergeReset => &["trust.merge_reset"],
+            Self::MergeApprove => &["trust.approve_merge_generator"],
+            _ => &[],
+        }
+    }
 }
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
