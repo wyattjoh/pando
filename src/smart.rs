@@ -15,7 +15,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     Row, SortMode, Worktree, WorktreeKind,
-    branch::Resolver,
+    branch::{Resolver, Snapshot},
     config::{EffectiveConfig, HookPhase},
     git::{self, HistoryObservation, Repository, RepositoryObservation},
     hook::{self, HookOutcome, HookOutput, OutputPolicy},
@@ -138,7 +138,17 @@ fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> 
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = RepositoryObservation::new(&cwd).repository()?;
     Resolver::new(&repository).validate(branch)?;
-    let plan = match worktree_plan::plan(&repository, intent, branch, None, fetch, None, true)? {
+    let snapshot = Snapshot::observe(&repository)?;
+    let plan = match worktree_plan::plan(
+        &repository,
+        &snapshot,
+        intent,
+        branch,
+        None,
+        fetch,
+        None,
+        true,
+    )? {
         Ok(plan) => plan,
         Err(PlanBlocker::RemoteSelectionRequired { destination, .. }) => {
             return ui::finish(format!(
@@ -1282,10 +1292,12 @@ fn resolve_and_switch(
     fetch: FetchIntent,
 ) -> Result<()> {
     Resolver::new(repository).validate(branch)?;
+    let mut snapshot = Snapshot::observe(repository)?;
     let mut remote = None;
     let plan = loop {
         match worktree_plan::plan(
             repository,
+            &snapshot,
             intent,
             branch,
             remote.as_deref(),
@@ -1299,6 +1311,7 @@ fn resolve_and_switch(
             }
             Err(PlanBlocker::ApprovalRequired { candidate, .. }) => {
                 approve_planned_hooks(repository, &candidate)?;
+                snapshot = Snapshot::observe(repository)?;
             }
             Err(blocker) => return Err(render_plan_blocker(branch, blocker)),
         }

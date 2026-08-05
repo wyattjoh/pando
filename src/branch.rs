@@ -23,24 +23,23 @@ pub(crate) enum Classification {
     New,
 }
 
-/// Read-only branch facts shared by command planning and completion.
+/// One immutable branch/ref observation for a navigation planning attempt.
 ///
-/// Facts are one snapshot of registered worktrees, local refs, and already
-/// fetched remote-tracking refs. Discovery never fetches or performs any other
-/// mutation.
-pub(crate) struct Facts<'repository> {
+/// A snapshot contains registered worktrees, local refs, and already-fetched
+/// remote-tracking refs. Observation never fetches or performs any mutation.
+pub(crate) struct Snapshot<'repository> {
     repository: &'repository Repository,
     local: Vec<String>,
     remotes_by_branch: HashMap<String, Vec<String>>,
 }
 
-impl<'repository> Facts<'repository> {
-    /// Discovers a complete branch-fact snapshot.
+impl<'repository> Snapshot<'repository> {
+    /// Observes a complete navigation snapshot.
     ///
     /// # Errors
     ///
     /// Returns an error when Git cannot inspect local or remote-tracking refs.
-    pub(crate) fn discover(repository: &'repository Repository) -> Result<Self> {
+    pub(crate) fn observe(repository: &'repository Repository) -> Result<Self> {
         let observation = RepositoryObservation::new(&repository.current().path);
         let local = observation
             .branches()?
@@ -96,19 +95,6 @@ impl<'repository> Facts<'repository> {
     }
 }
 
-/// Classifies `branch` using Pando's established resolution order.
-///
-/// This function is deliberately deterministic and noninteractive. Callers own
-/// intent-specific policy such as `create` refusing a registered worktree or
-/// `switch` requiring confirmation before creating a genuinely new branch.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot inspect local or remote-tracking refs.
-pub(crate) fn classify(repository: &Repository, branch: &str) -> Result<Classification> {
-    Ok(Facts::discover(repository)?.classify(branch))
-}
-
 pub(crate) const FETCH_REGISTERED_WORKTREE: &str = "the branch already has a registered worktree";
 pub(crate) const FETCH_LOCAL_BRANCH: &str = "the branch already exists locally";
 pub(crate) const FETCH_REMOTE_BRANCH: &str = "the branch already has a remote-tracking ref";
@@ -156,10 +142,6 @@ impl<'repository> Resolver<'repository> {
 
     pub(crate) fn reject_registered_fetch(requested: bool) -> Result<()> {
         reject_fetch(requested, FETCH_REGISTERED_WORKTREE)
-    }
-
-    pub(crate) fn classify(self, branch: &str) -> Result<Classification> {
-        classify(self.repository, branch)
     }
 
     pub(crate) fn target(self, configured: Option<&str>) -> Result<String> {
@@ -258,8 +240,8 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{PushResolution, Resolver};
-    use crate::git::RepositoryObservation;
+    use super::{Classification, PushResolution, Resolver, Snapshot};
+    use crate::{Condition, Worktree, WorktreeKind, git::RepositoryObservation};
 
     fn run(cwd: &Path, args: &[&str]) {
         let status = Command::new("git")
@@ -283,6 +265,66 @@ mod tests {
             &["commit", "--allow-empty", "-m", "initial"],
         );
         directory
+    }
+
+    #[test]
+    fn snapshot_classifies_one_immutable_observation_in_precedence_order() {
+        let directory = repository();
+        run(directory.path(), &["branch", "local-only"]);
+        run(
+            directory.path(),
+            &["update-ref", "refs/remotes/origin/remote-only", "HEAD"],
+        );
+        run(
+            directory.path(),
+            &["update-ref", "refs/remotes/backup/ambiguous", "HEAD"],
+        );
+        run(
+            directory.path(),
+            &["update-ref", "refs/remotes/origin/ambiguous", "HEAD"],
+        );
+        run(directory.path(), &["branch", "exceptional"]);
+        run(
+            directory.path(),
+            &["update-ref", "refs/remotes/origin/exceptional", "HEAD"],
+        );
+        let mut repository = RepositoryObservation::new(directory.path())
+            .repository()
+            .expect("repository observation");
+        let exceptional = Worktree {
+            path: directory.path().join("missing-worktree"),
+            head: None,
+            last_commit_at: None,
+            kind: WorktreeKind::Branch("exceptional".into()),
+            locked: None,
+            prunable: Some("gitdir file points to non-existent location".into()),
+            current: false,
+            condition: Condition::Missing,
+        };
+        repository.worktrees.push(exceptional.clone());
+
+        let snapshot = Snapshot::observe(&repository).expect("snapshot observation");
+        assert!(matches!(
+            snapshot.classify("main"),
+            Classification::Registered(_)
+        ));
+        assert_eq!(snapshot.classify("local-only"), Classification::Local);
+        assert_eq!(
+            snapshot.classify("remote-only"),
+            Classification::Remotes(vec!["origin/remote-only".into()])
+        );
+        assert_eq!(
+            snapshot.classify("ambiguous"),
+            Classification::Remotes(vec!["backup/ambiguous".into(), "origin/ambiguous".into()])
+        );
+        assert_eq!(
+            snapshot.classify("exceptional"),
+            Classification::Registered(exceptional)
+        );
+        assert_eq!(snapshot.classify("new-branch"), Classification::New);
+
+        run(directory.path(), &["branch", "observed-later"]);
+        assert_eq!(snapshot.classify("observed-later"), Classification::New);
     }
 
     #[test]

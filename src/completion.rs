@@ -9,7 +9,7 @@ use std::{collections::HashSet, env, path::PathBuf};
 
 use clap_complete::CompletionCandidate;
 
-use crate::{WorktreeKind, branch::Facts, git::RepositoryObservation};
+use crate::{WorktreeKind, branch::Snapshot, git::RepositoryObservation};
 
 /// Branches `switch` accepts: every local branch, plus remote-tracking refs that
 /// no local branch already shadows.
@@ -21,11 +21,15 @@ pub fn switch_candidates() -> Vec<CompletionCandidate> {
     let Ok(repository) = RepositoryObservation::new(&cwd).repository() else {
         return Vec::new();
     };
-    let Ok(facts) = Facts::discover(&repository) else {
+    let Ok(snapshot) = Snapshot::observe(&repository) else {
         return Vec::new();
     };
-    let mut candidates: Vec<_> = facts.local().iter().map(CompletionCandidate::new).collect();
-    candidates.extend(remote_candidates(&facts));
+    let mut candidates: Vec<_> = snapshot
+        .local()
+        .iter()
+        .map(CompletionCandidate::new)
+        .collect();
+    candidates.extend(remote_candidates(&snapshot));
     candidates
 }
 
@@ -39,11 +43,11 @@ pub fn create_candidates() -> Vec<CompletionCandidate> {
     let Ok(repository) = RepositoryObservation::new(&cwd).repository() else {
         return Vec::new();
     };
-    let Ok(facts) = Facts::discover(&repository) else {
+    let Ok(snapshot) = Snapshot::observe(&repository) else {
         return Vec::new();
     };
-    let registered = registered_branches(&facts);
-    let mut candidates: Vec<_> = facts
+    let registered = registered_branches(&snapshot);
+    let mut candidates: Vec<_> = snapshot
         .local()
         .iter()
         .filter(|branch| !registered.contains(*branch))
@@ -52,7 +56,7 @@ pub fn create_candidates() -> Vec<CompletionCandidate> {
     // Remote refs need no separate exclusion: a registered branch is always a
     // local branch, so `remote_candidates` has already dropped any remote ref
     // shadowed by one.
-    candidates.extend(remote_candidates(&facts));
+    candidates.extend(remote_candidates(&snapshot));
     candidates
 }
 
@@ -90,8 +94,8 @@ fn cwd() -> Option<PathBuf> {
 }
 
 /// Every branch with a registered worktree, primary included.
-fn registered_branches(facts: &Facts<'_>) -> HashSet<String> {
-    facts
+fn registered_branches(snapshot: &Snapshot<'_>) -> HashSet<String> {
+    snapshot
         .registered()
         .iter()
         .filter_map(|worktree| match &worktree.kind {
@@ -114,9 +118,9 @@ fn registered_branches(facts: &Facts<'_>) -> HashSet<String> {
 /// The remote is surfaced in the help text instead; ambiguity across multiple
 /// remotes offering the same branch is already handled by the interactive
 /// `choose_remote` prompt in the resolver, so this only needs to dedupe.
-fn remote_candidates(facts: &Facts<'_>) -> Vec<CompletionCandidate> {
-    let local: HashSet<&str> = facts.local().iter().map(String::as_str).collect();
-    let mut candidates: Vec<_> = facts
+fn remote_candidates(snapshot: &Snapshot<'_>) -> Vec<CompletionCandidate> {
+    let local: HashSet<&str> = snapshot.local().iter().map(String::as_str).collect();
+    let mut candidates: Vec<_> = snapshot
         .remotes()
         .iter()
         .filter(|(short, _)| !local.contains(short.as_str()))

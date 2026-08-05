@@ -16,7 +16,7 @@ use crate::{
     Worktree,
     branch::{
         self, Classification, FETCH_HEAD_BASE, FETCH_LOCAL_BRANCH, FETCH_REGISTERED_WORKTREE,
-        FETCH_REMOTE_BRANCH, Resolver,
+        FETCH_REMOTE_BRANCH, Resolver, Snapshot,
     },
     config::EffectiveConfig,
     git::{self, HistoryObservation, Repository, RepositoryObservation},
@@ -508,8 +508,13 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
             recovery: Vec::new(),
         };
     };
+    let snapshot = match Snapshot::observe(&repository) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return failure("repository.invalid", format!("{error:#}")),
+    };
     let plan = match plan(
         &repository,
+        &snapshot,
         intent,
         &branch,
         input.remote.as_deref(),
@@ -770,9 +775,10 @@ fn bounded_diagnostic(source: &str, stream: &str, bytes: &[u8]) -> Diagnostic {
 /// # Errors
 ///
 /// Returns an error when Git cannot classify the branch or configuration cannot be loaded.
-#[allow(clippy::too_many_lines)] // One authoritative planner owns every classification and safety check.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One authoritative planner owns every classification and safety check.
 pub(crate) fn plan(
     repository: &Repository,
+    snapshot: &Snapshot<'_>,
     intent: Intent,
     branch: &str,
     remote: Option<&str>,
@@ -786,7 +792,7 @@ pub(crate) fn plan(
             message: format!("{error:#}"),
         }));
     }
-    let classification = resolver.classify(branch)?;
+    let classification = snapshot.classify(branch);
     if let Classification::Registered(worktree) = classification {
         if let Err(error) = branch::reject_fetch(fetch.requested(), FETCH_REGISTERED_WORKTREE) {
             return Ok(Err(Blocker::FetchNotApplicable {
