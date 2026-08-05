@@ -18,14 +18,14 @@ use crate::{
         self, HistoryObservation, LifecycleMutation, LifecycleOutput, Repository,
         RepositoryObservation,
     },
-    hash, hook_approval,
+    hash,
+    hook::{self, HookOutcome},
+    hook_approval,
     protocol::{
         self, BytePath, Diagnostic, Effect, ErrorBody, MutationClass, RecoveryAction,
         RecoveryInvocation,
     },
-    render,
-    setup::{self, HookOutcome},
-    squash, trust, ui,
+    render, squash, trust, ui,
 };
 
 /// Stable, journal-aware merge state exposed to command adapters.
@@ -1074,7 +1074,7 @@ impl RemovalExecutionOutcome {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn execute_removal(plan: &RemovalPlan) -> RemovalExecutionOutcome {
-    execute_removal_with_policy(plan, setup::OutputPolicy::Captured)
+    execute_removal_with_policy(plan, hook::OutputPolicy::Captured)
 }
 
 /// Executes the shared removal operation with adapter-specific child output routing.
@@ -1082,7 +1082,7 @@ pub fn execute_removal(plan: &RemovalPlan) -> RemovalExecutionOutcome {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn execute_removal_with_policy(
     plan: &RemovalPlan,
-    output_policy: setup::OutputPolicy,
+    output_policy: hook::OutputPolicy,
 ) -> RemovalExecutionOutcome {
     let mut effects = plan.effects.clone();
     let mut diagnostics = Vec::new();
@@ -1152,7 +1152,7 @@ pub(crate) fn execute_removal_with_policy(
             effects[hook_effect].completed = true;
         } else {
             effects[hook_effect].attempted = true;
-            let execution = match setup::execute(
+            let execution = match hook::execute(
                 HookPhase::PreRemove,
                 &target.config.pre_remove,
                 &target.worktree.path,
@@ -1171,7 +1171,7 @@ pub(crate) fn execute_removal_with_policy(
                     );
                 }
             };
-            if let setup::HookOutput::Captured(output) = execution.output {
+            if let hook::HookOutput::Captured(output) = execution.output {
                 for step in output {
                     for (stream, captured) in [("stdout", step.stdout), ("stderr", step.stderr)] {
                         if captured.original_size > 0 {
@@ -1217,8 +1217,8 @@ pub(crate) fn execute_removal_with_policy(
         let remove_effect = hook_effect + 1;
         effects[remove_effect].attempted = true;
         let removal_output = match output_policy {
-            setup::OutputPolicy::Captured => git::RemovalOutput::Captured,
-            setup::OutputPolicy::Streamed => git::RemovalOutput::Displayed,
+            hook::OutputPolicy::Captured => git::RemovalOutput::Captured,
+            hook::OutputPolicy::Streamed => git::RemovalOutput::Displayed,
         };
         let removal_mode = if plan.force {
             git::RemovalMode::Force
@@ -1239,7 +1239,7 @@ pub(crate) fn execute_removal_with_policy(
                     targets,
                     effects,
                     diagnostics,
-                    if matches!(output_policy, setup::OutputPolicy::Captured) {
+                    if matches!(output_policy, hook::OutputPolicy::Captured) {
                         RemovalFailureKind::GitStart
                     } else {
                         RemovalFailureKind::Git
@@ -1290,7 +1290,7 @@ pub(crate) fn execute_removal_with_policy(
 pub(crate) fn execute_removal_request(
     input: &RemovalInput,
     force: bool,
-    output_policy: setup::OutputPolicy,
+    output_policy: hook::OutputPolicy,
 ) -> std::result::Result<RemovalOutcome, PreflightFailure> {
     let plan = plan_remove(&input.branches, force)?;
     if input.dry_run {
@@ -1527,7 +1527,7 @@ pub fn remove(branches: &[String], force: bool) -> Result<()> {
         dry_run: false,
     };
     let outcome = removal_outcome(
-        execute_removal_with_policy(&plan, setup::OutputPolicy::Streamed),
+        execute_removal_with_policy(&plan, hook::OutputPolicy::Streamed),
         &input,
     );
     if let Err(error) = outcome.result {
@@ -1635,7 +1635,7 @@ fn push_captured_merge_diagnostic(
     diagnostics: &mut Vec<MergeDiagnostic>,
     phase: &'static str,
     stream: &'static str,
-    captured: setup::CapturedStream,
+    captured: hook::CapturedStream,
 ) {
     if captured.original_size == 0 {
         return;
@@ -1658,11 +1658,11 @@ fn execute_merge_hooks(
     diagnostics: &mut Vec<MergeDiagnostic>,
 ) -> Result<()> {
     let policy = match mode {
-        MergeExecutionMode::Human => setup::OutputPolicy::Streamed,
-        MergeExecutionMode::Captured => setup::OutputPolicy::Captured,
+        MergeExecutionMode::Human => hook::OutputPolicy::Streamed,
+        MergeExecutionMode::Captured => hook::OutputPolicy::Captured,
     };
-    let execution = setup::execute(hook_phase, steps, destination, policy)?;
-    if let setup::HookOutput::Captured(output) = execution.output {
+    let execution = hook::execute(hook_phase, steps, destination, policy)?;
+    if let hook::HookOutput::Captured(output) = execution.output {
         for step in output {
             push_captured_merge_diagnostic(diagnostics, diagnostic_phase, "stdout", step.stdout);
             push_captured_merge_diagnostic(diagnostics, diagnostic_phase, "stderr", step.stderr);

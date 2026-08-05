@@ -53,6 +53,24 @@ fn only_the_git_execution_module_constructs_git_processes() {
 }
 
 #[test]
+fn hook_execution_stays_separate_from_setup_persistence_and_generators() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let hook_source =
+        fs::read_to_string(source_root.join("hook.rs")).expect("hook source should be readable");
+    let setup_source =
+        fs::read_to_string(source_root.join("setup.rs")).expect("setup source should be readable");
+
+    assert!(
+        hook_source.contains("HookStep") && hook_source.contains("Command::new(\"/bin/sh\")"),
+        "src/hook.rs must own configured hook subprocess execution"
+    );
+    assert!(
+        !setup_source.contains("Command::new") && !setup_source.contains("HookStep"),
+        "src/setup.rs must own persistence, not hook subprocess execution"
+    );
+}
+
+#[test]
 fn git_execution_stays_private_and_concrete() {
     let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/git.rs"))
         .expect("Git source should be readable");

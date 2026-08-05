@@ -20,8 +20,8 @@ use crate::{
     },
     config::EffectiveConfig,
     git::{self, HistoryObservation, Repository, RepositoryObservation},
-    hook_approval,
-    setup::{self, HookOutcome, HookOutput, OutputPolicy},
+    hook::{self, HookOutcome, HookOutput, OutputPolicy},
+    hook_approval, setup,
 };
 
 /// Stable error codes advertised by the switch protocol.
@@ -1129,7 +1129,7 @@ pub(crate) fn execute(
         effects[index].completed = true;
     }
     if let Some(identity) = identity {
-        let execution = setup::execute(
+        let execution = hook::execute(
             crate::config::HookPhase::PostCreate,
             &config.post_create,
             &plan.destination,

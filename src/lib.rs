@@ -4,6 +4,7 @@ pub mod completion;
 pub mod config;
 pub mod git;
 mod hash;
+pub(crate) mod hook;
 pub mod hook_approval;
 pub mod install;
 pub mod lifecycle;

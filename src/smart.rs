@@ -18,11 +18,10 @@ use crate::{
     branch::Resolver,
     config::{EffectiveConfig, HookPhase},
     git::{self, HistoryObservation, Repository, RepositoryObservation},
+    hook::{self, HookOutcome, HookOutput, OutputPolicy},
     hook_approval,
     read_only::{self, PropertyValue},
-    render,
-    setup::{self, HookOutcome, HookOutput, OutputPolicy},
-    sorted_row_indices, trust, ui,
+    render, setup, sorted_row_indices, trust, ui,
     worktree_plan::{self, Blocker as PlanBlocker, FetchIntent, Intent, Source},
 };
 
@@ -1558,7 +1557,7 @@ fn finish_setup(
     branch: Option<&str>,
     destination: &Path,
 ) -> Result<()> {
-    let execution = setup::execute(
+    let execution = hook::execute(
         HookPhase::PostCreate,
         &config.post_create,
         destination,

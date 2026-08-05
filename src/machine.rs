@@ -406,7 +406,7 @@ pub fn remove(request_mode: bool, branches: Vec<String>, force: bool, dry_run: b
     let outcome = match crate::lifecycle::execute_removal_request(
         &input,
         force,
-        crate::setup::OutputPolicy::Captured,
+        crate::hook::OutputPolicy::Captured,
     ) {
         Ok(outcome) => outcome,
         Err(error) => {
