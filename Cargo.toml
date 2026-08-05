@@ -2,7 +2,7 @@
 # The bare `pando` crate name is squatted on crates.io, so the package is
 # `pando-cli` while the library and binary both keep the plain `pando` name.
 name = "pando-cli"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Inspect and switch between Git worktrees"
 license = "MIT"

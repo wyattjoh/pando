@@ -1356,10 +1356,7 @@ fn resolve_and_switch(
         let outcome = match execution {
             Ok(outcome) => outcome,
             Err(failure) => {
-                if failure.created
-                    && failure.setup_incomplete
-                    && failure.hook_outcome != Some(HookOutcome::Interrupted)
-                {
+                if failure.entry == setup::EntryDisposition::Enter {
                     write_destination(&plan.destination)?;
                 }
                 return Err(failure.error);
@@ -1515,12 +1512,25 @@ fn warn_dirty_source(repository: &Repository) -> Result<()> {
 fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&str>) -> Result<()> {
     let destination = resolved_path(destination)?;
     let worktree_identity = RepositoryObservation::new(&destination).worktree_identity()?;
-    if !setup::is_incomplete(&repository.common_dir, &worktree_identity, branch)? {
-        return write_destination(&destination);
-    }
+    let setup_lifecycle = setup::Lifecycle::new(&repository.common_dir);
+    let incomplete = match setup_lifecycle
+        .inspect(setup::SetupTarget {
+            worktree_identity: &worktree_identity,
+            branch,
+        })
+        .map_err(|failure| failure.error)?
+    {
+        setup::Inspection::Complete(transition) => {
+            debug_assert_eq!(transition.entry, setup::EntryDisposition::Enter);
+            return write_destination(&destination);
+        }
+        setup::Inspection::Incomplete(incomplete) => incomplete,
+    };
     let config = EffectiveConfig::load(repository)?;
     if config.post_create.is_empty() {
-        setup::clear(&repository.common_dir, &worktree_identity, branch)?;
+        incomplete
+            .advance(setup::Event::NoHooksConfigured)
+            .map_err(|failure| failure.error)?;
         return write_destination(&destination);
     }
     ui::ensure_interactive("incomplete setup requires a recovery choice")?;
@@ -1541,21 +1551,21 @@ fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&s
                 HookPhase::PostCreate,
                 &config.post_create,
             )?;
-            finish_setup(
-                repository,
-                &config,
-                &worktree_identity,
-                branch,
-                &destination,
-            )
+            finish_setup(&config, incomplete, &destination)
         }
         1 => {
             ui::warning("Entering once while setup remains incomplete.")?;
+            let transition = incomplete
+                .advance(setup::Event::EnterOnce)
+                .map_err(|failure| failure.error)?;
+            debug_assert_eq!(transition.entry, setup::EntryDisposition::Enter);
             write_destination(&destination)?;
             bail!("setup remains incomplete for {}", destination.display())
         }
         2 => {
-            setup::clear(&repository.common_dir, &worktree_identity, branch)?;
+            incomplete
+                .advance(setup::Event::MarkComplete)
+                .map_err(|failure| failure.error)?;
             ui::finish("Marked setup complete")?;
             write_destination(&destination)
         }
@@ -1564,10 +1574,8 @@ fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&s
 }
 
 fn finish_setup(
-    repository: &Repository,
     config: &EffectiveConfig,
-    worktree_identity: &Path,
-    branch: Option<&str>,
+    incomplete: setup::IncompleteSetup<'_>,
     destination: &Path,
 ) -> Result<()> {
     let execution = hook::execute(
@@ -1575,22 +1583,32 @@ fn finish_setup(
         &config.post_create,
         destination,
         OutputPolicy::Streamed,
-    )?;
-    debug_assert_eq!(execution.output, HookOutput::Streamed);
-    match execution.outcome {
-        HookOutcome::Success => {
-            setup::clear(&repository.common_dir, worktree_identity, branch)?;
+    );
+    let (attempt, outcome) = match execution {
+        Ok(execution) => {
+            debug_assert_eq!(execution.output, HookOutput::Streamed);
+            (
+                setup::Attempt::Finished(execution.outcome),
+                Some(execution.outcome),
+            )
+        }
+        Err(error) => (setup::Attempt::ExecutionFailed(error), None),
+    };
+    match incomplete.advance(setup::Event::RecoveryAttempt(attempt)) {
+        Ok(_) => {
             // Creation was a mid-rail step so hook output could follow it; this
             // is the sequence's single closing beat.
             ui::finish("Post-create setup complete")?;
             write_destination(destination)
         }
-        HookOutcome::Failed(status) => {
-            write_destination(destination)?;
-            bail!("post-create setup failed with status {status}; setup remains incomplete")
-        }
-        HookOutcome::Interrupted => {
-            bail!("post-create setup was interrupted; setup remains incomplete")
+        Err(failure) => {
+            if failure.transition.entry == setup::EntryDisposition::Enter {
+                write_destination(destination)?;
+            }
+            if outcome == Some(HookOutcome::Interrupted) {
+                bail!("post-create setup was interrupted; setup remains incomplete");
+            }
+            Err(failure.error)
         }
     }
 }

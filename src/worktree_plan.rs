@@ -256,6 +256,7 @@ pub(crate) struct ExecutionFailure {
     pub(crate) setup_incomplete: bool,
     pub(crate) hook_outcome: Option<HookOutcome>,
     pub(crate) hook_output: HookOutput,
+    pub(crate) entry: setup::EntryDisposition,
 }
 
 /// Complete command-owned outcome for a switch or create request.
@@ -1077,6 +1078,11 @@ pub(crate) fn execute(
         setup_incomplete,
         hook_outcome: None,
         hook_output: empty_output(),
+        entry: if created && setup_incomplete {
+            setup::EntryDisposition::Enter
+        } else {
+            setup::EntryDisposition::Stay
+        },
     };
     if let Source::Registered(worktree) = &plan.source {
         return Ok(ExecutionOutcome {
@@ -1100,10 +1106,16 @@ pub(crate) fn execute(
             .with_context(|| format!("failed to create destination parent {}", parent.display()))
             .map_err(|error| failure("creation_failed", error, effects.clone(), false, false))?;
     }
+    let setup_lifecycle = setup::Lifecycle::new(&repository.common_dir);
     let pending = (!config.post_create.is_empty())
-        .then(|| setup::prepare(&repository.common_dir, &plan.branch, &plan.destination))
+        .then(|| {
+            setup_lifecycle.prepare(setup::SetupIntent {
+                branch: &plan.branch,
+                destination: &plan.destination,
+            })
+        })
         .transpose()
-        .map_err(|error| failure("setup_failed", error, effects.clone(), false, true))?;
+        .map_err(|value| failure("setup_failed", value.error, effects.clone(), false, true))?;
     let creation_index = effects
         .iter()
         .position(|effect| effect.action == "create_worktree")
@@ -1128,17 +1140,14 @@ pub(crate) fn execute(
     };
     let creation = mutation.create(&plan.destination, &plan.branch, source);
     if let Err(error) = creation {
-        if let Some(pending) = pending
-            && let Err(cancel_error) = pending.cancel()
-        {
+        if let Some(pending) = pending {
+            let value = pending.creation_failed(error);
             return Err(failure(
                 "creation_failed",
-                cancel_error.context(format!(
-                    "worktree creation failed ({error:#}) and pending setup state could not be cleared"
-                )),
+                value.error,
                 effects,
                 false,
-                true,
+                false,
             ));
         }
         return Err(failure("creation_failed", error, effects, false, false));
@@ -1147,73 +1156,81 @@ pub(crate) fn execute(
     if let Some(index) = branch_index {
         effects[index].completed = true;
     }
-    let identity = if let Some(pending) = pending {
-        let identity = RepositoryObservation::new(&plan.destination)
-            .worktree_identity()
-            .map_err(|error| failure("setup_failed", error, effects.clone(), true, true))?;
-        pending
-            .commit(&repository.common_dir, &identity)
-            .map_err(|error| failure("setup_failed", error, effects.clone(), true, true))?;
-        Some(identity)
-    } else {
-        None
-    };
-    on_created().map_err(|error| {
-        failure(
-            "setup_failed",
-            error,
-            effects.clone(),
-            true,
-            identity.is_some(),
-        )
-    })?;
+    let incomplete =
+        if let Some(pending) = pending {
+            let identity = RepositoryObservation::new(&plan.destination).worktree_identity();
+            Some(pending.created(identity).map_err(|value| {
+                failure("setup_failed", value.error, effects.clone(), true, true)
+            })?)
+        } else {
+            None
+        };
+    if let Err(error) = on_created() {
+        if let Some(incomplete) = incomplete {
+            let value = incomplete
+                .advance(setup::Event::PostCreationFailed(error))
+                .expect_err("post-creation failure cannot complete setup");
+            return Err(failure("setup_failed", value.error, effects, true, true));
+        }
+        return Err(failure("setup_failed", error, effects, true, false));
+    }
     if let Some(description) = plan.description.as_deref() {
         let index = effects
             .iter()
             .position(|effect| effect.action == "set_branch_description")
             .expect("described plans carry a description effect");
         effects[index].attempted = true;
-        mutation
-            .describe(&plan.branch, description)
-            .map_err(|error| {
-                failure(
+        if let Err(error) = mutation.describe(&plan.branch, description) {
+            if let Some(incomplete) = incomplete {
+                let value = incomplete
+                    .advance(setup::Event::PostCreationFailed(error))
+                    .expect_err("description failure cannot complete setup");
+                return Err(failure(
                     "description_failed",
-                    error,
-                    effects.clone(),
+                    value.error,
+                    effects,
                     true,
-                    identity.is_some(),
-                )
-            })?;
+                    true,
+                ));
+            }
+            return Err(failure("description_failed", error, effects, true, false));
+        }
         effects[index].completed = true;
     }
-    if let Some(identity) = identity {
+    if let Some(incomplete) = incomplete {
         let execution = hook::execute(
             crate::config::HookPhase::PostCreate,
             &config.post_create,
             &plan.destination,
             output_policy,
-        )
-        .map_err(|error| failure("setup_failed", error, effects.clone(), true, true))?;
-        if execution.outcome != HookOutcome::Success {
+        );
+        let (attempt, outcome, hook_output) = match execution {
+            Ok(execution) => (
+                setup::Attempt::Finished(execution.outcome),
+                Some(execution.outcome),
+                execution.output,
+            ),
+            Err(error) => (setup::Attempt::ExecutionFailed(error), None, empty_output()),
+        };
+        if let Err(value) = incomplete.advance(setup::Event::InitialAttempt(attempt)) {
+            let error = outcome.map_or(value.error, |outcome| {
+                anyhow::anyhow!("post-create hook outcome: {outcome:?}; setup remains incomplete")
+            });
             return Err(ExecutionFailure {
                 code: "setup_failed",
-                error: anyhow::anyhow!(
-                    "post-create hook outcome: {:?}; setup remains incomplete",
-                    execution.outcome
-                ),
+                error,
                 effects,
                 created: true,
                 setup_incomplete: true,
-                hook_outcome: Some(execution.outcome),
-                hook_output: execution.output,
+                hook_outcome: outcome,
+                hook_output,
+                entry: value.transition.entry,
             });
         }
-        setup::clear(&repository.common_dir, &identity, Some(&plan.branch))
-            .map_err(|error| failure("setup_failed", error, effects.clone(), true, true))?;
         return Ok(ExecutionOutcome {
             destination: plan.destination.clone(),
             effects,
-            hook_output: execution.output,
+            hook_output,
         });
     }
     Ok(ExecutionOutcome {

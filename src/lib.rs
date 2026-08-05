@@ -13,7 +13,7 @@ pub mod pr;
 pub mod protocol;
 pub mod read_only;
 pub mod render;
-pub mod setup;
+pub(crate) mod setup;
 pub mod smart;
 pub mod squash;
 pub mod trust;
