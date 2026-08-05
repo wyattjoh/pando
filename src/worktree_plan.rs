@@ -16,7 +16,7 @@ use crate::{
     Worktree,
     branch::{
         self, BaseResolution, Classification, ExactFetch, FETCH_HEAD_BASE, FETCH_LOCAL_BRANCH,
-        FETCH_REGISTERED_WORKTREE, FETCH_REMOTE_BRANCH, Resolver, Snapshot,
+        FETCH_REGISTERED_WORKTREE, FETCH_REMOTE_BRANCH, Snapshot,
     },
     config::EffectiveConfig,
     git::{self, HistoryObservation, Repository, RepositoryObservation},
@@ -786,8 +786,7 @@ pub(crate) fn plan(
     description: Option<String>,
     dry_run: bool,
 ) -> Result<Result<Plan, Blocker>> {
-    let resolver = Resolver::new(repository);
-    if let Err(error) = resolver.validate(branch) {
+    if let Err(error) = snapshot.validate(branch) {
         return Ok(Err(Blocker::InvalidBranch {
             message: format!("{error:#}"),
         }));
@@ -879,7 +878,6 @@ pub(crate) fn plan(
     }
 
     let source = match plan_source(
-        repository,
         snapshot,
         classification,
         branch,
@@ -890,7 +888,7 @@ pub(crate) fn plan(
     ) {
         Ok(SourceResolution::Planned(source)) => source,
         Ok(SourceResolution::FetchRequired(requirement)) if fetch.refreshes() => {
-            let output = git::BranchRepository::new(&repository.current().path)
+            let output = git::RefMutation::new(&repository.current().path)
                 .fetch_base_ref(&requirement.base_ref)?;
             let refreshed_repository =
                 RepositoryObservation::new(&repository.current().path).repository()?;
@@ -965,9 +963,7 @@ enum SourceResolution {
     FetchRequired(ExactFetch),
 }
 
-#[allow(clippy::too_many_arguments)] // Source planning keeps the complete snapshot epoch and command policy explicit.
 fn plan_source(
-    repository: &Repository,
     snapshot: &Snapshot<'_>,
     classification: Classification,
     branch: &str,
@@ -984,9 +980,10 @@ fn plan_source(
                 return Err(Box::new(Blocker::IrrelevantRemote));
             }
             Ok(SourceResolution::Planned(Source::Local {
-                commit: HistoryObservation::new(&repository.current().path)
-                    .commit(branch)
-                    .expect("classified local branch must remain resolvable while planning"),
+                commit: snapshot
+                    .local_commit(branch)
+                    .expect("classified local branch must have a pinned identity")
+                    .to_owned(),
             }))
         }
         Classification::New => {
@@ -1025,26 +1022,26 @@ fn plan_source(
         Classification::Remotes(remotes) => {
             reject_fetch(fetch, FETCH_REMOTE_BRANCH)?;
             match remote {
-                Some(remote) => {
-                    remotes
-                        .into_iter()
-                        .find(|candidate| {
-                            candidate == remote || candidate == &format!("{remote}/{branch}")
-                        })
-                        .map(|reference| {
-                            SourceResolution::Planned(Source::Remote {
-                        commit: HistoryObservation::new(&repository.current().path)
-                            .commit(&reference)
-                            .expect("classified remote ref must remain resolvable while planning"),
-                        reference,
+                Some(remote) => remotes
+                    .into_iter()
+                    .find(|candidate| {
+                        candidate == remote || candidate == &format!("{remote}/{branch}")
                     })
+                    .map(|reference| {
+                        SourceResolution::Planned(Source::Remote {
+                            commit: snapshot
+                                .remote_commit(&reference)
+                                .expect("classified remote ref must have a pinned identity")
+                                .to_owned(),
+                            reference,
                         })
-                        .ok_or_else(|| Box::new(Blocker::UnknownRemote))
-                }
+                    })
+                    .ok_or_else(|| Box::new(Blocker::UnknownRemote)),
                 None if remotes.len() == 1 => Ok(SourceResolution::Planned(Source::Remote {
-                    commit: HistoryObservation::new(&repository.current().path)
-                        .commit(&remotes[0])
-                        .expect("classified remote ref must remain resolvable while planning"),
+                    commit: snapshot
+                        .remote_commit(&remotes[0])
+                        .expect("classified remote ref must have a pinned identity")
+                        .to_owned(),
                     reference: remotes[0].clone(),
                 })),
                 None => Err(Box::new(Blocker::RemoteSelectionRequired {

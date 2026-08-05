@@ -6,10 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     BaseMode, Worktree,
-    git::{
-        self, BaseRef, BranchRepository, HistoryObservation, NewBranchBase, PushPlan, Repository,
-        RepositoryObservation,
-    },
+    git::{self, BaseRef, HistoryObservation, NewBranchBase, PushPlan, Repository},
     worktree_for_branch,
 };
 
@@ -35,8 +32,12 @@ pub(crate) struct Snapshot<'repository> {
     local: Vec<String>,
     remotes_by_branch: HashMap<String, Vec<String>>,
     remote_commits: HashMap<String, String>,
+    local_commits: HashMap<String, String>,
     head_commit: String,
     origin_head: Option<String>,
+    remotes: Vec<String>,
+    remote_urls: HashMap<String, String>,
+    upstreams: HashMap<String, String>,
 }
 
 impl<'repository> Snapshot<'repository> {
@@ -46,16 +47,11 @@ impl<'repository> Snapshot<'repository> {
     ///
     /// Returns an error when Git cannot inspect local or remote-tracking refs.
     pub(crate) fn observe(repository: &'repository Repository) -> Result<Self> {
-        let observation = RepositoryObservation::new(&repository.current().path);
-        let local = observation
-            .branches()?
-            .into_iter()
-            .map(|record| record.branch)
-            .collect();
+        let facts = git::observe_branch_refs(&repository.current().path)?;
         let mut remotes_by_branch: HashMap<String, Vec<String>> = HashMap::new();
         let mut remote_commits = HashMap::new();
         let history = HistoryObservation::new(&repository.current().path);
-        for remote_branch in observation.remote_branches()? {
+        for remote_branch in facts.remote_branches {
             let Some((_, branch)) = remote_branch.split_once('/') else {
                 continue;
             };
@@ -65,13 +61,26 @@ impl<'repository> Snapshot<'repository> {
                 .or_default()
                 .push(remote_branch);
         }
+        let local_commits = facts
+            .local
+            .iter()
+            .map(|branch| {
+                history
+                    .commit(branch)
+                    .map(|commit| (branch.clone(), commit))
+            })
+            .collect::<Result<_>>()?;
         Ok(Self {
             repository,
-            local,
+            local: facts.local,
             remotes_by_branch,
             remote_commits,
+            local_commits,
             head_commit: history.head_commit()?,
-            origin_head: git::origin_head_branch(&repository.current().path),
+            origin_head: facts.origin_head,
+            remotes: facts.remotes,
+            remote_urls: facts.remote_urls,
+            upstreams: facts.upstreams,
         })
     }
 
@@ -101,9 +110,126 @@ impl<'repository> Snapshot<'repository> {
         &self.repository.worktrees
     }
 
+    /// Returns a local branch identity pinned to this observation epoch.
+    pub(crate) fn local_commit(&self, branch: &str) -> Option<&str> {
+        self.local_commits.get(branch).map(String::as_str)
+    }
+
+    /// Returns a remote-tracking identity pinned to this observation epoch.
+    pub(crate) fn remote_commit(&self, reference: &str) -> Option<&str> {
+        self.remote_commits.get(reference).map(String::as_str)
+    }
+
     /// Fetched remote matches grouped by their unqualified branch name.
     pub(crate) fn remotes(&self) -> &HashMap<String, Vec<String>> {
         &self.remotes_by_branch
+    }
+
+    /// Validates a branch name through Git's canonical ref-name parser.
+    pub(crate) fn validate(&self, branch: &str) -> Result<()> {
+        git::validate_branch_name(&self.repository.current().path, branch)
+    }
+
+    /// Resolves the target branch from this observation epoch.
+    pub(crate) fn target(&self, configured: Option<&str>) -> Result<String> {
+        if let Some(branch) = configured {
+            return Ok(branch.to_owned());
+        }
+        self.origin_head
+            .as_deref()
+            .filter(|branch| self.local.iter().any(|local| local == *branch))
+            .or_else(|| self.local.iter().any(|branch| branch == "main").then_some("main"))
+            .or_else(|| self.local.iter().any(|branch| branch == "master").then_some("master"))
+            .map(str::to_owned)
+            .context("no target branch is configured and no fallback branch exists; configure worktrees.target-branch or create main/master")
+    }
+
+    /// Resolves a merge target and pins source and target identities to this epoch.
+    pub(crate) fn merge_target(&self, configured: Option<&str>) -> Result<MergeTarget> {
+        let branch = self.target(configured)?;
+        let target_commit = self
+            .local_commits
+            .get(&branch)
+            .cloned()
+            .with_context(|| format!("target branch {branch:?} does not exist locally"))?;
+        Ok(MergeTarget {
+            branch,
+            source_commit: self.head_commit.clone(),
+            target_commit,
+        })
+    }
+
+    /// Resolves the remote repository used by a branch upstream.
+    pub(crate) fn upstream_remote(&self, branch: &str) -> Result<Option<String>> {
+        self.upstreams
+            .get(branch)
+            .map(|upstream| {
+                upstream
+                    .split_once('/')
+                    .filter(|(remote, branch)| !remote.is_empty() && !branch.is_empty())
+                    .map(|(remote, _)| remote.to_owned())
+                    .with_context(|| {
+                        format!("configured upstream is not a remote branch: {upstream}")
+                    })
+            })
+            .transpose()
+    }
+
+    /// Returns the URL pinned for a configured remote in this snapshot.
+    pub(crate) fn remote_url(&self, remote: &str) -> Result<&str> {
+        self.remote_urls
+            .get(remote)
+            .map(String::as_str)
+            .with_context(|| format!("remote {remote:?} does not exist"))
+    }
+
+    /// Resolves publication without prompting or mutating Git state.
+    pub(crate) fn publication(
+        &self,
+        branch: &str,
+        requested: Option<&str>,
+    ) -> Result<PushResolution> {
+        if let Some(remote) = requested {
+            if !self.remotes.iter().any(|name| name == remote) {
+                bail!("selected remote {remote:?} does not exist");
+            }
+            return Ok(PushResolution::Planned(PushPlan {
+                remote: remote.to_owned(),
+                branch: branch.to_owned(),
+                set_upstream: true,
+            }));
+        }
+        if let Some(upstream) = self.upstreams.get(branch) {
+            let (remote, upstream_branch) = upstream
+                .split_once('/')
+                .filter(|(remote, branch)| !remote.is_empty() && !branch.is_empty())
+                .with_context(|| {
+                    format!("configured upstream is not a remote branch: {upstream}")
+                })?;
+            return Ok(PushResolution::Planned(PushPlan {
+                remote: remote.to_owned(),
+                branch: upstream_branch.to_owned(),
+                set_upstream: false,
+            }));
+        }
+        if self.remotes.iter().any(|remote| remote == "origin") {
+            return Ok(PushResolution::Planned(PushPlan {
+                remote: "origin".into(),
+                branch: branch.into(),
+                set_upstream: true,
+            }));
+        }
+        if let [remote] = self.remotes.as_slice() {
+            return Ok(PushResolution::Planned(PushPlan {
+                remote: remote.clone(),
+                branch: branch.into(),
+                set_upstream: true,
+            }));
+        }
+        if self.remotes.is_empty() {
+            bail!("no Git remote is configured; add a remote before creating a pull request");
+        }
+        Ok(PushResolution::Ambiguous(self.remotes.clone()))
     }
 
     /// Resolves a commit-pinned new-branch base without mutating Git state.
@@ -152,6 +278,14 @@ impl<'repository> Snapshot<'repository> {
     }
 }
 
+/// A semantic merge target with identities pinned to one snapshot epoch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MergeTarget {
+    pub(crate) branch: String,
+    pub(crate) source_commit: String,
+    pub(crate) target_commit: String,
+}
+
 /// A pure new-branch base resolution from one snapshot epoch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BaseResolution {
@@ -198,117 +332,13 @@ pub(crate) enum PushResolution {
     Ambiguous(Vec<String>),
 }
 
-/// Concrete interface for branch and ref resolution.
-///
-/// This capability owns Git's precedence and probing choreography. It is
-/// deliberately noninteractive: ambiguous remotes are returned to adapters.
-#[derive(Clone, Copy)]
-pub(crate) struct Resolver<'repository> {
-    repository: &'repository Repository,
-}
-
-impl<'repository> Resolver<'repository> {
-    #[must_use]
-    pub(crate) fn new(repository: &'repository Repository) -> Self {
-        Self { repository }
-    }
-
-    fn git(self) -> BranchRepository<'repository> {
-        BranchRepository::new(&self.repository.current().path)
-    }
-
-    pub(crate) fn validate(self, branch: &str) -> Result<()> {
-        self.git().validate(branch)
-    }
-
-    pub(crate) fn reject_registered_fetch(requested: bool) -> Result<()> {
-        reject_fetch(requested, FETCH_REGISTERED_WORKTREE)
-    }
-
-    pub(crate) fn target(self, configured: Option<&str>) -> Result<String> {
-        self.git().target(configured)
-    }
-
-    pub(crate) fn upstream_remote(self, branch: &str) -> Result<Option<String>> {
-        Ok(self
-            .git()
-            .upstream(branch)?
-            .as_deref()
-            .and_then(|upstream| upstream.split_once('/'))
-            .map(|(remote, _)| remote.to_owned()))
-    }
-
-    pub(crate) fn remote_url(self, remote: &str) -> Result<String> {
-        self.git().remote_url(remote)
-    }
-
-    /// Plans an ordinary push without prompting or choosing among ambiguous remotes.
-    pub(crate) fn push(self, branch: &str, requested: Option<&str>) -> Result<PushResolution> {
-        if let Some(remote) = requested {
-            if !self
-                .git()
-                .configured_remotes()?
-                .iter()
-                .any(|name| name == remote)
-            {
-                bail!("selected remote {remote:?} does not exist");
-            }
-            return Ok(PushResolution::Planned(PushPlan {
-                remote: remote.to_owned(),
-                branch: branch.to_owned(),
-                set_upstream: true,
-            }));
-        }
-        if let Some(remote) = self.upstream_remote(branch)? {
-            let upstream = self
-                .git()
-                .upstream(branch)?
-                .context("configured upstream is not a remote branch")?;
-            let (_, upstream_branch) = upstream
-                .split_once('/')
-                .context("configured upstream is not a remote branch")?;
-            if remote.is_empty() || upstream_branch.is_empty() {
-                bail!("configured upstream is not a remote branch: {upstream}");
-            }
-            return Ok(PushResolution::Planned(PushPlan {
-                remote,
-                branch: upstream_branch.to_owned(),
-                set_upstream: false,
-            }));
-        }
-        let remotes = self.git().configured_remotes()?;
-        if remotes.iter().any(|remote| remote == "origin") {
-            return Ok(PushResolution::Planned(PushPlan {
-                remote: "origin".into(),
-                branch: branch.into(),
-                set_upstream: true,
-            }));
-        }
-        if let [remote] = remotes.as_slice() {
-            return Ok(PushResolution::Planned(PushPlan {
-                remote: remote.clone(),
-                branch: branch.into(),
-                set_upstream: true,
-            }));
-        }
-        if remotes.is_empty() {
-            bail!("no Git remote is configured; add a remote before creating a pull request");
-        }
-        Ok(PushResolution::Ambiguous(remotes))
-    }
-
-    pub(crate) fn publish(self, plan: &PushPlan, display_output: bool) -> Result<()> {
-        self.git().publish(plan, display_output)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{path::Path, process::Command};
 
     use tempfile::TempDir;
 
-    use super::{BaseResolution, Classification, PushResolution, Resolver, Snapshot};
+    use super::{BaseResolution, Classification, PushResolution, Snapshot};
     use crate::{BaseMode, Condition, Worktree, WorktreeKind, git::RepositoryObservation};
 
     fn run(cwd: &Path, args: &[&str]) {
@@ -481,8 +511,9 @@ mod tests {
             .expect("repository observation");
 
         assert_eq!(
-            Resolver::new(&repository)
-                .push("main", None)
+            Snapshot::observe(&repository)
+                .expect("snapshot observation")
+                .publication("main", None)
                 .expect("push resolution"),
             PushResolution::Ambiguous(vec!["alpha".into(), "zeta".into()])
         );
@@ -503,8 +534,9 @@ mod tests {
             .repository()
             .expect("repository observation");
 
-        let PushResolution::Planned(plan) = Resolver::new(&repository)
-            .push("main", Some("zeta"))
+        let PushResolution::Planned(plan) = Snapshot::observe(&repository)
+            .expect("snapshot observation")
+            .publication("main", Some("zeta"))
             .expect("push resolution")
         else {
             panic!("explicit remote must produce a plan");

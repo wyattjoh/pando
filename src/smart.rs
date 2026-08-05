@@ -15,7 +15,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     Row, SortMode, Worktree, WorktreeKind,
-    branch::{Resolver, Snapshot},
+    branch::{self, Snapshot},
     config::{EffectiveConfig, HookPhase},
     git::{self, HistoryObservation, Repository, RepositoryObservation},
     hook::{self, HookOutcome, HookOutput, OutputPolicy},
@@ -137,8 +137,8 @@ pub fn create_dry_run(branch: &str, fetch: bool) -> Result<()> {
 fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = RepositoryObservation::new(&cwd).repository()?;
-    Resolver::new(&repository).validate(branch)?;
     let snapshot = Snapshot::observe(&repository)?;
+    snapshot.validate(branch)?;
     let plan = match worktree_plan::plan(
         &repository,
         &snapshot,
@@ -500,7 +500,7 @@ fn pick_and_switch(
             if let WorktreeKind::Branch(branch) = &chosen.kind {
                 return resolve_and_switch(repository, branch, Intent::Switch, fetch);
             }
-            Resolver::reject_registered_fetch(fetch.requested())?;
+            branch::reject_fetch(fetch.requested(), branch::FETCH_REGISTERED_WORKTREE)?;
             enter_existing(repository, &chosen.path, None)
         }
         PickerChoice::Branch(branch) => {
@@ -1291,8 +1291,8 @@ fn resolve_and_switch(
     intent: Intent,
     fetch: FetchIntent,
 ) -> Result<()> {
-    Resolver::new(repository).validate(branch)?;
     let mut snapshot = Snapshot::observe(repository)?;
+    snapshot.validate(branch)?;
     let mut remote = None;
     let plan = loop {
         match worktree_plan::plan(

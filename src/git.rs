@@ -1026,25 +1026,6 @@ fn validate_branch(cwd: &Path, branch: &str) -> Result<()> {
     }
 }
 
-/// Reports whether an exact local branch exists.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot inspect local refs.
-fn local_branch_exists(cwd: &Path, branch: &str) -> Result<bool> {
-    let reference = format!("refs/heads/{branch}");
-    let output = run_git(cwd, ["show-ref", "--verify", "--quiet", &reference])
-        .context("failed to inspect local branches")?;
-    match output.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => bail!(
-            "failed to inspect local branch {branch:?}: {}",
-            stderr_detail(&output)
-        ),
-    }
-}
-
 /// Returns already-fetched remote-tracking refs matching a branch name.
 ///
 /// # Errors
@@ -1057,36 +1038,56 @@ pub(crate) struct PushPlan {
     pub(crate) set_upstream: bool,
 }
 
-/// Installed-Git operations used by branch policy and ref resolution.
+/// Raw Git facts consumed by one immutable branch planning snapshot.
+pub(crate) struct BranchRefObservation {
+    pub(crate) local: Vec<String>,
+    pub(crate) remote_branches: Vec<String>,
+    pub(crate) remotes: Vec<String>,
+    pub(crate) remote_urls: HashMap<String, String>,
+    pub(crate) upstreams: HashMap<String, String>,
+    pub(crate) origin_head: Option<String>,
+}
+
+/// Observes all branch publication and target facts in one bounded epoch.
+pub(crate) fn observe_branch_refs(cwd: &Path) -> Result<BranchRefObservation> {
+    let observation = RepositoryObservation::new(cwd);
+    let local: Vec<_> = observation
+        .branches()?
+        .into_iter()
+        .map(|record| record.branch)
+        .collect();
+    let remote_branches = observation.remote_branches()?;
+    let remotes = configured_remotes(cwd)?;
+    let remote_urls = remotes
+        .iter()
+        .map(|remote| remote_url(cwd, remote).map(|url| (remote.clone(), url)))
+        .collect::<Result<_>>()?;
+    let mut upstreams = HashMap::new();
+    for branch in &local {
+        if let Some(upstream) = branch_upstream(cwd, branch)? {
+            upstreams.insert(branch.clone(), upstream);
+        }
+    }
+    Ok(BranchRefObservation {
+        local,
+        remote_branches,
+        remotes,
+        remote_urls,
+        upstreams,
+        origin_head: origin_head_branch(cwd),
+    })
+}
+
+/// Narrow mutation capability for ref refresh and publication.
 #[derive(Clone, Copy)]
-pub(crate) struct BranchRepository<'cwd> {
+pub(crate) struct RefMutation<'cwd> {
     cwd: &'cwd Path,
 }
 
-impl<'cwd> BranchRepository<'cwd> {
+impl<'cwd> RefMutation<'cwd> {
     #[must_use]
     pub(crate) fn new(cwd: &'cwd Path) -> Self {
         Self { cwd }
-    }
-
-    pub(crate) fn validate(self, branch: &str) -> Result<()> {
-        validate_branch(self.cwd, branch)
-    }
-
-    pub(crate) fn target(self, configured: Option<&str>) -> Result<String> {
-        resolve_target_branch(self.cwd, configured)
-    }
-
-    pub(crate) fn upstream(self, branch: &str) -> Result<Option<String>> {
-        branch_upstream(self.cwd, branch)
-    }
-
-    pub(crate) fn configured_remotes(self) -> Result<Vec<String>> {
-        configured_remotes(self.cwd)
-    }
-
-    pub(crate) fn remote_url(self, remote: &str) -> Result<String> {
-        remote_url(self.cwd, remote)
     }
 
     pub(crate) fn publish(self, plan: &PushPlan, display_output: bool) -> Result<()> {
@@ -1096,6 +1097,10 @@ impl<'cwd> BranchRepository<'cwd> {
     pub(crate) fn fetch_base_ref(self, base: &BaseRef) -> Result<String> {
         fetch_base_ref(self.cwd, base)
     }
+}
+
+pub(crate) fn validate_branch_name(cwd: &Path, branch: &str) -> Result<()> {
+    validate_branch(cwd, branch)
 }
 
 fn branch_upstream(cwd: &Path, branch: &str) -> Result<Option<String>> {
@@ -1125,72 +1130,6 @@ fn configured_remotes(cwd: &Path) -> Result<Vec<String>> {
         .collect();
     remotes.sort();
     Ok(remotes)
-}
-
-/// Resolves the target branch, preserving an explicit configuration value.
-/// Otherwise, uses the already-fetched `origin/HEAD` branch, then local `main`,
-/// then local `master`.
-///
-/// # Errors
-/// Returns an error when Git cannot inspect refs or no fallback branch exists.
-fn resolve_target_branch(cwd: &Path, configured: Option<&str>) -> Result<String> {
-    if let Some(branch) = configured {
-        return Ok(branch.to_owned());
-    }
-    let origin_head = match origin_head_branch(cwd) {
-        Some(branch) if local_branch_exists(cwd, &branch)? => Some(branch),
-        _ => None,
-    };
-    let has_main = local_branch_exists(cwd, "main")?;
-    let has_master = local_branch_exists(cwd, "master")?;
-    fallback_target_branch(origin_head.as_deref(), has_main, has_master).map(str::to_owned).context(
-        "no target branch is configured and no fallback branch exists; configure worktrees.target-branch or create main/master",
-    )
-}
-
-fn fallback_target_branch(
-    origin_head: Option<&str>,
-    has_main: bool,
-    has_master: bool,
-) -> Option<&str> {
-    origin_head
-        .or(has_main.then_some("main"))
-        .or(has_master.then_some("master"))
-}
-
-#[cfg(test)]
-mod target_branch_tests {
-    #[test]
-    fn explicit_configuration_has_precedence() {
-        assert_eq!(
-            super::fallback_target_branch(Some("release"), true, true),
-            Some("release")
-        );
-    }
-
-    #[test]
-    fn origin_head_is_first_fallback() {
-        assert_eq!(
-            super::fallback_target_branch(Some("origin-head"), true, true),
-            Some("origin-head")
-        );
-    }
-
-    #[test]
-    fn main_is_second_fallback() {
-        assert_eq!(
-            super::fallback_target_branch(None, true, true),
-            Some("main")
-        );
-    }
-
-    #[test]
-    fn master_is_last_fallback() {
-        assert_eq!(
-            super::fallback_target_branch(None, false, true),
-            Some("master")
-        );
-    }
 }
 
 /// The remote-tracking ref a `fresh` new branch is cut from.

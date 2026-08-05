@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Condition, Worktree, WorktreeKind,
-    branch::Resolver,
+    branch::Snapshot,
     config::{EffectiveConfig, HookPhase},
     git::{
         self, HistoryObservation, LifecycleMutation, LifecycleOutput, Repository,
@@ -684,12 +684,15 @@ pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
         || repository.current_branch().map(str::to_owned),
         |s| Ok(s.source_branch.clone()),
     )?;
-    let resolver = Resolver::new(&repository);
-    let target = journal.as_ref().map_or_else(
-        || resolver.target(config.target_branch.as_deref()),
-        |s| Ok(s.target_branch.clone()),
+    let snapshot = Snapshot::observe(&repository)?;
+    let merge_target = snapshot.merge_target(
+        journal
+            .as_ref()
+            .map(|state| state.target_branch.as_str())
+            .or(config.target_branch.as_deref()),
     )?;
-    resolver.validate(&target)?;
+    let target = merge_target.branch;
+    snapshot.validate(&target)?;
     let checked_out = primary_branch(&repository)?;
     if in_place {
         if journal.is_none() && checked_out == target {
@@ -706,8 +709,8 @@ pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
         )
         .into());
     }
-    let source_commit = current_history.head_commit()?;
-    let target_commit = HistoryObservation::new(primary).commit(&target)?;
+    let source_commit = merge_target.source_commit;
+    let target_commit = merge_target.target_commit;
     let cleanup_pending = journal.as_ref().is_some_and(|s| s.cleanup_pending);
     let needs_rebase =
         !cleanup_pending && !rebase_active && !current_history.is_ancestor(&target, &source)?;
@@ -2599,13 +2602,14 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             );
         }
     }
+    let snapshot = Snapshot::observe(&repository)?;
     let target = match &journal {
         Some(state) => state.target_branch.clone(),
-        None => Resolver::new(&repository)
+        None => snapshot
             .target(config.target_branch.as_deref())
             .context("failed to resolve merge target")?,
     };
-    Resolver::new(&repository).validate(&target)?;
+    snapshot.validate(&target)?;
     let checked_out = primary_branch(&repository)?;
     if in_place {
         if journal.is_none() && checked_out == target {

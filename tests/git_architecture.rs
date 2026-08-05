@@ -71,6 +71,18 @@ fn hook_execution_stays_separate_from_setup_persistence_and_generators() {
 }
 
 #[test]
+fn obsolete_branch_forwarding_interfaces_do_not_return() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let branch = fs::read_to_string(source_root.join("branch.rs")).expect("branch source");
+    let git = fs::read_to_string(source_root.join("git.rs")).expect("git source");
+
+    assert!(!branch.contains("struct Resolver"));
+    assert!(!git.contains("struct BranchRepository"));
+    assert!(branch.contains("struct Snapshot"));
+    assert!(git.contains("struct RefMutation"));
+}
+
+#[test]
 fn git_execution_stays_private_and_concrete() {
     let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/git.rs"))
         .expect("Git source should be readable");

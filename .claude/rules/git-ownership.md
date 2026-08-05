@@ -13,7 +13,7 @@ Use the installed Git executable as the only repository implementation. Construc
 Choose the narrow concrete capability that owns the operation:
 
 - `git::RepositoryObservation` owns repository discovery, current and primary worktree identity, metadata enrichment, ignored-path checks, and repository-level observations.
-- `branch::Resolver` and `git::BranchRepository` own branch/ref classification, target and base-ref planning, fetch applicability, upstream and remote selection, and push planning.
+- `branch::Snapshot` owns immutable branch/ref classification, target and base-ref planning, fetch applicability, upstream and remote selection, and publication planning. `git::RefMutation` narrowly owns explicit ref fetch and push mutation.
 - `git::WorktreeMutation` owns worktree creation, branch descriptions, destination safety, and removal while retaining branches.
 - `git::HistoryObservation` owns commit identities and messages, commit counts, staged and range diffs, statistics, ancestry, and recent subjects.
 - `git::LifecycleMutation` owns switching for lifecycle work, rebase and continuation, fast-forward merge, soft reset, staging, commit creation, and rebase-state observation.

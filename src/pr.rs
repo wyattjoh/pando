@@ -257,14 +257,14 @@ fn execute(
             );
         }
     }
-    let resolver = crate::branch::Resolver::new(&repo);
-    let base = resolver.target(config.target_branch.as_deref())?;
+    let snapshot = crate::branch::Snapshot::observe(&repo)?;
+    let base = snapshot.target(config.target_branch.as_deref())?;
     let head = repo.current_branch()?.to_owned();
-    let base_remote = resolver
+    let base_remote = snapshot
         .upstream_remote(&base)?
         .context("target branch has no upstream; cannot resolve base repository")?;
-    let base_url = resolver.remote_url(&base_remote)?;
-    let push_plan = match resolver.push(&head, requested_remote.as_deref()) {
+    let base_url = snapshot.remote_url(&base_remote)?.to_owned();
+    let push_plan = match snapshot.publication(&head, requested_remote.as_deref()) {
         Ok(crate::branch::PushResolution::Planned(plan)) => plan,
         Ok(crate::branch::PushResolution::Ambiguous(remotes)) if !json_mode && !force => {
             crate::ui::ensure_interactive("remote selection requires confirmation")?;
@@ -276,7 +276,7 @@ fn execute(
                 .items(&options)
                 .interact()
                 .map_err(|e| anyhow::anyhow!(e))?;
-            match resolver.push(&head, Some(&remote))? {
+            match snapshot.publication(&head, Some(&remote))? {
                 crate::branch::PushResolution::Planned(plan) => plan,
                 crate::branch::PushResolution::Ambiguous(_) => {
                     unreachable!("an explicit remote cannot be ambiguous")
@@ -295,7 +295,7 @@ fn execute(
         }
         Err(error) => return fail(json_mode, "pr.remote_selection", &format!("{error:#}")),
     };
-    let head_url = resolver.remote_url(&push_plan.remote)?;
+    let head_url = snapshot.remote_url(&push_plan.remote)?.to_owned();
     let mut resolved_provider =
         match provider::resolve(config.pr_provider, &base_url, &head_url, &head) {
             Ok(provider) => provider,
@@ -493,7 +493,10 @@ fn execute(
         "Publishing topic branch...",
         "Published topic branch",
         "Failed to publish topic branch",
-        |animated| resolver.publish(&push_plan, !json_mode && !animated),
+        |animated| {
+            crate::git::RefMutation::new(&repo.current().path)
+                .publish(&push_plan, !json_mode && !animated)
+        },
     );
     if let Err(error) = push {
         return Ok(PrOutcome {
