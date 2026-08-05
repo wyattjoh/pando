@@ -15,8 +15,8 @@ use crate::protocol::{
 use crate::{
     Worktree,
     branch::{
-        self, Classification, FETCH_HEAD_BASE, FETCH_LOCAL_BRANCH, FETCH_REGISTERED_WORKTREE,
-        FETCH_REMOTE_BRANCH, Resolver, Snapshot,
+        self, BaseResolution, Classification, ExactFetch, FETCH_HEAD_BASE, FETCH_LOCAL_BRANCH,
+        FETCH_REGISTERED_WORKTREE, FETCH_REMOTE_BRANCH, Resolver, Snapshot,
     },
     config::EffectiveConfig,
     git::{self, HistoryObservation, Repository, RepositoryObservation},
@@ -880,6 +880,7 @@ pub(crate) fn plan(
 
     let source = match plan_source(
         repository,
+        snapshot,
         classification,
         branch,
         remote,
@@ -887,7 +888,37 @@ pub(crate) fn plan(
         fetch,
         &destination,
     ) {
-        Ok(source) => source,
+        Ok(SourceResolution::Planned(source)) => source,
+        Ok(SourceResolution::FetchRequired(requirement)) if fetch.refreshes() => {
+            let output = git::BranchRepository::new(&repository.current().path)
+                .fetch_base_ref(&requirement.base_ref)?;
+            let refreshed_repository =
+                RepositoryObservation::new(&repository.current().path).repository()?;
+            let refreshed_snapshot = Snapshot::observe(&refreshed_repository)?;
+            let mut rebuilt = match plan(
+                &refreshed_repository,
+                &refreshed_snapshot,
+                intent,
+                branch,
+                remote,
+                FetchIntent::None,
+                description,
+                dry_run,
+            )? {
+                Ok(plan) => plan,
+                Err(blocker) => return Ok(Err(blocker)),
+            };
+            rebuilt.fetch = fetch;
+            if let Source::New { base } = &mut rebuilt.source {
+                base.fetch_output = Some(output);
+            }
+            return Ok(Ok(rebuilt));
+        }
+        Ok(SourceResolution::FetchRequired(requirement)) => {
+            return Ok(Err(Blocker::BaseUnavailable {
+                message: requirement.unavailable_message(),
+            }));
+        }
         Err(blocker) => return Ok(Err(*blocker)),
     };
     if !dry_run
@@ -929,15 +960,22 @@ fn approval_candidate(
     }
 }
 
+enum SourceResolution {
+    Planned(Source),
+    FetchRequired(ExactFetch),
+}
+
+#[allow(clippy::too_many_arguments)] // Source planning keeps the complete snapshot epoch and command policy explicit.
 fn plan_source(
     repository: &Repository,
+    snapshot: &Snapshot<'_>,
     classification: Classification,
     branch: &str,
     remote: Option<&str>,
     config: &EffectiveConfig,
     fetch: FetchIntent,
     destination: &std::path::Path,
-) -> Result<Source, Box<Blocker>> {
+) -> Result<SourceResolution, Box<Blocker>> {
     match classification {
         Classification::Registered(_) => unreachable!("registered classification returned above"),
         Classification::Local => {
@@ -945,11 +983,11 @@ fn plan_source(
             if remote.is_some() {
                 return Err(Box::new(Blocker::IrrelevantRemote));
             }
-            Ok(Source::Local {
+            Ok(SourceResolution::Planned(Source::Local {
                 commit: HistoryObservation::new(&repository.current().path)
                     .commit(branch)
                     .expect("classified local branch must remain resolvable while planning"),
-            })
+            }))
         }
         Classification::New => {
             if remote.is_some() {
@@ -958,13 +996,26 @@ fn plan_source(
             if fetch.requested() && config.base == crate::BaseMode::Head {
                 reject_fetch(fetch, FETCH_HEAD_BASE)?;
             }
-            Resolver::new(repository)
-                .new_branch_base(
-                    config.base,
-                    config.target_branch.as_deref(),
-                    fetch.refreshes(),
-                )
-                .map(|base| Source::New { base })
+            if fetch.refreshes() {
+                return snapshot
+                    .fresh_fetch(config.target_branch.as_deref())
+                    .map(SourceResolution::FetchRequired)
+                    .map_err(|error| {
+                        Box::new(Blocker::BaseUnavailable {
+                            message: format!("{error:#}"),
+                        })
+                    });
+            }
+            snapshot
+                .new_branch_base(config.base, config.target_branch.as_deref())
+                .map(|resolution| match resolution {
+                    BaseResolution::Resolved(base) => {
+                        SourceResolution::Planned(Source::New { base })
+                    }
+                    BaseResolution::FetchRequired(requirement) => {
+                        SourceResolution::FetchRequired(requirement)
+                    }
+                })
                 .map_err(|error| {
                     Box::new(Blocker::BaseUnavailable {
                         message: format!("{error:#}"),
@@ -974,24 +1025,28 @@ fn plan_source(
         Classification::Remotes(remotes) => {
             reject_fetch(fetch, FETCH_REMOTE_BRANCH)?;
             match remote {
-                Some(remote) => remotes
-                    .into_iter()
-                    .find(|candidate| {
-                        candidate == remote || candidate == &format!("{remote}/{branch}")
-                    })
-                    .map(|reference| Source::Remote {
+                Some(remote) => {
+                    remotes
+                        .into_iter()
+                        .find(|candidate| {
+                            candidate == remote || candidate == &format!("{remote}/{branch}")
+                        })
+                        .map(|reference| {
+                            SourceResolution::Planned(Source::Remote {
                         commit: HistoryObservation::new(&repository.current().path)
                             .commit(&reference)
                             .expect("classified remote ref must remain resolvable while planning"),
                         reference,
                     })
-                    .ok_or_else(|| Box::new(Blocker::UnknownRemote)),
-                None if remotes.len() == 1 => Ok(Source::Remote {
+                        })
+                        .ok_or_else(|| Box::new(Blocker::UnknownRemote))
+                }
+                None if remotes.len() == 1 => Ok(SourceResolution::Planned(Source::Remote {
                     commit: HistoryObservation::new(&repository.current().path)
                         .commit(&remotes[0])
                         .expect("classified remote ref must remain resolvable while planning"),
                     reference: remotes[0].clone(),
-                }),
+                })),
                 None => Err(Box::new(Blocker::RemoteSelectionRequired {
                     remotes,
                     destination: destination.to_owned(),
@@ -1194,10 +1249,21 @@ fn revalidate(repository: &Repository, plan: &Plan) -> Result<()> {
 }
 
 fn revalidate_new(repository: &Repository, base: &git::NewBranchBase) -> Result<()> {
-    let actual = match &base.base_ref {
-        Some(base_ref) => Resolver::new(repository).base_commit(base_ref)?,
-        None => HistoryObservation::new(&repository.current().path).head_commit()?,
+    let snapshot = Snapshot::observe(repository)?;
+    let mode = if base.base_ref.is_some() {
+        crate::BaseMode::Fresh
+    } else {
+        crate::BaseMode::Head
     };
+    let configured_target = base
+        .base_ref
+        .as_ref()
+        .map(|base_ref| base_ref.branch.as_str());
+    let BaseResolution::Resolved(current) = snapshot.new_branch_base(mode, configured_target)?
+    else {
+        bail!("the planned new-branch source is no longer available");
+    };
+    let actual = current.commit;
     if actual != base.commit {
         bail!(
             "planned new-branch source moved from {} to {actual}",

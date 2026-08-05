@@ -6,7 +6,10 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     BaseMode, Worktree,
-    git::{BaseRef, BranchRepository, NewBranchBase, PushPlan, Repository, RepositoryObservation},
+    git::{
+        self, BaseRef, BranchRepository, HistoryObservation, NewBranchBase, PushPlan, Repository,
+        RepositoryObservation,
+    },
     worktree_for_branch,
 };
 
@@ -31,6 +34,9 @@ pub(crate) struct Snapshot<'repository> {
     repository: &'repository Repository,
     local: Vec<String>,
     remotes_by_branch: HashMap<String, Vec<String>>,
+    remote_commits: HashMap<String, String>,
+    head_commit: String,
+    origin_head: Option<String>,
 }
 
 impl<'repository> Snapshot<'repository> {
@@ -47,10 +53,13 @@ impl<'repository> Snapshot<'repository> {
             .map(|record| record.branch)
             .collect();
         let mut remotes_by_branch: HashMap<String, Vec<String>> = HashMap::new();
+        let mut remote_commits = HashMap::new();
+        let history = HistoryObservation::new(&repository.current().path);
         for remote_branch in observation.remote_branches()? {
             let Some((_, branch)) = remote_branch.split_once('/') else {
                 continue;
             };
+            remote_commits.insert(remote_branch.clone(), history.commit(&remote_branch)?);
             remotes_by_branch
                 .entry(branch.to_owned())
                 .or_default()
@@ -60,6 +69,9 @@ impl<'repository> Snapshot<'repository> {
             repository,
             local,
             remotes_by_branch,
+            remote_commits,
+            head_commit: history.head_commit()?,
+            origin_head: git::origin_head_branch(&repository.current().path),
         })
     }
 
@@ -92,6 +104,75 @@ impl<'repository> Snapshot<'repository> {
     /// Fetched remote matches grouped by their unqualified branch name.
     pub(crate) fn remotes(&self) -> &HashMap<String, Vec<String>> {
         &self.remotes_by_branch
+    }
+
+    /// Resolves a commit-pinned new-branch base without mutating Git state.
+    pub(crate) fn new_branch_base(
+        &self,
+        mode: BaseMode,
+        configured_target: Option<&str>,
+    ) -> Result<BaseResolution> {
+        if mode == BaseMode::Head {
+            return Ok(BaseResolution::Resolved(NewBranchBase {
+                commit: self.head_commit.clone(),
+                base_ref: None,
+                fetch_output: None,
+            }));
+        }
+        let base_ref = self.fresh_base_ref(configured_target)?;
+        let reference = base_ref.reference();
+        Ok(match self.remote_commits.get(&reference) {
+            Some(commit) => BaseResolution::Resolved(NewBranchBase {
+                commit: commit.clone(),
+                base_ref: Some(base_ref),
+                fetch_output: None,
+            }),
+            None => BaseResolution::FetchRequired(ExactFetch { base_ref }),
+        })
+    }
+
+    /// Selects the exact ref an explicitly authorized fresh-base fetch refreshes.
+    pub(crate) fn fresh_fetch(&self, configured_target: Option<&str>) -> Result<ExactFetch> {
+        Ok(ExactFetch {
+            base_ref: self.fresh_base_ref(configured_target)?,
+        })
+    }
+
+    fn fresh_base_ref(&self, configured_target: Option<&str>) -> Result<BaseRef> {
+        let branch = configured_target
+            .map(str::to_owned)
+            .or_else(|| self.origin_head.clone())
+            .context(
+                "worktrees.base is 'fresh' but no base branch could be resolved: set worktrees.target-branch, or record the remote's default branch with 'git remote set-head origin -a'",
+            )?;
+        Ok(BaseRef {
+            remote: "origin".to_owned(),
+            branch,
+        })
+    }
+}
+
+/// A pure new-branch base resolution from one snapshot epoch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BaseResolution {
+    Resolved(NewBranchBase),
+    FetchRequired(ExactFetch),
+}
+
+/// The exact ref mutation required before the complete plan can be rebuilt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExactFetch {
+    pub(crate) base_ref: BaseRef,
+}
+
+impl ExactFetch {
+    #[must_use]
+    pub(crate) fn unavailable_message(&self) -> String {
+        let reference = self.base_ref.reference();
+        format!(
+            "the base ref {reference:?} has not been fetched into this clone; run 'git fetch {} {}' or pass --fetch",
+            self.base_ref.remote, self.base_ref.branch
+        )
     }
 }
 
@@ -219,19 +300,6 @@ impl<'repository> Resolver<'repository> {
     pub(crate) fn publish(self, plan: &PushPlan, display_output: bool) -> Result<()> {
         self.git().publish(plan, display_output)
     }
-
-    pub(crate) fn new_branch_base(
-        self,
-        mode: BaseMode,
-        configured_target: Option<&str>,
-        fetch: bool,
-    ) -> Result<NewBranchBase> {
-        self.git().new_branch_base(mode, configured_target, fetch)
-    }
-
-    pub(crate) fn base_commit(self, base: &BaseRef) -> Result<String> {
-        self.git().base_commit(base)
-    }
 }
 
 #[cfg(test)]
@@ -240,8 +308,8 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{Classification, PushResolution, Resolver, Snapshot};
-    use crate::{Condition, Worktree, WorktreeKind, git::RepositoryObservation};
+    use super::{BaseResolution, Classification, PushResolution, Resolver, Snapshot};
+    use crate::{BaseMode, Condition, Worktree, WorktreeKind, git::RepositoryObservation};
 
     fn run(cwd: &Path, args: &[&str]) {
         let status = Command::new("git")
@@ -325,6 +393,76 @@ mod tests {
 
         run(directory.path(), &["branch", "observed-later"]);
         assert_eq!(snapshot.classify("observed-later"), Classification::New);
+    }
+
+    #[test]
+    fn snapshot_pins_head_and_fresh_bases_to_one_observation() {
+        let directory = repository();
+        run(
+            directory.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        run(
+            directory.path(),
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        let repository = RepositoryObservation::new(directory.path())
+            .repository()
+            .expect("repository observation");
+        let snapshot = Snapshot::observe(&repository).expect("snapshot observation");
+        let head = snapshot
+            .new_branch_base(BaseMode::Head, None)
+            .expect("head base");
+        let fresh = snapshot
+            .new_branch_base(BaseMode::Fresh, None)
+            .expect("fresh base");
+        let BaseResolution::Resolved(head) = head else {
+            panic!("head must resolve locally");
+        };
+        let BaseResolution::Resolved(fresh) = fresh else {
+            panic!("fresh must resolve locally");
+        };
+        assert_eq!(head.commit, fresh.commit);
+
+        run(
+            directory.path(),
+            &["commit", "--allow-empty", "-m", "later"],
+        );
+        assert_eq!(
+            snapshot
+                .new_branch_base(BaseMode::Head, None)
+                .expect("pinned head base"),
+            BaseResolution::Resolved(head)
+        );
+        assert_eq!(
+            snapshot
+                .new_branch_base(BaseMode::Fresh, None)
+                .expect("pinned fresh base"),
+            BaseResolution::Resolved(fresh)
+        );
+    }
+
+    #[test]
+    fn missing_fresh_base_returns_the_exact_non_mutating_fetch_requirement() {
+        let directory = repository();
+        let repository = RepositoryObservation::new(directory.path())
+            .repository()
+            .expect("repository observation");
+        let snapshot = Snapshot::observe(&repository).expect("snapshot observation");
+
+        let resolution = snapshot
+            .new_branch_base(BaseMode::Fresh, Some("release"))
+            .expect("typed base resolution");
+        let BaseResolution::FetchRequired(requirement) = resolution else {
+            panic!("missing ref must require a fetch");
+        };
+        assert_eq!(requirement.base_ref.reference(), "origin/release");
+        assert!(requirement.unavailable_message().contains("--fetch"));
+        assert_eq!(snapshot.classify("release"), Classification::New);
     }
 
     #[test]

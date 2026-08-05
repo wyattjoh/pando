@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, FixedOffset};
 
-use crate::{BaseMode, Condition, Worktree, WorktreeKind};
+use crate::{Condition, Worktree, WorktreeKind};
 
 /// Private execution kernel for the installed Git executable.
 ///
@@ -1093,17 +1093,8 @@ impl<'cwd> BranchRepository<'cwd> {
         push(self.cwd, plan, display_output)
     }
 
-    pub(crate) fn new_branch_base(
-        self,
-        mode: BaseMode,
-        configured_target: Option<&str>,
-        fetch: bool,
-    ) -> Result<NewBranchBase> {
-        plan_new_branch_base(self.cwd, mode, configured_target, fetch)
-    }
-
-    pub(crate) fn base_commit(self, base: &BaseRef) -> Result<String> {
-        base_ref_commit(self.cwd, base)
+    pub(crate) fn fetch_base_ref(self, base: &BaseRef) -> Result<String> {
+        fetch_base_ref(self.cwd, base)
     }
 }
 
@@ -1219,27 +1210,7 @@ impl BaseRef {
     }
 }
 
-/// Resolves the remote-tracking ref that `worktrees.base: fresh` branches from.
-///
-/// Reads only local refs: the configured target branch when set, otherwise the
-/// branch named by the remote's `origin/HEAD` symbolic ref.
-///
-/// # Errors
-/// Returns an error when neither source names a branch.
-fn resolve_base_ref(cwd: &Path, configured_target: Option<&str>) -> Result<BaseRef> {
-    let branch = match configured_target {
-        Some(branch) => branch.to_owned(),
-        None => origin_head_branch(cwd).context(
-            "worktrees.base is 'fresh' but no base branch could be resolved: set worktrees.target-branch, or record the remote's default branch with 'git remote set-head origin -a'",
-        )?,
-    };
-    Ok(BaseRef {
-        remote: "origin".to_owned(),
-        branch,
-    })
-}
-
-fn origin_head_branch(cwd: &Path) -> Option<String> {
+pub(crate) fn origin_head_branch(cwd: &Path) -> Option<String> {
     git_stdout(cwd, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
         .ok()
         .and_then(|value| {
@@ -1260,61 +1231,6 @@ pub(crate) struct NewBranchBase {
     pub(crate) base_ref: Option<BaseRef>,
     /// Git's captured output from an explicit `--fetch`, when one ran.
     pub(crate) fetch_output: Option<String>,
-}
-
-/// Plans the start point for a genuinely new branch under the effective base mode.
-///
-/// This is the single place either interface resolves a start point, so human
-/// `switch`/`create`, their dry runs, and the JSON variants cannot diverge.
-/// `fetch` refreshes exactly the resolved base ref first; it is the caller's job
-/// to reject it before reaching here when the mode is `head` or the branch is
-/// not genuinely new.
-///
-/// # Errors
-/// Returns an error when `HEAD`, the base ref, or its commit cannot be resolved.
-fn plan_new_branch_base(
-    cwd: &Path,
-    mode: BaseMode,
-    configured_target: Option<&str>,
-    fetch: bool,
-) -> Result<NewBranchBase> {
-    if mode == BaseMode::Head {
-        return Ok(NewBranchBase {
-            commit: head_commit_observed(cwd)?,
-            base_ref: None,
-            fetch_output: None,
-        });
-    }
-    let base_ref = resolve_base_ref(cwd, configured_target)?;
-    let fetch_output = fetch.then(|| fetch_base_ref(cwd, &base_ref)).transpose()?;
-    Ok(NewBranchBase {
-        commit: base_ref_commit(cwd, &base_ref)?,
-        base_ref: Some(base_ref),
-        fetch_output,
-    })
-}
-
-/// Resolves the commit a fresh base ref points at, without fetching.
-///
-/// # Errors
-/// Returns an error naming the fix when the ref has never been fetched.
-fn base_ref_commit(cwd: &Path, base: &BaseRef) -> Result<String> {
-    let reference = base.reference();
-    git_stdout(
-        cwd,
-        [
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/remotes/{reference}^{{commit}}"),
-        ],
-    )
-    .with_context(|| {
-        format!(
-            "the base ref {reference:?} has not been fetched into this clone; run 'git fetch {} {}' or pass --fetch",
-            base.remote, base.branch
-        )
-    })
 }
 
 /// Fetches exactly the one base ref, leaving every other remote-tracking ref alone.
