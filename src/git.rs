@@ -1803,6 +1803,39 @@ fn parse_porcelain(bytes: &[u8]) -> Result<Vec<Worktree>> {
 }
 
 #[cfg(test)]
+pub(crate) fn initialize_test_repository_with_commit(cwd: &Path) -> Result<()> {
+    for args in [
+        &["init", "-b", "main"][..],
+        &["config", "user.name", "Pando Test"][..],
+        &["config", "user.email", "pando@example.invalid"][..],
+    ] {
+        let output = GitProcess::new(cwd, args)
+            .captured()
+            .context("failed to initialize test Git repository")?;
+        if !output.status.success() {
+            bail!(
+                "failed to initialize test Git repository: {}",
+                stderr_detail(&output)
+            );
+        }
+    }
+
+    fs::write(cwd.join("tracked"), "topic\n").context("failed to write test repository fixture")?;
+    for args in [&["add", "tracked"][..], &["commit", "-m", "topic"][..]] {
+        let output = GitProcess::new(cwd, args)
+            .captured()
+            .context("failed to create test Git commit")?;
+        if !output.status.success() {
+            bail!(
+                "failed to create test Git commit: {}",
+                stderr_detail(&output)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, os::unix::ffi::OsStrExt};
 

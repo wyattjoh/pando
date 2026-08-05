@@ -1,11 +1,12 @@
 use std::{
     env, fs,
     io::{self, Write},
-    os::unix::ffi::OsStrExt,
+    os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -654,10 +655,13 @@ pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
         ));
     }
     if let Some(state) = &journal {
-        if state.version != 1
-            || state.topic_path != repository.current().path
-            || state.topic_identity != identity
-        {
+        if state.squash.prepared() {
+            return Err(anyhow::anyhow!(
+                "prepared squash recovery requires the journaled merge executor"
+            )
+            .into());
+        }
+        if state.topic_path != repository.current().path || state.topic_identity != identity {
             return Err(anyhow::anyhow!(
                 "lifecycle journal is unsupported or does not match the current topic worktree"
             )
@@ -726,7 +730,9 @@ pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
     // and during cleanup the integration is behind us entirely.
     let squash_enabled = !policy.no_squash
         && !cleanup_pending
-        && !journal.as_ref().is_some_and(|state| state.squashed);
+        && journal
+            .as_ref()
+            .is_none_or(|state| state.squash.not_started());
     let squash = squash::plan(
         &repository,
         &config,
@@ -844,10 +850,33 @@ fn planned_merge_effects(
     ]
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)] // A journal records pinned policy facts, not state switches.
 struct MergeJournal {
+    topic_path: PathBuf,
+    topic_identity: PathBuf,
+    source_branch: String,
+    target_branch: String,
+    no_rebase: bool,
+    no_remove: bool,
+    no_squash: bool,
+    /// Stage local changes into the generated squash commit.
+    yolo_stage_all: bool,
+    squash: SquashStateV2,
+    cleanup_pending: bool,
+    validated_source: Option<String>,
+    validated_target: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct JournalVersion {
+    version: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Compatibility DTO mirrors the closed historical wire shape.
+struct MergeJournalV1 {
     version: u8,
     topic_path: PathBuf,
     topic_identity: PathBuf,
@@ -857,10 +886,8 @@ struct MergeJournal {
     no_remove: bool,
     #[serde(default)]
     no_squash: bool,
-    /// Stage local changes into the generated squash commit.
     #[serde(default)]
     yolo_stage_all: bool,
-    /// The topic has already been collapsed, so a retry must not squash again.
     #[serde(default)]
     squashed: bool,
     #[serde(default)]
@@ -869,6 +896,109 @@ struct MergeJournal {
     validated_source: Option<String>,
     #[serde(default)]
     validated_target: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Compatibility DTO mirrors pinned policy facts on the wire.
+struct MergeJournalV2 {
+    version: u8,
+    topic_path: EncodedPath,
+    topic_identity: EncodedPath,
+    source_branch: String,
+    target_branch: String,
+    no_rebase: bool,
+    no_remove: bool,
+    no_squash: bool,
+    yolo_stage_all: bool,
+    squashed: SquashStateV2,
+    cleanup_pending: bool,
+    validated_source: Option<String>,
+    validated_target: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum SquashStateV2 {
+    NotStarted,
+    Skipped {
+        reason: SquashSkipReasonV2,
+    },
+    Prepared {
+        checkpoint: SquashCheckpointV2,
+    },
+    Completed {
+        resulting_commit: String,
+    },
+    #[serde(skip)]
+    LegacyCompleted,
+}
+
+impl SquashStateV2 {
+    const fn completed(&self) -> bool {
+        matches!(self, Self::Completed { .. })
+    }
+
+    const fn prepared(&self) -> bool {
+        matches!(self, Self::Prepared { .. })
+    }
+
+    const fn not_started(&self) -> bool {
+        matches!(self, Self::NotStarted)
+    }
+}
+
+fn initial_squash_state(squash_disabled: bool, plan: &squash::SquashPlan) -> SquashStateV2 {
+    if squash_disabled {
+        SquashStateV2::Skipped {
+            reason: SquashSkipReasonV2::Disabled,
+        }
+    } else if !plan.applicable && plan.commit_count == 1 {
+        SquashStateV2::Skipped {
+            reason: SquashSkipReasonV2::SingleCommit,
+        }
+    } else {
+        SquashStateV2::NotStarted
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SquashSkipReasonV2 {
+    Disabled,
+    SingleCommit,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SquashCheckpointV2 {
+    topic_commit: String,
+    target_commit: String,
+    expected_tree: String,
+    message_bytes: EncodedBytes,
+    topic_branch: String,
+    topic_worktree: EncodedPath,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncodedBytes {
+    encoding: ByteEncoding,
+    value: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ByteEncoding {
+    Base64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncodedPath {
+    encoding: ByteEncoding,
+    value: String,
+    display: String,
 }
 
 /// Strict version 1 input for worktree removal.
@@ -1785,7 +1915,6 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
         }
     } else {
         MergeJournal {
-            version: 1,
             topic_path: current.path.clone(),
             topic_identity: identity,
             source_branch: plan.context.source_branch.clone(),
@@ -1794,7 +1923,10 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
             no_remove: plan.context.policy.no_remove,
             no_squash: plan.context.policy.no_squash,
             yolo_stage_all: false,
-            squashed: false,
+            squash: initial_squash_state(
+                plan.context.policy.no_squash || !plan.config.squash,
+                &plan.squash,
+            ),
             cleanup_pending: false,
             validated_source: None,
             validated_target: None,
@@ -1886,7 +2018,7 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
             }
         }
     }
-    if plan.squash.applicable && !state.squashed {
+    if plan.squash.applicable && state.squash.not_started() {
         mark_effect(&mut effects, "squash", true, false);
         let refreshed = match squash::plan(
             &plan.repository,
@@ -1995,7 +2127,20 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                     error,
                 );
             }
-            state.squashed = true;
+            let resulting_commit = match HistoryObservation::new(&current.path).head_commit() {
+                Ok(commit) => commit,
+                Err(error) => {
+                    return execution_failure(
+                        plan,
+                        effects,
+                        diagnostics,
+                        MergePhase::Squash,
+                        MergeExecutionFailureKind::Journal,
+                        error,
+                    );
+                }
+            };
+            state.squash = SquashStateV2::Completed { resulting_commit };
             if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
                 return execution_failure(
                     plan,
@@ -2584,7 +2729,10 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     }
     let config = EffectiveConfig::load(&repository)?;
     if let Some(existing) = &journal {
-        if existing.version != 1 || existing.topic_path != repository.current().path {
+        if existing.squash.prepared() {
+            bail!("prepared squash recovery requires the journaled merge executor")
+        }
+        if existing.topic_path != repository.current().path {
             bail!("lifecycle journal is unsupported or does not match the current topic worktree");
         }
         if existing.topic_identity != identity {
@@ -2628,7 +2776,11 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     // Refuse an impossible squash before the journal, the rebase, or any other
     // mutation. Discovering a missing or untrusted generator only after the
     // rebase has landed would leave work to recover for no reason.
-    if !policy.no_squash && !journal.as_ref().is_some_and(|state| state.squashed) {
+    if !policy.no_squash
+        && journal
+            .as_ref()
+            .is_none_or(|state| state.squash.not_started())
+    {
         squash::ensure_ready(
             &repository,
             &config,
@@ -2641,8 +2793,15 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     // hooks before the journal or any Git mutation protected by them.
     hook_approval::approve_interactively(&repository, HookPhase::PreMerge, &config.pre_merge)?;
     if journal.is_none() {
+        let squash_plan = squash::plan(
+            &repository,
+            &config,
+            &target,
+            !policy.no_squash,
+            !rebase_active,
+            yolo_stage_all,
+        )?;
         let state = MergeJournal {
-            version: 1,
             topic_path: repository.current().path.clone(),
             topic_identity: identity,
             source_branch: source.clone(),
@@ -2651,7 +2810,7 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             no_remove: policy.no_remove,
             no_squash: policy.no_squash,
             yolo_stage_all,
-            squashed: false,
+            squash: initial_squash_state(policy.no_squash || !config.squash, &squash_plan),
             cleanup_pending: false,
             validated_source: None,
             validated_target: None,
@@ -2661,7 +2820,9 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     }
 
     if yolo_stage_all
-        && journal.as_ref().is_some_and(|state| !state.squashed)
+        && journal
+            .as_ref()
+            .is_some_and(|state| state.squash.not_started())
         && current_history.status()?.is_dirty()
     {
         // Preflight and journal creation must precede this mutation.
@@ -2708,7 +2869,9 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
         )?)?;
     }
     if yolo_stage_all
-        && journal.as_ref().is_some_and(|state| !state.squashed)
+        && journal
+            .as_ref()
+            .is_some_and(|state| state.squash.not_started())
         && current_history.status()?.is_dirty()
     {
         ui::run_timed(
@@ -2723,7 +2886,7 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     // Squash after the rebase so the collapse starts from the replayed history,
     // and before validation so the pre-merge hooks see the commit that actually
     // lands on the target.
-    if !state.no_squash && !state.squashed {
+    if !state.no_squash && state.squash.not_started() {
         let plan = squash::plan(&repository, &config, &target, true, true, yolo_stage_all)?;
         if plan.applicable {
             // Generate first and show the message, so the rail reports what is
@@ -2743,7 +2906,9 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
                 "Failed to squash the topic",
                 |_| squash::collapse(&repository, &target, &message),
             )?;
-            state.squashed = true;
+            state.squash = SquashStateV2::Completed {
+                resulting_commit: current_history.head_commit()?,
+            };
             write_journal(&repository.common_dir, &state)?;
         }
     }
@@ -2862,7 +3027,7 @@ fn merge_summary(state: &MergeJournal, worktree_outcome: MergeWorktreeOutcome) -
     styled_merge_summary(
         &state.source_branch,
         &state.target_branch,
-        state.squashed,
+        state.squash.completed(),
         &epilogue,
     )
 }
@@ -3033,7 +3198,7 @@ fn inspect_removal_state(repository: &Repository, target: &Worktree) -> Result<O
     let Some(state) = read_journal(&repository.common_dir, &identity)? else {
         return Ok(None);
     };
-    if state.version != 1 || state.topic_identity != identity || state.topic_path != target.path {
+    if state.topic_identity != identity || state.topic_path != target.path {
         return Err(preflight(
             PreflightFailureKind::JournalInvalid,
             format!(
@@ -3099,10 +3264,138 @@ fn journal_path(common_dir: &Path, identity: &Path) -> PathBuf {
         .join("pando-state/lifecycle")
         .join(format!("{}.json", hash::encode_hex(&digest.finalize())))
 }
+fn decode_journal(bytes: &[u8]) -> Result<MergeJournal> {
+    let version: JournalVersion = serde_json::from_slice(bytes)
+        .context("lifecycle journal must contain only a supported numeric version before its body is decoded")?;
+    match version.version {
+        1 => {
+            let dto: MergeJournalV1 = serde_json::from_slice(bytes)?;
+            if dto.version != 1 {
+                bail!("lifecycle journal version changed during decoding")
+            }
+            let squash = if dto.squashed {
+                dto.validated_source
+                    .clone()
+                    .map_or(SquashStateV2::LegacyCompleted, |resulting_commit| {
+                        SquashStateV2::Completed { resulting_commit }
+                    })
+            } else if dto.no_squash {
+                SquashStateV2::Skipped {
+                    reason: SquashSkipReasonV2::Disabled,
+                }
+            } else {
+                SquashStateV2::NotStarted
+            };
+            Ok(MergeJournal {
+                topic_path: dto.topic_path,
+                topic_identity: dto.topic_identity,
+                source_branch: dto.source_branch,
+                target_branch: dto.target_branch,
+                no_rebase: dto.no_rebase,
+                no_remove: dto.no_remove,
+                no_squash: dto.no_squash,
+                yolo_stage_all: dto.yolo_stage_all,
+                squash,
+                cleanup_pending: dto.cleanup_pending,
+                validated_source: dto.validated_source,
+                validated_target: dto.validated_target,
+            })
+        }
+        2 => {
+            let dto: MergeJournalV2 = serde_json::from_slice(bytes)?;
+            if dto.version != 2 {
+                bail!("lifecycle journal version changed during decoding")
+            }
+            if let SquashStateV2::Prepared { checkpoint } = &dto.squashed {
+                decode_bytes(&checkpoint.message_bytes)?;
+                decode_path(checkpoint.topic_worktree.clone())?;
+            }
+            Ok(MergeJournal {
+                topic_path: decode_path(dto.topic_path)?,
+                topic_identity: decode_path(dto.topic_identity)?,
+                source_branch: dto.source_branch,
+                target_branch: dto.target_branch,
+                no_rebase: dto.no_rebase,
+                no_remove: dto.no_remove,
+                no_squash: dto.no_squash,
+                yolo_stage_all: dto.yolo_stage_all,
+                squash: dto.squashed,
+                cleanup_pending: dto.cleanup_pending,
+                validated_source: dto.validated_source,
+                validated_target: dto.validated_target,
+            })
+        }
+        version => bail!("unsupported lifecycle journal version {version}"),
+    }
+}
+
+fn encode_path(path: &Path) -> EncodedPath {
+    EncodedPath {
+        encoding: ByteEncoding::Base64,
+        value: BASE64.encode(path.as_os_str().as_bytes()),
+        display: path.display().to_string(),
+    }
+}
+
+fn decode_bytes(encoded: &EncodedBytes) -> Result<Vec<u8>> {
+    let bytes = BASE64
+        .decode(&encoded.value)
+        .context("invalid base64 byte payload")?;
+    if BASE64.encode(&bytes) != encoded.value {
+        bail!("byte payload is not canonical base64")
+    }
+    Ok(bytes)
+}
+
+fn decode_path(path: EncodedPath) -> Result<PathBuf> {
+    let bytes = decode_bytes(&EncodedBytes {
+        encoding: path.encoding,
+        value: path.value,
+    })?;
+    Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+fn journal_v2(state: &MergeJournal) -> Result<MergeJournalV2> {
+    if matches!(state.squash, SquashStateV2::LegacyCompleted) {
+        bail!("cannot serialize an unbound version 1 completed squash")
+    }
+    Ok(MergeJournalV2 {
+        version: 2,
+        topic_path: encode_path(&state.topic_path),
+        topic_identity: encode_path(&state.topic_identity),
+        source_branch: state.source_branch.clone(),
+        target_branch: state.target_branch.clone(),
+        no_rebase: state.no_rebase,
+        no_remove: state.no_remove,
+        no_squash: state.no_squash,
+        yolo_stage_all: state.yolo_stage_all,
+        squashed: state.squash.clone(),
+        cleanup_pending: state.cleanup_pending,
+        validated_source: state.validated_source.clone(),
+        validated_target: state.validated_target.clone(),
+    })
+}
+
+fn bind_legacy_completed(mut state: MergeJournal) -> Result<MergeJournal> {
+    if matches!(state.squash, SquashStateV2::LegacyCompleted) {
+        let resulting_commit = HistoryObservation::new(&state.topic_path)
+            .head_commit()
+            .with_context(|| {
+                format!(
+                    "failed to bind version 1 completed squash to HEAD at {}",
+                    state.topic_path.display()
+                )
+            })?;
+        state.squash = SquashStateV2::Completed { resulting_commit };
+    }
+    Ok(state)
+}
+
 fn read_journal(common_dir: &Path, identity: &Path) -> Result<Option<MergeJournal>> {
     let path = journal_path(common_dir, identity);
     match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
+        Ok(bytes) => decode_journal(&bytes)
+            .and_then(bind_legacy_completed)
             .map(Some)
             .with_context(|| format!("failed to parse lifecycle journal {}", path.display())),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -3112,7 +3405,8 @@ fn read_journal(common_dir: &Path, identity: &Path) -> Result<Option<MergeJourna
 }
 fn write_journal(common_dir: &Path, state: &MergeJournal) -> Result<()> {
     let path = journal_path(common_dir, &state.topic_identity);
-    trust::write_atomic(&path, &serde_json::to_vec_pretty(state)?)
+    let dto = journal_v2(state)?;
+    trust::write_atomic(&path, &serde_json::to_vec_pretty(&dto)?)
         .with_context(|| format!("failed to write lifecycle journal {}", path.display()))
 }
 fn remove_journal(common_dir: &Path, identity: &Path) -> Result<()> {
@@ -3133,4 +3427,233 @@ fn write_destination(destination: &Path) -> Result<()> {
         .write_all(b"\n")
         .context("failed to terminate primary-worktree destination")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod journal_tests {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    use super::*;
+
+    const V1: &str = r#"{"version":1,"topic_path":"/tmp/topic","topic_identity":"/tmp/id","source_branch":"topic","target_branch":"main","no_rebase":false,"no_remove":false,"no_squash":false,"yolo_stage_all":false,"squashed":false,"cleanup_pending":false,"validated_source":null,"validated_target":null}"#;
+    const V2: &str = r#"{"version":2,"topic_path":{"encoding":"base64","value":"L3RtcC90b3BpYw==","display":"/tmp/topic"},"topic_identity":{"encoding":"base64","value":"L3RtcC9pZA==","display":"/tmp/id"},"source_branch":"topic","target_branch":"main","no_rebase":false,"no_remove":false,"no_squash":false,"yolo_stage_all":false,"squashed":{"state":"not_started"},"cleanup_pending":false,"validated_source":null,"validated_target":null}"#;
+
+    #[test]
+    fn decodes_exact_v1_and_v2_fixtures() {
+        let v1 = decode_journal(V1.as_bytes()).unwrap();
+        let v2 = decode_journal(V2.as_bytes()).unwrap();
+        assert_eq!(v1.topic_path, Path::new("/tmp/topic"));
+        assert_eq!(v2.topic_identity, Path::new("/tmp/id"));
+    }
+
+    #[test]
+    fn new_write_has_exact_v2_fixture() {
+        let state = decode_journal(V1.as_bytes()).unwrap();
+        assert_eq!(
+            serde_json::to_string(&journal_v2(&state).unwrap()).unwrap(),
+            V2
+        );
+    }
+
+    #[test]
+    fn all_squash_states_survive_decode_and_reencode_exactly() {
+        let shapes = [
+            r#"{"state":"not_started"}"#,
+            r#"{"state":"skipped","reason":"single_commit"}"#,
+            r#"{"state":"prepared","checkpoint":{"topic_commit":"aaaa","target_commit":"bbbb","expected_tree":"cccc","message_bytes":{"encoding":"base64","value":"/wA="},"topic_branch":"topic","topic_worktree":{"encoding":"base64","value":"L3RtcC90b3BpYy3+","display":"informational path"}}}"#,
+            r#"{"state":"completed","resulting_commit":"deadbeef"}"#,
+        ];
+
+        for shape in shapes {
+            let encoded = V2.replace(r#"{"state":"not_started"}"#, shape);
+            let state = decode_journal(encoded.as_bytes()).unwrap();
+            assert_eq!(
+                serde_json::to_string(&journal_v2(&state).unwrap().squashed).unwrap(),
+                shape
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_message_and_path_bytes_round_trip_exactly() {
+        let shape = r#"{"state":"prepared","checkpoint":{"topic_commit":"aaaa","target_commit":"bbbb","expected_tree":"cccc","message_bytes":{"encoding":"base64","value":"/wA="},"topic_branch":"topic","topic_worktree":{"encoding":"base64","value":"L3RtcC90b3BpYy3+","display":"not derived from bytes"}}}"#;
+        let encoded = V2.replace(r#"{"state":"not_started"}"#, shape);
+        let state = decode_journal(encoded.as_bytes()).unwrap();
+        let SquashStateV2::Prepared { checkpoint } = &state.squash else {
+            panic!("expected prepared squash state");
+        };
+        assert_eq!(decode_bytes(&checkpoint.message_bytes).unwrap(), b"\xff\0");
+        assert_eq!(
+            decode_path(checkpoint.topic_worktree.clone())
+                .unwrap()
+                .as_os_str()
+                .as_bytes(),
+            b"/tmp/topic-\xfe"
+        );
+        assert_eq!(
+            serde_json::to_string(&journal_v2(&state).unwrap().squashed).unwrap(),
+            shape
+        );
+    }
+
+    #[test]
+    fn skipped_reasons_survive_safe_writes() {
+        for reason in ["disabled", "single_commit"] {
+            let shape = format!(r#"{{"state":"skipped","reason":"{reason}"}}"#);
+            let encoded = V2.replace(r#"{"state":"not_started"}"#, &shape);
+            let state = decode_journal(encoded.as_bytes()).unwrap();
+            assert_eq!(
+                serde_json::to_string(&journal_v2(&state).unwrap().squashed).unwrap(),
+                shape
+            );
+        }
+    }
+
+    #[test]
+    fn new_journals_persist_policy_and_single_commit_skips() {
+        let skipped = squash::SquashPlan {
+            applicable: false,
+            commit_count: 1,
+            generator_configured: true,
+            generator_trusted: true,
+        };
+        assert_eq!(
+            initial_squash_state(true, &skipped),
+            SquashStateV2::Skipped {
+                reason: SquashSkipReasonV2::Disabled
+            }
+        );
+        assert_eq!(
+            initial_squash_state(false, &skipped),
+            SquashStateV2::Skipped {
+                reason: SquashSkipReasonV2::SingleCommit
+            }
+        );
+        assert_eq!(
+            initial_squash_state(false, &squash::SquashPlan::skipped()),
+            SquashStateV2::NotStarted
+        );
+    }
+
+    #[test]
+    fn version_one_reader_rejects_version_two_shape() {
+        assert!(serde_json::from_str::<MergeJournalV1>(V2).is_err());
+    }
+
+    #[test]
+    fn refuses_unknown_versions_fields_states_and_noncanonical_bytes() {
+        assert!(decode_journal(V2.replace("\"version\":2", "\"version\":3").as_bytes()).is_err());
+        assert!(
+            decode_journal(
+                V2.replace("\"state\":\"not_started\"", "\"state\":\"future\"")
+                    .as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            decode_journal(
+                V2.replace(
+                    "\"display\":\"/tmp/topic\"",
+                    "\"display\":\"/tmp/topic\",\"extra\":true"
+                )
+                .as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            decode_journal(V2.replace("L3RtcC90b3BpYw==", "L3RtcC90b3BpYw").as_bytes()).is_err()
+        );
+    }
+
+    #[test]
+    fn v2_path_bytes_round_trip_without_using_display() {
+        let path = PathBuf::from(OsString::from_vec(b"/tmp/topic-\xff".to_vec()));
+        let mut encoded = encode_path(&path);
+        encoded.display = "informational only".into();
+        assert_eq!(decode_path(encoded).unwrap(), path);
+    }
+
+    #[test]
+    fn prepared_checkpoint_requires_exact_canonical_bytes() {
+        let prepared = V2.replace(
+            r#"{"state":"not_started"}"#,
+            r#"{"state":"prepared","checkpoint":{"topic_commit":"aaaa","target_commit":"bbbb","expected_tree":"cccc","message_bytes":{"encoding":"base64","value":"/w=="},"topic_branch":"topic","topic_worktree":{"encoding":"base64","value":"L3RtcC90b3BpYw==","display":"topic"}}}"#,
+        );
+        let journal = decode_journal(prepared.as_bytes()).unwrap();
+        assert!(journal.squash.prepared());
+        assert!(decode_journal(prepared.replace("/w==", "/w").as_bytes()).is_err());
+        assert!(
+            decode_journal(
+                prepared
+                    .replace(
+                        "\"topic_commit\":\"aaaa\"",
+                        "\"topic_commit\":\"aaaa\",\"extra\":true"
+                    )
+                    .as_bytes()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reading_v1_does_not_rewrite_it_until_a_safe_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let identity = Path::new("/tmp/id");
+        let path = journal_path(directory.path(), identity);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, V1).unwrap();
+        let state = read_journal(directory.path(), identity).unwrap().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), V1);
+        write_journal(directory.path(), &state).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<JournalVersion>(&fs::read(path).unwrap())
+                .unwrap()
+                .version,
+            2
+        );
+    }
+
+    #[test]
+    fn unvalidated_v1_completed_squash_binds_topic_head_before_safe_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let topic = directory.path().join("topic");
+        fs::create_dir(&topic).unwrap();
+        git::initialize_test_repository_with_commit(&topic).unwrap();
+        let head = HistoryObservation::new(&topic).head_commit().unwrap();
+
+        let identity = directory.path().join("topic-id");
+        let path = journal_path(directory.path(), &identity);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut fixture = serde_json::from_str::<serde_json::Value>(V1).unwrap();
+        fixture["topic_path"] = serde_json::Value::String(topic.display().to_string());
+        fixture["topic_identity"] = serde_json::Value::String(identity.display().to_string());
+        fixture["squashed"] = serde_json::Value::Bool(true);
+        let original = serde_json::to_vec(&fixture).unwrap();
+        fs::write(&path, &original).unwrap();
+
+        let decoded = decode_journal(&original).unwrap();
+        assert_eq!(decoded.squash, SquashStateV2::LegacyCompleted);
+        assert!(journal_v2(&decoded).is_err());
+
+        let state = read_journal(directory.path(), &identity).unwrap().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(state.squash.completed());
+        assert!(!state.squash.not_started());
+        assert_eq!(
+            state.squash,
+            SquashStateV2::Completed {
+                resulting_commit: head.clone()
+            }
+        );
+
+        write_journal(directory.path(), &state).unwrap();
+        let written: MergeJournalV2 = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(written.version, 2);
+        assert_eq!(
+            written.squashed,
+            SquashStateV2::Completed {
+                resulting_commit: head
+            }
+        );
+    }
 }
