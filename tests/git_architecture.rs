@@ -83,6 +83,38 @@ fn obsolete_branch_forwarding_interfaces_do_not_return() {
 }
 
 #[test]
+fn ordinary_merge_adapters_only_enter_the_journaled_executor_seam() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let lifecycle = fs::read_to_string(source_root.join("lifecycle.rs"))
+        .expect("lifecycle source should be readable");
+    let journaled = fs::read_to_string(source_root.join("lifecycle/journaled_merge.rs"))
+        .expect("journaled merge source should be readable");
+    let machine = fs::read_to_string(source_root.join("machine.rs"))
+        .expect("machine source should be readable");
+    let compact = without_whitespace(&journaled);
+
+    assert!(lifecycle.contains("journaled_merge::prepare"));
+    assert!(lifecycle.contains("prepared.run(&journaled_merge::MergeExecutionOutput::Human)"));
+    assert!(machine.contains("lifecycle::execute_merge_request(&input)"));
+    for forbidden in [
+        "plan_merge",
+        "execute_merge(",
+        "hook_approval",
+        "MergeJournal",
+    ] {
+        assert!(
+            !machine.contains(forbidden),
+            "src/machine.rs must not drive merge internals through `{forbidden}`"
+        );
+    }
+    assert!(compact.contains("enumPreparation{Ready(PreparedMerge),ApprovalRequired(PendingApproval),Complete(MergeOutcome),}"));
+    assert!(compact.contains("structPreparedMerge{request:MergeRequest,plan:MergePlan,}"));
+    assert!(!compact.contains("pub(crate)request:MergeRequest"));
+    assert!(!compact.contains("pub(crate)plan:MergePlan"));
+    assert!(!journaled.contains("trait "));
+}
+
+#[test]
 fn git_execution_stays_private_and_concrete() {
     let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/git.rs"))
         .expect("Git source should be readable");

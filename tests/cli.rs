@@ -2871,6 +2871,109 @@ fn json_merge_reports_pre_merge_approval_before_mutation() {
     assert!(git_output(&repo.linked, ["diff", "--cached", "--name-only"]).is_empty());
 }
 
+#[test]
+fn json_merge_reports_pre_remove_approval_before_mutation() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let marker = xdg.path().join("pre-remove-ran");
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        format!(
+            "hooks:\n  pre-remove:\n    - command: touch {}\n",
+            shell_quote(&marker)
+        ),
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(&repo.linked, ["commit", "-m", "configure pre-remove hook"]);
+    let topic_before = git_output(&repo.linked, ["rev-parse", "HEAD"]);
+    let target_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+    let worktrees_before = git_output(&repo.main, ["worktree", "list", "--porcelain"]);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-squash", "--output", "json"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let value = assert_json_pure(&output);
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["error"]["code"], "merge.hook_approval_required");
+    assert_eq!(value["context"]["approval"]["phase"], "pre-remove");
+    assert_eq!(
+        value["context"]["approval"]["commands"][0]["command"],
+        format!("touch {}", shell_quote(&marker))
+    );
+    assert_eq!(
+        git_output(&repo.linked, ["rev-parse", "HEAD"]),
+        topic_before
+    );
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), target_before);
+    assert_eq!(
+        git_output(&repo.main, ["worktree", "list", "--porcelain"]),
+        worktrees_before
+    );
+    assert!(!marker.exists());
+    assert!(!repo.main.join(".git/pando-state/lifecycle").exists());
+    assert!(!xdg.path().join("pando/trust.json").exists());
+}
+
+#[test]
+fn merge_reprepares_before_requesting_ordered_pre_remove_approval() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let pre_merge_marker = xdg.path().join("pre-merge-ran");
+    let pre_remove_marker = xdg.path().join("pre-remove-ran");
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        format!(
+            "hooks:\n  pre-merge:\n    - command: touch {}\n  pre-remove:\n    - command: touch {}\n",
+            shell_quote(&pre_merge_marker),
+            shell_quote(&pre_remove_marker),
+        ),
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(
+        &repo.linked,
+        ["commit", "-m", "configure ordered merge hooks"],
+    );
+    let topic_before = git_output(&repo.linked, ["rev-parse", "HEAD"]);
+    let target_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+    let worktrees_before = git_output(&repo.main, ["worktree", "list", "--porcelain"]);
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--no-squash"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let output = run_pty_command(command, b"y\nn\n");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let pre_merge = output.stderr.find("pre-merge commands").unwrap();
+    let pre_remove = output.stderr.find("pre-remove commands").unwrap();
+    assert!(pre_merge < pre_remove, "{}", output.stderr);
+    assert_eq!(
+        git_output(&repo.linked, ["rev-parse", "HEAD"]),
+        topic_before
+    );
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), target_before);
+    assert_eq!(
+        git_output(&repo.main, ["worktree", "list", "--porcelain"]),
+        worktrees_before
+    );
+    assert!(!pre_merge_marker.exists());
+    assert!(!pre_remove_marker.exists());
+    assert!(!repo.main.join(".git/pando-state/lifecycle").exists());
+    assert!(xdg.path().join("pando/trust.json").exists());
+}
+
 /// Writes a global config whose squash generator echoes a fixed message and
 /// saves the prompt it received, so tests can assert on both.
 fn squash_generator_config(xdg: &Path, prompt_log: &Path) {

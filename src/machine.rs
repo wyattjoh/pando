@@ -480,10 +480,7 @@ pub fn merge(
             },
         )
     };
-    let outcome = crate::lifecycle::execute_merge_request(
-        &input,
-        crate::lifecycle::MergeExecutionMode::Captured,
-    );
+    let outcome = crate::lifecycle::execute_merge_request(&input);
     let failed = outcome.result.is_err();
     let response = protocol::adapt(
         "merge",

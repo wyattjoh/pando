@@ -11,6 +11,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub(crate) mod journaled_merge;
+
 use crate::{
     Condition, Worktree, WorktreeKind,
     branch::Snapshot,
@@ -300,9 +302,9 @@ pub fn merge_preflight_outcome(error: &PreflightFailure) -> MergeOutcome {
 
 type PreflightResult<T> = std::result::Result<T, PreflightFailure>;
 
-/// Validated, read-only merge plan shared by command adapters.
+/// Validated, read-only state held behind the journaled merge preparation seam.
 #[derive(Debug)]
-pub struct MergePlan {
+struct MergePlan {
     pub repository: Repository,
     pub context: MergeContext,
     pub config: EffectiveConfig,
@@ -311,30 +313,6 @@ pub struct MergePlan {
     resuming_squash: bool,
     /// Ordered lifecycle effects. Planning never attempts or completes one.
     pub effects: Vec<Effect>,
-}
-
-impl MergePlan {
-    /// Whether this plan is the smallest clean lifecycle: integrate an already
-    /// fast-forwardable topic and intentionally retain its worktree.
-    #[must_use]
-    pub const fn is_clean_retained(&self) -> bool {
-        self.is_retained_execution() && !self.context.rebase_active && !self.needs_rebase
-    }
-
-    /// Whether the shared executor can run this integration lifecycle without
-    /// removing a worktree.
-    #[must_use]
-    pub const fn is_retained_execution(&self) -> bool {
-        (self.context.policy.no_remove || self.context.in_place) && !self.context.cleanup_pending
-    }
-}
-
-/// Controls whether lifecycle transcripts are rendered immediately or returned
-/// to a protocol adapter as diagnostics.
-#[derive(Clone, Copy, Debug)]
-pub enum MergeExecutionMode {
-    Human,
-    Captured,
 }
 
 fn output_for(animated: bool) -> LifecycleOutput {
@@ -432,120 +410,27 @@ fn merge_approval_context(candidate: &hook_approval::Candidate) -> MergeApproval
     }
 }
 
-/// Plans and executes one merge request as a command-owned protocol outcome.
-///
-/// This is the complete machine adapter seam. It owns planning and approval
-/// inspection so protocol adapters never infer lifecycle state from Git or the
-/// journal.
+/// Executes one structured merge request through read-only preparation and the
+/// opaque journaled merge authority.
 #[must_use]
-pub fn execute_merge_request(input: &MergeInput, mode: MergeExecutionMode) -> MergeOutcome {
-    let plan = match plan_merge(input.policy()) {
-        Ok(plan) => plan,
-        Err(error) => return merge_preflight_outcome(&error),
-    };
-    let approval = if plan.context.cleanup_pending {
-        None
-    } else {
-        match hook_approval::evaluate(
-            &plan.repository,
-            HookPhase::PreMerge,
-            &plan.config.pre_merge,
-        ) {
-            Ok(hook_approval::Evaluation::ApprovalRequired(candidate)) => Some(candidate),
-            Ok(
-                hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted { .. },
-            ) => None,
-            Err(error) => {
-                return MergeOutcome {
-                    result: Err(MergeError {
-                        code: "trust.read_failed".into(),
-                        message: format!("{error:#}"),
-                    }),
-                    context: MergeOutcomeContext::Lifecycle(plan.context.clone()),
-                    effects: plan.effects.clone(),
-                    diagnostics: Vec::new(),
-                    recovery: Vec::new(),
-                };
-            }
+pub(crate) fn execute_merge_request(input: &MergeInput) -> MergeOutcome {
+    match journaled_merge::prepare(journaled_merge::MergeRequest::ordinary(input)) {
+        journaled_merge::Preparation::Ready(prepared) => {
+            prepared.run(&journaled_merge::MergeExecutionOutput::Captured)
         }
-    };
-    merge_outcome(&plan, input, approval.as_ref(), mode)
+        journaled_merge::Preparation::ApprovalRequired(pending) => pending.into_outcome(),
+        journaled_merge::Preparation::Complete(outcome) => outcome,
+    }
 }
 
-/// Converts one validated merge plan into the command-owned protocol outcome.
-///
-/// Human presentation uses this lower seam after gathering any interactive
-/// approval. Machine adapters must call [`execute_merge_request`] instead.
 #[must_use]
 #[allow(clippy::too_many_lines)] // The outcome records every version 1 lifecycle contract in one seam.
-pub fn merge_outcome(
+fn run_prepared_merge(
     plan: &MergePlan,
     input: &MergeInput,
-    approval: Option<&hook_approval::Candidate>,
-    mode: MergeExecutionMode,
+    output: &journaled_merge::MergeExecutionOutput,
 ) -> MergeOutcome {
-    let squash_blocked = !plan.context.cleanup_pending && plan.squash.approval_required();
-    let hook_blocked = if plan.context.cleanup_pending {
-        !plan.context.pre_remove_hooks_trusted
-    } else {
-        approval.is_some()
-    };
-    let approval_blocked = squash_blocked || hook_blocked;
-    let context = approval.map_or_else(
-        || MergeOutcomeContext::Lifecycle(plan.context.clone()),
-        |candidate| MergeOutcomeContext::Approval {
-            lifecycle: plan.context.clone(),
-            approval: merge_approval_context(candidate),
-        },
-    );
-    if input.dry_run {
-        return MergeOutcome {
-            result: Ok(MergeResult::DryRun {
-                plan: if plan.context.in_place {
-                    "in_place"
-                } else if input.no_remove {
-                    "retained_topic"
-                } else {
-                    "cleanup"
-                }
-                .into(),
-                policy: plan.context.policy,
-                ready: !approval_blocked,
-                approval_required: approval_blocked,
-            }),
-            context,
-            effects: plan.effects.clone(),
-            diagnostics: Vec::new(),
-            recovery: if approval_blocked {
-                vec![merge_trust_recovery(plan, false)]
-            } else {
-                Vec::new()
-            },
-        };
-    }
-    if approval_blocked {
-        return MergeOutcome {
-            result: Err(MergeError {
-                code: if squash_blocked {
-                    "merge.squash_approval_required"
-                } else {
-                    "merge.hook_approval_required"
-                }
-                .into(),
-                message: if squash_blocked {
-                    "the shared squash message generator is not trusted"
-                } else {
-                    "configured lifecycle hooks are not trusted"
-                }
-                .into(),
-            }),
-            context,
-            effects: plan.effects.clone(),
-            diagnostics: Vec::new(),
-            recovery: vec![merge_trust_recovery(plan, squash_blocked)],
-        };
-    }
-    let execution = execute_merge(plan, mode);
+    let execution = execute_merge(plan, output);
     let diagnostics = merge_diagnostics(execution.diagnostics);
     if let Some((kind, message)) = execution.failure {
         let working_directory = execution
@@ -637,7 +522,7 @@ fn merge_trust_recovery(
 /// # Errors
 /// Returns an error for an invalid or blocked lifecycle state.
 #[allow(clippy::too_many_lines)]
-pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
+fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = RepositoryObservation::new(&cwd).repository()?;
     let primary = repository
@@ -1649,7 +1534,6 @@ enum MergeWorktreeOutcome {
 
 #[derive(Clone, Copy)]
 enum MergeIntent {
-    Normal,
     StageAll,
 }
 
@@ -1719,33 +1603,55 @@ pub fn remove_dry_run(branches: &[String], force: bool) -> Result<()> {
 /// # Errors
 /// Returns an error when merge preflight fails or output cannot be rendered.
 pub fn merge_dry_run(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
-    let plan = plan_merge(MergePolicy::new(no_rebase, no_remove, no_squash))?;
-    if plan.squash.applicable() {
-        ui::info(if plan.squash.commit_count() == 0 {
+    let input = MergeInput {
+        no_rebase,
+        no_remove,
+        no_squash,
+        dry_run: true,
+    };
+    let journaled_merge::Preparation::Complete(outcome) =
+        journaled_merge::prepare(journaled_merge::MergeRequest::ordinary(&input))
+    else {
+        unreachable!("dry-run preparation never grants mutation authority")
+    };
+    if let Err(error) = &outcome.result {
+        bail!(error.message.clone());
+    }
+    let context = match &outcome.context {
+        MergeOutcomeContext::Lifecycle(context)
+        | MergeOutcomeContext::Approval {
+            lifecycle: context, ..
+        } => context,
+        MergeOutcomeContext::Completed { .. } | MergeOutcomeContext::Unavailable {} => {
+            unreachable!("a successful dry run has planned lifecycle context")
+        }
+    };
+    if context.squashes {
+        ui::info(if context.squash_commits == 0 {
             format!(
                 "Would squash the topic into a single generated-message commit after the rebase onto {}.",
-                plan.context.target_branch
+                context.target_branch
             )
         } else {
             format!(
                 "Would squash {} commits into a single generated-message commit.",
-                plan.squash.commit_count()
+                context.squash_commits
             )
         })?;
     }
-    let follow_up = if plan.context.in_place {
+    let follow_up = if context.in_place {
         format!(
             " and switch the primary worktree to {}",
-            plan.context.target_branch
+            context.target_branch
         )
-    } else if plan.context.policy.no_remove {
+    } else if context.policy.no_remove {
         " and retain the topic worktree".to_owned()
     } else {
         " and remove the topic worktree".to_owned()
     };
     ui::finish(format!(
         "Would merge {} into {}{follow_up}; no changes made.",
-        plan.context.source_branch, plan.context.target_branch,
+        context.source_branch, context.target_branch,
     ))
 }
 
@@ -1800,20 +1706,11 @@ fn execute_merge_hooks(
     diagnostic_phase: &'static str,
     steps: &[crate::config::HookStep],
     destination: &Path,
-    mode: MergeExecutionMode,
+    output: &journaled_merge::MergeExecutionOutput,
     diagnostics: &mut Vec<MergeDiagnostic>,
 ) -> Result<()> {
-    let policy = match mode {
-        MergeExecutionMode::Human => hook::OutputPolicy::Streamed,
-        MergeExecutionMode::Captured => hook::OutputPolicy::Captured,
-    };
-    let execution = hook::execute(hook_phase, steps, destination, policy)?;
-    if let hook::HookOutput::Captured(output) = execution.output {
-        for step in output {
-            push_captured_merge_diagnostic(diagnostics, diagnostic_phase, "stdout", step.stdout);
-            push_captured_merge_diagnostic(diagnostics, diagnostic_phase, "stderr", step.stderr);
-        }
-    }
+    let execution = hook::execute(hook_phase, steps, destination, output.hook_policy())?;
+    output.record_hook_output(diagnostics, diagnostic_phase, execution.output);
     match execution.outcome {
         HookOutcome::Success => Ok(()),
         HookOutcome::Failed(status) => Err(anyhow::anyhow!(
@@ -1858,7 +1755,10 @@ fn execution_failure(
 /// effect, both of which are planner invariants.
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecutionOutcome {
+fn execute_merge(
+    plan: &MergePlan,
+    output: &journaled_merge::MergeExecutionOutput,
+) -> MergeExecutionOutcome {
     let mut effects = plan.effects.clone();
     let mut diagnostics = Vec::new();
     let current = plan.repository.current();
@@ -1947,7 +1847,7 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
         }
     };
     if plan.context.cleanup_pending {
-        return execute_merge_cleanup(plan, &state, effects, diagnostics, mode);
+        return execute_merge_cleanup(plan, &state, effects, diagnostics, output);
     }
     if !plan.context.journaled {
         mark_effect(&mut effects, "journal", true, false);
@@ -1966,61 +1866,30 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
 
     if plan.needs_rebase || plan.context.rebase_active {
         mark_effect(&mut effects, "rebase", true, false);
-        let rebase_result = match (mode, plan.context.rebase_active) {
-            (MergeExecutionMode::Human, true) => ui::run_timed(
-                true,
+        let rebase_result = if plan.context.rebase_active {
+            output.run_git(
                 "Continuing rebase...",
                 "Continued rebase",
                 "Failed to continue the rebase",
-                |animated| {
-                    LifecycleMutation::new(&current.path).continue_rebase(output_for(animated))
-                },
+                |policy| LifecycleMutation::new(&current.path).continue_rebase(policy),
             )
-            .and_then(|transcript| {
-                report(&transcript)?;
-                Ok(transcript)
-            }),
-            (MergeExecutionMode::Human, false) => ui::run_timed(
-                true,
+        } else {
+            output.run_git(
                 &format!("Rebasing onto {}...", state.target_branch),
                 &format!("Rebased onto {}", state.target_branch),
                 &format!("Failed to rebase onto {}", state.target_branch),
-                |animated| {
-                    LifecycleMutation::new(&current.path)
-                        .rebase_onto(&state.target_branch, output_for(animated))
+                |policy| {
+                    LifecycleMutation::new(&current.path).rebase_onto(&state.target_branch, policy)
                 },
             )
-            .and_then(|transcript| {
-                report(&transcript)?;
-                Ok(transcript)
-            }),
-            (MergeExecutionMode::Captured, true) => {
-                LifecycleMutation::new(&current.path).continue_rebase(LifecycleOutput::Captured)
-            }
-            (MergeExecutionMode::Captured, false) => LifecycleMutation::new(&current.path)
-                .rebase_onto(&state.target_branch, LifecycleOutput::Captured),
         };
         match rebase_result {
             Ok(transcript) => {
-                if matches!(mode, MergeExecutionMode::Captured) && !transcript.is_empty() {
-                    push_merge_diagnostic(
-                        &mut diagnostics,
-                        "rebase",
-                        "stderr",
-                        transcript.as_bytes(),
-                    );
-                }
+                output.record_transcript(&mut diagnostics, "rebase", &transcript);
                 mark_effect(&mut effects, "rebase", true, true);
             }
             Err(error) => {
-                if matches!(mode, MergeExecutionMode::Captured) {
-                    push_merge_diagnostic(
-                        &mut diagnostics,
-                        "rebase",
-                        "stderr",
-                        error.to_string().as_bytes(),
-                    );
-                }
+                output.record_error(&mut diagnostics, "rebase", &error);
                 return execution_failure(
                     plan,
                     effects,
@@ -2060,36 +1929,23 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                 );
             }
         };
-        if matches!(mode, MergeExecutionMode::Human) {
-            if let Err(error) = ui::step(render::commit_message(prepared.message())) {
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Squash,
-                    MergeExecutionFailureKind::Squash,
-                    error,
-                );
-            }
-        } else {
-            push_merge_diagnostic(
-                &mut diagnostics,
-                "squash",
-                "stderr",
-                prepared.message().as_bytes(),
+        if let Err(error) = output.present_commit_message(&mut diagnostics, prepared.message()) {
+            return execution_failure(
+                plan,
+                effects,
+                diagnostics,
+                MergePhase::Squash,
+                MergeExecutionFailureKind::Squash,
+                error,
             );
         }
         let commit_count = prepared.commit_count();
-        let collapse = match mode {
-            MergeExecutionMode::Human => ui::run_timed(
-                true,
-                &format!("Resuming squash of {commit_count} commits..."),
-                "Squashed the topic into a single commit",
-                "Failed to resume the squash",
-                |_| squash::collapse(prepared).map_err(anyhow::Error::from),
-            ),
-            MergeExecutionMode::Captured => squash::collapse(prepared).map_err(anyhow::Error::from),
-        };
+        let collapse = output.run_action(
+            &format!("Resuming squash of {commit_count} commits..."),
+            "Squashed the topic into a single commit",
+            "Failed to resume the squash",
+            || squash::collapse(prepared).map_err(anyhow::Error::from),
+        );
         let collapsed = match collapse {
             Ok(collapsed) => collapsed,
             Err(error) => {
@@ -2189,25 +2045,21 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                     );
                 }
             };
-            let preparation = match mode {
-                MergeExecutionMode::Human => ui::run_timed(
-                    true,
-                    "Generating squash commit message...",
-                    "Generated squash commit message:",
-                    "Failed to generate the squash commit message",
-                    |_| {
-                        let preparation = squash::prepare(required)?;
-                        if let squash::Preparation::Prepared(prepared) = &preparation {
-                            state.squash = SquashStateV2::Prepared {
-                                checkpoint: squash_checkpoint_v2(&prepared.checkpoint()),
-                            };
-                            write_journal(&plan.repository.common_dir, &state)?;
-                        }
-                        Ok(preparation)
-                    },
-                ),
-                MergeExecutionMode::Captured => squash::prepare(required),
-            };
+            let preparation = output.run_action(
+                "Generating squash commit message...",
+                "Generated squash commit message:",
+                "Failed to generate the squash commit message",
+                || {
+                    let preparation = squash::prepare(required)?;
+                    if let squash::Preparation::Prepared(prepared) = &preparation {
+                        state.squash = SquashStateV2::Prepared {
+                            checkpoint: squash_checkpoint_v2(&prepared.checkpoint()),
+                        };
+                        write_journal(&plan.repository.common_dir, &state)?;
+                    }
+                    Ok(preparation)
+                },
+            );
             let prepared = match preparation {
                 Ok(squash::Preparation::Prepared(prepared)) => prepared,
                 Ok(squash::Preparation::Skipped) => {
@@ -2244,53 +2096,24 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                     );
                 }
             };
-            if matches!(mode, MergeExecutionMode::Captured) {
-                state.squash = SquashStateV2::Prepared {
-                    checkpoint: squash_checkpoint_v2(&prepared.checkpoint()),
-                };
-                if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
-                    return execution_failure(
-                        plan,
-                        effects,
-                        diagnostics,
-                        MergePhase::Squash,
-                        MergeExecutionFailureKind::Journal,
-                        error,
-                    );
-                }
-            }
-            if matches!(mode, MergeExecutionMode::Human) {
-                if let Err(error) = ui::step(render::commit_message(prepared.message())) {
-                    return execution_failure(
-                        plan,
-                        effects,
-                        diagnostics,
-                        MergePhase::Squash,
-                        MergeExecutionFailureKind::Squash,
-                        error,
-                    );
-                }
-            } else {
-                push_merge_diagnostic(
-                    &mut diagnostics,
-                    "squash",
-                    "stderr",
-                    prepared.message().as_bytes(),
+            if let Err(error) = output.present_commit_message(&mut diagnostics, prepared.message())
+            {
+                return execution_failure(
+                    plan,
+                    effects,
+                    diagnostics,
+                    MergePhase::Squash,
+                    MergeExecutionFailureKind::Squash,
+                    error,
                 );
             }
             let commit_count = prepared.commit_count();
-            let collapse = match mode {
-                MergeExecutionMode::Human => ui::run_timed(
-                    true,
-                    &format!("Squashing {commit_count} commits..."),
-                    "Squashed the topic into a single commit",
-                    "Failed to squash the topic",
-                    |_| squash::collapse(prepared).map_err(anyhow::Error::from),
-                ),
-                MergeExecutionMode::Captured => {
-                    squash::collapse(prepared).map_err(anyhow::Error::from)
-                }
-            };
+            let collapse = output.run_action(
+                &format!("Squashing {commit_count} commits..."),
+                "Squashed the topic into a single commit",
+                "Failed to squash the topic",
+                || squash::collapse(prepared).map_err(anyhow::Error::from),
+            );
             let collapsed = match collapse {
                 Ok(collapsed) => collapsed,
                 Err(error) => {
@@ -2376,7 +2199,7 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
             "validation",
             &plan.config.pre_merge,
             &current.path,
-            mode,
+            output,
             &mut diagnostics,
         );
         if let Err(error) = hook_result {
@@ -2476,25 +2299,16 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
         );
     }
     if plan.context.in_place {
-        let switch_result = match mode {
-            MergeExecutionMode::Human => ui::run_timed(
-                true,
+        let switch_result = output
+            .run_git(
                 &format!("Switching to {}...", state.target_branch),
                 &format!("Switched to {}", state.target_branch),
                 &format!("Failed to switch to {}", state.target_branch),
-                |animated| {
-                    LifecycleMutation::new(primary)
-                        .switch_branch(&state.target_branch, output_for(animated))
+                |policy| {
+                    LifecycleMutation::new(primary).switch_branch(&state.target_branch, policy)
                 },
             )
-            .and_then(|transcript| {
-                report(&transcript)?;
-                Ok(())
-            }),
-            MergeExecutionMode::Captured => LifecycleMutation::new(primary)
-                .switch_branch(&state.target_branch, LifecycleOutput::Captured)
-                .map(|_| ()),
-        };
+            .map(|_| ());
         if let Err(error) = switch_result {
             return execution_failure(
                 plan,
@@ -2544,24 +2358,12 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
         );
     }
     mark_effect(&mut effects, "fast_forward_merge", true, false);
-    let merge_result = match mode {
-        MergeExecutionMode::Human => ui::run_timed(
-            true,
-            &format!("Merging into {}...", state.target_branch),
-            &format!("Merged into {}", state.target_branch),
-            &format!("Failed to merge into {}", state.target_branch),
-            |animated| {
-                LifecycleMutation::new(primary)
-                    .fast_forward(&state.source_branch, output_for(animated))
-            },
-        )
-        .and_then(|transcript| {
-            report(&transcript)?;
-            Ok(transcript)
-        }),
-        MergeExecutionMode::Captured => LifecycleMutation::new(primary)
-            .fast_forward(&state.source_branch, LifecycleOutput::Captured),
-    };
+    let merge_result = output.run_git(
+        &format!("Merging into {}...", state.target_branch),
+        &format!("Merged into {}", state.target_branch),
+        &format!("Failed to merge into {}", state.target_branch),
+        |policy| LifecycleMutation::new(primary).fast_forward(&state.source_branch, policy),
+    );
     let transcript = match merge_result {
         Ok(transcript) => transcript,
         Err(error) => {
@@ -2575,14 +2377,7 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
             );
         }
     };
-    if matches!(mode, MergeExecutionMode::Captured) && !transcript.is_empty() {
-        push_merge_diagnostic(
-            &mut diagnostics,
-            "integration",
-            "stderr",
-            transcript.as_bytes(),
-        );
-    }
+    output.record_transcript(&mut diagnostics, "integration", &transcript);
     mark_effect(&mut effects, "fast_forward_merge", true, true);
     if plan.context.policy.removes_topic(plan.context.in_place) {
         state.cleanup_pending = true;
@@ -2596,7 +2391,7 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                 error,
             );
         }
-        return execute_merge_cleanup(plan, &state, effects, diagnostics, mode);
+        return execute_merge_cleanup(plan, &state, effects, diagnostics, output);
     }
     mark_effect(&mut effects, "journal_cleanup", true, false);
     if let Err(error) = remove_journal(&plan.repository.common_dir, &state.topic_identity) {
@@ -2628,7 +2423,7 @@ fn execute_merge_cleanup(
     state: &MergeJournal,
     mut effects: Vec<Effect>,
     mut diagnostics: Vec<MergeDiagnostic>,
-    mode: MergeExecutionMode,
+    output: &journaled_merge::MergeExecutionOutput,
 ) -> MergeExecutionOutcome {
     let failure = |effects, diagnostics, kind, error: anyhow::Error| {
         execution_failure(plan, effects, diagnostics, MergePhase::Cleanup, kind, error)
@@ -2664,7 +2459,7 @@ fn execute_merge_cleanup(
         "cleanup",
         &plan.config.pre_remove,
         &state.topic_path,
-        mode,
+        output,
         &mut diagnostics,
     );
     if let Err(error) = hook_result {
@@ -2711,40 +2506,15 @@ fn execute_merge_cleanup(
         .expect("a merge plan always has a primary worktree");
     mark_effect(&mut effects, "remove_worktree", true, false);
     let mutation = git::WorktreeMutation::new(primary);
-    let removal = match mode {
-        MergeExecutionMode::Human => mutation
-            .remove(
-                &state.topic_path,
-                git::RemovalMode::Safe,
-                git::RemovalOutput::Displayed,
-            )
-            .map(|_| ()),
-        MergeExecutionMode::Captured => mutation
-            .remove(
-                &state.topic_path,
-                git::RemovalMode::Safe,
-                git::RemovalOutput::Captured,
-            )
-            .and_then(|output| {
-                let output = output.expect("captured removal returns diagnostics");
-                push_merge_diagnostic(&mut diagnostics, "cleanup", "stdout", &output.stdout);
-                push_merge_diagnostic(&mut diagnostics, "cleanup", "stderr", &output.stderr);
-                if output.status.success() {
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!("git worktree remove failed"))
-                }
-            }),
-    };
+    let removal = mutation
+        .remove(
+            &state.topic_path,
+            git::RemovalMode::Safe,
+            output.removal_output(),
+        )
+        .and_then(|removal| output.finish_removal(removal, &mut diagnostics));
     if let Err(error) = removal {
-        if matches!(mode, MergeExecutionMode::Human) {
-            push_merge_diagnostic(
-                &mut diagnostics,
-                "cleanup",
-                "stderr",
-                error.to_string().as_bytes(),
-            );
-        }
+        output.record_removal_error(&mut diagnostics, &error);
         return failure(
             effects,
             diagnostics,
@@ -2755,6 +2525,16 @@ fn execute_merge_cleanup(
     mark_effect(&mut effects, "remove_worktree", true, true);
     mark_effect(&mut effects, "destination", true, true);
     let destination = Some(BytePath::path(primary));
+    if let Err(error) = output.write_destination(primary) {
+        let mut outcome = failure(
+            effects,
+            diagnostics,
+            MergeExecutionFailureKind::Cleanup,
+            error,
+        );
+        outcome.destination = destination;
+        return outcome;
+    }
 
     mark_effect(&mut effects, "journal_cleanup", true, false);
     if let Err(error) = remove_journal(&plan.repository.common_dir, &state.topic_identity) {
@@ -2787,10 +2567,67 @@ fn execute_merge_cleanup(
 ///
 /// Returns an error when merge preconditions, hooks, Git execution, or cleanup fails.
 pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
-    merge_inner(
-        MergePolicy::new(no_rebase, no_remove, no_squash),
-        MergeIntent::Normal,
-    )
+    let input = MergeInput {
+        no_rebase,
+        no_remove,
+        no_squash,
+        dry_run: false,
+    };
+    let mut preparation = journaled_merge::prepare(journaled_merge::MergeRequest::ordinary(&input));
+    loop {
+        match preparation {
+            journaled_merge::Preparation::Ready(prepared) => {
+                return finish_human_merge(
+                    &prepared.run(&journaled_merge::MergeExecutionOutput::Human),
+                );
+            }
+            journaled_merge::Preparation::ApprovalRequired(pending) => {
+                if pending.requirement() == journaled_merge::ApprovalRequirement::SquashGenerator {
+                    return pending.approve_interactively();
+                }
+                pending.approve_interactively()?;
+                preparation = pending.reprepare();
+            }
+            journaled_merge::Preparation::Complete(outcome) => {
+                return finish_human_merge(&outcome);
+            }
+        }
+    }
+}
+
+fn finish_human_merge(outcome: &MergeOutcome) -> Result<()> {
+    let epilogue = match &outcome.result {
+        Ok(MergeResult::InPlace { .. }) => "; primary worktree switched to target.",
+        Ok(MergeResult::Retained { .. }) => "; worktree retained.",
+        Ok(MergeResult::Removed { .. }) => "; worktree removed.",
+        Ok(MergeResult::DryRun { .. }) => {
+            unreachable!("human merge execution is not a dry run")
+        }
+        Err(error) => bail!(error.message.clone()),
+    };
+    let context = match &outcome.context {
+        MergeOutcomeContext::Lifecycle(context)
+        | MergeOutcomeContext::Approval {
+            lifecycle: context, ..
+        }
+        | MergeOutcomeContext::Completed {
+            initial: context, ..
+        } => context,
+        MergeOutcomeContext::Unavailable {} => {
+            unreachable!("a successful merge always has lifecycle context")
+        }
+    };
+    let squashed = outcome
+        .effects
+        .iter()
+        .find(|effect| effect.action == "squash")
+        .is_some_and(|effect| effect.completed);
+    ui::finish(styled_merge_summary(
+        &context.source_branch,
+        &context.target_branch,
+        squashed,
+        epilogue,
+    ))
 }
 
 /// Integrates local changes directly into one generated squash commit.
@@ -2807,74 +2644,6 @@ pub fn merge_yolo(no_rebase: bool, no_remove: bool) -> Result<()> {
 
 #[allow(clippy::too_many_lines)] // This is the explicit lifecycle state-machine boundary.
 fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
-    if matches!(intent, MergeIntent::Normal) {
-        let plan = plan_merge(policy)?;
-        if !plan.context.cleanup_pending && plan.squash.approval_required() {
-            bail!(
-                "shared squash message generator approval is required; run pando trust merge-approve, or rerun with --no-squash"
-            );
-        }
-        if !plan.context.cleanup_pending {
-            hook_approval::approve_interactively(
-                &plan.repository,
-                HookPhase::PreMerge,
-                &plan.config.pre_merge,
-            )?;
-        }
-        if plan.context.cleanup_pending || policy.removes_topic(plan.context.in_place) {
-            hook_approval::approve_interactively(
-                &plan.repository,
-                HookPhase::PreRemove,
-                &plan.config.pre_remove,
-            )?;
-        }
-        // Approval changes trust state, so execution consumes a fresh
-        // validated plan rather than the pre-approval snapshot.
-        let plan = plan_merge(policy)?;
-        let input = MergeInput {
-            no_rebase: policy.no_rebase,
-            no_remove: policy.no_remove,
-            no_squash: policy.no_squash,
-            dry_run: false,
-        };
-        let outcome = merge_outcome(&plan, &input, None, MergeExecutionMode::Human);
-        let destination = match &outcome.result {
-            Ok(
-                MergeResult::InPlace { destination }
-                | MergeResult::Removed { destination }
-                | MergeResult::Retained { destination },
-            ) => destination.is_some(),
-            Ok(MergeResult::DryRun { .. }) | Err(_) => false,
-        };
-        if destination {
-            write_destination(
-                plan.repository
-                    .primary
-                    .as_ref()
-                    .expect("a merge plan always has a primary worktree"),
-            )?;
-        }
-        let epilogue = match &outcome.result {
-            Ok(MergeResult::InPlace { .. }) => "; primary worktree switched to target.",
-            Ok(MergeResult::Retained { .. }) => "; worktree retained.",
-            Ok(MergeResult::Removed { .. }) => "; worktree removed.",
-            Ok(MergeResult::DryRun { .. }) => {
-                unreachable!("human merge execution is not a dry run")
-            }
-            Err(error) => bail!(error.message.clone()),
-        };
-        let squashed = outcome
-            .effects
-            .iter()
-            .find(|effect| effect.action == "squash")
-            .is_some_and(|effect| effect.completed);
-        return ui::finish(styled_merge_summary(
-            &plan.context.source_branch,
-            &plan.context.target_branch,
-            squashed,
-            epilogue,
-        ));
-    }
     let yolo_stage_all = matches!(intent, MergeIntent::StageAll);
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = RepositoryObservation::new(&cwd).repository()?;
@@ -3123,7 +2892,7 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             "pre_merge",
             &config.pre_merge,
             &repository.current().path,
-            MergeExecutionMode::Human,
+            &journaled_merge::MergeExecutionOutput::Human,
             &mut Vec::new(),
         )?;
         if current_history.status()?.is_dirty() {
@@ -3191,7 +2960,7 @@ fn cleanup_merge(repository: &Repository, state: &MergeJournal) -> Result<()> {
         "pre_remove",
         &config.pre_remove,
         &state.topic_path,
-        MergeExecutionMode::Human,
+        &journaled_merge::MergeExecutionOutput::Human,
         &mut Vec::new(),
     )?;
     let worktree = repository
