@@ -1390,9 +1390,12 @@ fn already_registered(branch: &str, path: &Path) -> anyhow::Error {
 
 fn render_plan_blocker(branch: &str, blocker: PlanBlocker) -> anyhow::Error {
     match blocker {
-        PlanBlocker::InvalidBranch { message } | PlanBlocker::ConfigInvalid { message } => {
-            anyhow::anyhow!(message)
-        }
+        PlanBlocker::InvalidBranch { message }
+        | PlanBlocker::ConfigInvalid { message }
+        | PlanBlocker::RootUnavailable { message }
+        | PlanBlocker::DestinationInvalid { message }
+        | PlanBlocker::FetchNotApplicable { message }
+        | PlanBlocker::BaseUnavailable { message } => anyhow::anyhow!(message),
         PlanBlocker::RegisteredForCreate { worktree } => already_registered(branch, &worktree.path),
         PlanBlocker::DestinationUnavailable { worktree } => anyhow::anyhow!(
             "branch {branch:?} is registered at {} but that worktree is {}; inspect it with 'git worktree list' and repair or prune it explicitly with Git",
@@ -1401,9 +1404,6 @@ fn render_plan_blocker(branch: &str, blocker: PlanBlocker) -> anyhow::Error {
         ),
         PlanBlocker::PrimaryUnavailable => {
             anyhow::anyhow!("creating worktrees from a bare repository is not supported")
-        }
-        PlanBlocker::RootUnavailable { message } | PlanBlocker::DestinationInvalid { message } => {
-            anyhow::anyhow!(message)
         }
         PlanBlocker::DestinationCollision => anyhow::anyhow!(
             "the configured destination for branch {branch:?} already exists or is registered; Pando will not adopt, move, or delete it"
@@ -1414,9 +1414,6 @@ fn render_plan_blocker(branch: &str, blocker: PlanBlocker) -> anyhow::Error {
         ),
         PlanBlocker::IrrelevantRemote | PlanBlocker::UnknownRemote => {
             anyhow::anyhow!("the selected remote does not apply to branch {branch:?}")
-        }
-        PlanBlocker::FetchNotApplicable { message } | PlanBlocker::BaseUnavailable { message } => {
-            anyhow::anyhow!(message)
         }
         PlanBlocker::RemoteSelectionRequired { .. } | PlanBlocker::ApprovalRequired { .. } => {
             unreachable!("the human adapter resolves interactive blockers")
