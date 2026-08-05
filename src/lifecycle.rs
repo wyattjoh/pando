@@ -307,7 +307,7 @@ pub struct MergePlan {
     pub context: MergeContext,
     pub config: EffectiveConfig,
     pub needs_rebase: bool,
-    pub squash: squash::SquashPlan,
+    pub(crate) squash: squash::Assessment,
     /// Ordered lifecycle effects. Planning never attempts or completes one.
     pub effects: Vec<Effect>,
 }
@@ -733,15 +733,15 @@ pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
         && journal
             .as_ref()
             .is_none_or(|state| state.squash.not_started());
-    let squash = squash::plan(
-        &repository,
-        &config,
-        &target,
-        squash_enabled,
-        !rebase_active,
-        false,
-    )?;
-    if squash.applicable && !squash.generator_configured {
+    let squash = squash::assess(squash::AssessRequest {
+        repository: &repository,
+        config: &config,
+        target: &target,
+        enabled: squash_enabled,
+        final_history: !rebase_active,
+        include_staged: false,
+    })?;
+    if squash.applicable() && !squash.generator_configured() {
         return Err(preflight(
             PreflightFailureKind::SquashGeneratorMissing,
             "no squash message generator is configured; set merge.generation.command or commit.generation.command, or rerun with --no-squash",
@@ -751,7 +751,7 @@ pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
         MergePhase::Cleanup
     } else if rebase_active {
         MergePhase::Rebase
-    } else if squash.applicable {
+    } else if squash.applicable() {
         MergePhase::Squash
     } else {
         MergePhase::Planned
@@ -785,10 +785,10 @@ pub fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
         cleanup_pending,
         journaled: journal.is_some(),
         rebase_active,
-        squashes: squash.applicable,
-        squash_commits: squash.commit_count,
-        squash_generator_configured: squash.generator_configured,
-        squash_generator_trusted: squash.generator_trusted,
+        squashes: squash.applicable(),
+        squash_commits: squash.commit_count(),
+        squash_generator_configured: squash.generator_configured(),
+        squash_generator_trusted: squash.generator_trusted(),
         pre_merge_hooks_trusted,
         pre_remove_hooks_trusted,
     };
@@ -948,12 +948,18 @@ impl SquashStateV2 {
     }
 }
 
-fn initial_squash_state(squash_disabled: bool, plan: &squash::SquashPlan) -> SquashStateV2 {
+fn initial_squash_state(squash_disabled: bool, assessment: &squash::Assessment) -> SquashStateV2 {
     if squash_disabled {
         SquashStateV2::Skipped {
             reason: SquashSkipReasonV2::Disabled,
         }
-    } else if !plan.applicable && plan.commit_count == 1 {
+    } else if matches!(
+        assessment,
+        squash::Assessment::Skipped {
+            reason: squash::SkipReason::SingleCommit,
+            ..
+        }
+    ) {
         SquashStateV2::Skipped {
             reason: SquashSkipReasonV2::SingleCommit,
         }
@@ -977,7 +983,10 @@ struct SquashCheckpointV2 {
     expected_tree: String,
     message_bytes: EncodedBytes,
     topic_branch: String,
+    target_branch: String,
     topic_worktree: EncodedPath,
+    commit_count: usize,
+    include_staged: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1707,8 +1716,8 @@ pub fn remove_dry_run(branches: &[String], force: bool) -> Result<()> {
 /// Returns an error when merge preflight fails or output cannot be rendered.
 pub fn merge_dry_run(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
     let plan = plan_merge(MergePolicy::new(no_rebase, no_remove, no_squash))?;
-    if plan.squash.applicable {
-        ui::info(if plan.squash.commit_count == 0 {
+    if plan.squash.applicable() {
+        ui::info(if plan.squash.commit_count() == 0 {
             format!(
                 "Would squash the topic into a single generated-message commit after the rebase onto {}.",
                 plan.context.target_branch
@@ -1716,7 +1725,7 @@ pub fn merge_dry_run(no_rebase: bool, no_remove: bool, no_squash: bool) -> Resul
         } else {
             format!(
                 "Would squash {} commits into a single generated-message commit.",
-                plan.squash.commit_count
+                plan.squash.commit_count()
             )
         })?;
     }
@@ -2018,67 +2027,110 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
             }
         }
     }
-    if plan.squash.applicable && state.squash.not_started() {
-        mark_effect(&mut effects, "squash", true, false);
-        let refreshed = match squash::plan(
-            &plan.repository,
-            &plan.config,
-            &state.target_branch,
-            true,
-            true,
-            false,
-        ) {
-            Ok(refreshed) => refreshed,
-            Err(error) => {
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Squash,
-                    MergeExecutionFailureKind::Squash,
-                    error,
-                );
-            }
-        };
-        if refreshed.approval_required() || !refreshed.generator_configured {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Squash,
-                MergeExecutionFailureKind::StalePlan,
-                "squash generator readiness changed after merge planning; retry after resolving trust or configuration",
-            );
-        }
-        if refreshed.applicable {
-            let message = match mode {
+    if plan.squash.applicable() && state.squash.not_started() {
+        'squash_phase: {
+            mark_effect(&mut effects, "squash", true, false);
+            let assessment = squash::assess(squash::AssessRequest {
+                repository: &plan.repository,
+                config: &plan.config,
+                target: &state.target_branch,
+                enabled: true,
+                final_history: true,
+                include_staged: false,
+            });
+            let required = match assessment {
+                Ok(squash::Assessment::Required(required)) => required,
+                Ok(squash::Assessment::Skipped { .. }) => {
+                    state.squash = SquashStateV2::Skipped {
+                        reason: SquashSkipReasonV2::SingleCommit,
+                    };
+                    if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
+                        return execution_failure(
+                            plan,
+                            effects,
+                            diagnostics,
+                            MergePhase::Squash,
+                            MergeExecutionFailureKind::Journal,
+                            error,
+                        );
+                    }
+                    mark_effect(&mut effects, "squash", true, true);
+                    break 'squash_phase;
+                }
+                Ok(blocked @ squash::Assessment::Blocked { .. }) => {
+                    let error = blocked
+                        .into_required()
+                        .expect_err("blocked assessment has no capability");
+                    return execution_failure(
+                        plan,
+                        effects,
+                        diagnostics,
+                        MergePhase::Squash,
+                        MergeExecutionFailureKind::StalePlan,
+                        error,
+                    );
+                }
+                Ok(squash::Assessment::PendingFinalHistory) => {
+                    return execution_failure(
+                        plan,
+                        effects,
+                        diagnostics,
+                        MergePhase::Squash,
+                        MergeExecutionFailureKind::StalePlan,
+                        anyhow::anyhow!(
+                            "final post-rebase history is required before squash preparation"
+                        ),
+                    );
+                }
+                Err(error) => {
+                    return execution_failure(
+                        plan,
+                        effects,
+                        diagnostics,
+                        MergePhase::Squash,
+                        MergeExecutionFailureKind::Squash,
+                        error,
+                    );
+                }
+            };
+            let preparation = match mode {
                 MergeExecutionMode::Human => ui::run_timed(
                     true,
                     "Generating squash commit message...",
                     "Generated squash commit message:",
                     "Failed to generate the squash commit message",
                     |_| {
-                        squash::generate_message(
-                            &plan.repository,
-                            &plan.config,
-                            &state.target_branch,
-                            false,
-                        )
+                        let preparation = squash::prepare(required)?;
+                        if let squash::Preparation::Prepared(prepared) = &preparation {
+                            state.squash = SquashStateV2::Prepared {
+                                checkpoint: squash_checkpoint_v2(&prepared.checkpoint()),
+                            };
+                            write_journal(&plan.repository.common_dir, &state)?;
+                        }
+                        Ok(preparation)
                     },
-                )
-                .and_then(|message| {
-                    ui::step(render::commit_message(&message))?;
-                    Ok(message)
-                }),
-                MergeExecutionMode::Captured => squash::generate_message(
-                    &plan.repository,
-                    &plan.config,
-                    &state.target_branch,
-                    false,
                 ),
+                MergeExecutionMode::Captured => squash::prepare(required),
             };
-            let message = match message {
-                Ok(message) => message,
+            let prepared = match preparation {
+                Ok(squash::Preparation::Prepared(prepared)) => prepared,
+                Ok(squash::Preparation::Skipped) => {
+                    state.squash = SquashStateV2::Skipped {
+                        reason: SquashSkipReasonV2::SingleCommit,
+                    };
+                    if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
+                        return execution_failure(
+                            plan,
+                            effects,
+                            diagnostics,
+                            MergePhase::Squash,
+                            MergeExecutionFailureKind::Journal,
+                            error,
+                        );
+                    }
+                    mark_effect(&mut effects, "squash", true, true);
+                    break 'squash_phase;
+                }
                 Err(error) => {
                     push_merge_diagnostic(
                         &mut diagnostics,
@@ -2097,39 +2149,10 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                 }
             };
             if matches!(mode, MergeExecutionMode::Captured) {
-                push_merge_diagnostic(&mut diagnostics, "squash", "stderr", message.as_bytes());
-            }
-            let collapse = match mode {
-                MergeExecutionMode::Human => ui::run_timed(
-                    true,
-                    &format!("Squashing {} commits...", refreshed.commit_count),
-                    "Squashed the topic into a single commit",
-                    "Failed to squash the topic",
-                    |_| squash::collapse(&plan.repository, &state.target_branch, &message),
-                ),
-                MergeExecutionMode::Captured => {
-                    squash::collapse(&plan.repository, &state.target_branch, &message)
-                }
-            };
-            if let Err(error) = collapse {
-                push_merge_diagnostic(
-                    &mut diagnostics,
-                    "squash",
-                    "stderr",
-                    error.to_string().as_bytes(),
-                );
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Squash,
-                    MergeExecutionFailureKind::Squash,
-                    error,
-                );
-            }
-            let resulting_commit = match HistoryObservation::new(&current.path).head_commit() {
-                Ok(commit) => commit,
-                Err(error) => {
+                state.squash = SquashStateV2::Prepared {
+                    checkpoint: squash_checkpoint_v2(&prepared.checkpoint()),
+                };
+                if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
                     return execution_failure(
                         plan,
                         effects,
@@ -2139,8 +2162,59 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                         error,
                     );
                 }
+            }
+            if matches!(mode, MergeExecutionMode::Human) {
+                if let Err(error) = ui::step(render::commit_message(prepared.message())) {
+                    return execution_failure(
+                        plan,
+                        effects,
+                        diagnostics,
+                        MergePhase::Squash,
+                        MergeExecutionFailureKind::Squash,
+                        error,
+                    );
+                }
+            } else {
+                push_merge_diagnostic(
+                    &mut diagnostics,
+                    "squash",
+                    "stderr",
+                    prepared.message().as_bytes(),
+                );
+            }
+            let commit_count = prepared.commit_count();
+            let collapse = match mode {
+                MergeExecutionMode::Human => ui::run_timed(
+                    true,
+                    &format!("Squashing {commit_count} commits..."),
+                    "Squashed the topic into a single commit",
+                    "Failed to squash the topic",
+                    |_| squash::collapse(prepared),
+                ),
+                MergeExecutionMode::Captured => squash::collapse(prepared),
             };
-            state.squash = SquashStateV2::Completed { resulting_commit };
+            let collapsed = match collapse {
+                Ok(collapsed) => collapsed,
+                Err(error) => {
+                    push_merge_diagnostic(
+                        &mut diagnostics,
+                        "squash",
+                        "stderr",
+                        error.to_string().as_bytes(),
+                    );
+                    return execution_failure(
+                        plan,
+                        effects,
+                        diagnostics,
+                        MergePhase::Squash,
+                        MergeExecutionFailureKind::Squash,
+                        error,
+                    );
+                }
+            };
+            state.squash = SquashStateV2::Completed {
+                resulting_commit: collapsed.commit().to_owned(),
+            };
             if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
                 return execution_failure(
                     plan,
@@ -2151,8 +2225,8 @@ pub fn execute_merge(plan: &MergePlan, mode: MergeExecutionMode) -> MergeExecuti
                     error,
                 );
             }
+            mark_effect(&mut effects, "squash", true, true);
         }
-        mark_effect(&mut effects, "squash", true, true);
     }
     let mut candidate = match current_history.head_commit() {
         Ok(candidate) => candidate,
@@ -2781,26 +2855,30 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
             .as_ref()
             .is_none_or(|state| state.squash.not_started())
     {
-        squash::ensure_ready(
-            &repository,
-            &config,
-            &target,
-            !rebase_active,
-            yolo_stage_all,
-        )?;
+        let assessment = squash::assess(squash::AssessRequest {
+            repository: &repository,
+            config: &config,
+            target: &target,
+            enabled: true,
+            final_history: !rebase_active,
+            include_staged: yolo_stage_all,
+        })?;
+        if matches!(assessment, squash::Assessment::Blocked { .. }) {
+            assessment.into_required()?;
+        }
     }
     // Preserve squash-generator preflight precedence, then approve validation
     // hooks before the journal or any Git mutation protected by them.
     hook_approval::approve_interactively(&repository, HookPhase::PreMerge, &config.pre_merge)?;
     if journal.is_none() {
-        let squash_plan = squash::plan(
-            &repository,
-            &config,
-            &target,
-            !policy.no_squash,
-            !rebase_active,
-            yolo_stage_all,
-        )?;
+        let squash_plan = squash::assess(squash::AssessRequest {
+            repository: &repository,
+            config: &config,
+            target: &target,
+            enabled: !policy.no_squash,
+            final_history: !rebase_active,
+            include_staged: yolo_stage_all,
+        })?;
         let state = MergeJournal {
             topic_path: repository.current().path.clone(),
             topic_identity: identity,
@@ -2887,27 +2965,50 @@ fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
     // and before validation so the pre-merge hooks see the commit that actually
     // lands on the target.
     if !state.no_squash && state.squash.not_started() {
-        let plan = squash::plan(&repository, &config, &target, true, true, yolo_stage_all)?;
-        if plan.applicable {
-            // Generate first and show the message, so the rail reports what is
-            // about to be committed before the collapse rewrites history.
-            let message = ui::run_timed(
+        let assessment = squash::assess(squash::AssessRequest {
+            repository: &repository,
+            config: &config,
+            target: &target,
+            enabled: true,
+            final_history: true,
+            include_staged: yolo_stage_all,
+        })?;
+        if assessment.applicable() {
+            let required = assessment.into_required()?;
+            let preparation = ui::run_timed(
                 true,
                 "Generating squash commit message...",
                 "Generated squash commit message:",
                 "Failed to generate the squash commit message",
-                |_| squash::generate_message(&repository, &config, &target, yolo_stage_all),
+                |_| {
+                    let preparation = squash::prepare(required)?;
+                    if let squash::Preparation::Prepared(prepared) = &preparation {
+                        state.squash = SquashStateV2::Prepared {
+                            checkpoint: squash_checkpoint_v2(&prepared.checkpoint()),
+                        };
+                        write_journal(&repository.common_dir, &state)?;
+                    }
+                    Ok(preparation)
+                },
             )?;
-            ui::step(render::commit_message(&message))?;
-            ui::run_timed(
+            let squash::Preparation::Prepared(prepared) = preparation else {
+                state.squash = SquashStateV2::Skipped {
+                    reason: SquashSkipReasonV2::SingleCommit,
+                };
+                write_journal(&repository.common_dir, &state)?;
+                return merge_inner(policy, intent);
+            };
+            ui::step(render::commit_message(prepared.message()))?;
+            let commit_count = prepared.commit_count();
+            let collapsed = ui::run_timed(
                 true,
-                &format!("Squashing {} commits...", plan.commit_count),
+                &format!("Squashing {commit_count} commits..."),
                 "Squashed the topic into a single commit",
                 "Failed to squash the topic",
-                |_| squash::collapse(&repository, &target, &message),
+                |_| squash::collapse(prepared),
             )?;
             state.squash = SquashStateV2::Completed {
-                resulting_commit: current_history.head_commit()?,
+                resulting_commit: collapsed.commit().to_owned(),
             };
             write_journal(&repository.common_dir, &state)?;
         }
@@ -3355,6 +3456,23 @@ fn decode_path(path: EncodedPath) -> Result<PathBuf> {
     Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
 }
 
+fn squash_checkpoint_v2(checkpoint: &squash::PreparedCheckpoint) -> SquashCheckpointV2 {
+    SquashCheckpointV2 {
+        topic_commit: checkpoint.expected_topic_commit().to_owned(),
+        target_commit: checkpoint.expected_target_commit().to_owned(),
+        expected_tree: checkpoint.expected_result_tree().to_owned(),
+        message_bytes: EncodedBytes {
+            encoding: ByteEncoding::Base64,
+            value: BASE64.encode(checkpoint.message().as_bytes()),
+        },
+        topic_branch: checkpoint.topic_branch().to_owned(),
+        target_branch: checkpoint.target_branch().to_owned(),
+        topic_worktree: encode_path(checkpoint.topic_worktree()),
+        commit_count: checkpoint.commit_count(),
+        include_staged: checkpoint.include_staged(),
+    }
+}
+
 fn journal_v2(state: &MergeJournal) -> Result<MergeJournalV2> {
     if matches!(state.squash, SquashStateV2::LegacyCompleted) {
         bail!("cannot serialize an unbound version 1 completed squash")
@@ -3460,7 +3578,7 @@ mod journal_tests {
         let shapes = [
             r#"{"state":"not_started"}"#,
             r#"{"state":"skipped","reason":"single_commit"}"#,
-            r#"{"state":"prepared","checkpoint":{"topic_commit":"aaaa","target_commit":"bbbb","expected_tree":"cccc","message_bytes":{"encoding":"base64","value":"/wA="},"topic_branch":"topic","topic_worktree":{"encoding":"base64","value":"L3RtcC90b3BpYy3+","display":"informational path"}}}"#,
+            r#"{"state":"prepared","checkpoint":{"topic_commit":"aaaa","target_commit":"bbbb","expected_tree":"cccc","message_bytes":{"encoding":"base64","value":"/wA="},"topic_branch":"topic","target_branch":"main","topic_worktree":{"encoding":"base64","value":"L3RtcC90b3BpYy3+","display":"informational path"},"commit_count":2,"include_staged":false}}"#,
             r#"{"state":"completed","resulting_commit":"deadbeef"}"#,
         ];
 
@@ -3476,7 +3594,7 @@ mod journal_tests {
 
     #[test]
     fn prepared_message_and_path_bytes_round_trip_exactly() {
-        let shape = r#"{"state":"prepared","checkpoint":{"topic_commit":"aaaa","target_commit":"bbbb","expected_tree":"cccc","message_bytes":{"encoding":"base64","value":"/wA="},"topic_branch":"topic","topic_worktree":{"encoding":"base64","value":"L3RtcC90b3BpYy3+","display":"not derived from bytes"}}}"#;
+        let shape = r#"{"state":"prepared","checkpoint":{"topic_commit":"aaaa","target_commit":"bbbb","expected_tree":"cccc","message_bytes":{"encoding":"base64","value":"/wA="},"topic_branch":"topic","target_branch":"main","topic_worktree":{"encoding":"base64","value":"L3RtcC90b3BpYy3+","display":"not derived from bytes"},"commit_count":2,"include_staged":false}}"#;
         let encoded = V2.replace(r#"{"state":"not_started"}"#, shape);
         let state = decode_journal(encoded.as_bytes()).unwrap();
         let SquashStateV2::Prepared { checkpoint } = &state.squash else {
@@ -3511,11 +3629,9 @@ mod journal_tests {
 
     #[test]
     fn new_journals_persist_policy_and_single_commit_skips() {
-        let skipped = squash::SquashPlan {
-            applicable: false,
+        let skipped = squash::Assessment::Skipped {
+            reason: squash::SkipReason::SingleCommit,
             commit_count: 1,
-            generator_configured: true,
-            generator_trusted: true,
         };
         assert_eq!(
             initial_squash_state(true, &skipped),
@@ -3530,7 +3646,13 @@ mod journal_tests {
             }
         );
         assert_eq!(
-            initial_squash_state(false, &squash::SquashPlan::skipped()),
+            initial_squash_state(
+                false,
+                &squash::Assessment::Skipped {
+                    reason: squash::SkipReason::Disabled,
+                    commit_count: 0,
+                },
+            ),
             SquashStateV2::NotStarted
         );
     }
@@ -3577,7 +3699,7 @@ mod journal_tests {
     fn prepared_checkpoint_requires_exact_canonical_bytes() {
         let prepared = V2.replace(
             r#"{"state":"not_started"}"#,
-            r#"{"state":"prepared","checkpoint":{"topic_commit":"aaaa","target_commit":"bbbb","expected_tree":"cccc","message_bytes":{"encoding":"base64","value":"/w=="},"topic_branch":"topic","topic_worktree":{"encoding":"base64","value":"L3RtcC90b3BpYw==","display":"topic"}}}"#,
+            r#"{"state":"prepared","checkpoint":{"topic_commit":"aaaa","target_commit":"bbbb","expected_tree":"cccc","message_bytes":{"encoding":"base64","value":"/w=="},"topic_branch":"topic","target_branch":"main","topic_worktree":{"encoding":"base64","value":"L3RtcC90b3BpYw==","display":"topic"},"commit_count":2,"include_staged":false}}"#,
         );
         let journal = decode_journal(prepared.as_bytes()).unwrap();
         assert!(journal.squash.prepared());

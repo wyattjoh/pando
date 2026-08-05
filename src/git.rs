@@ -452,6 +452,14 @@ pub(crate) struct PullRequestChanges {
     pub(crate) subjects: String,
 }
 
+/// Parent, tree, and message facts used to prove a newly created commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CommitFacts {
+    pub(crate) parents: Vec<String>,
+    pub(crate) tree: String,
+    pub(crate) message: String,
+}
+
 /// Concrete interface to commit graph, index, status, and diff observations.
 ///
 /// Range construction, stable diff flags, message ordering, and byte-safe
@@ -486,6 +494,33 @@ impl<'cwd> HistoryObservation<'cwd> {
 
     pub(crate) fn has_staged_changes(self) -> Result<bool> {
         staged_changes_present(self.cwd)
+    }
+
+    /// Resolves the tree represented by the current index.
+    pub(crate) fn index_tree(self) -> Result<String> {
+        git_stdout(self.cwd, ["write-tree"]).context("failed to resolve the Git index tree")
+    }
+
+    /// Observes the parent, tree, and full message of one commit.
+    pub(crate) fn commit_facts(self, commit: &str) -> Result<CommitFacts> {
+        let output = run_git(
+            self.cwd,
+            ["show", "--no-patch", "--format=%P%x00%T%x00%B", commit],
+        )
+        .context("failed to inspect squash commit facts")?;
+        ensure_success(&output, "git show squash commit facts")?;
+        let mut fields = output.stdout.splitn(3, |byte| *byte == 0);
+        let parents = fields.next().context("Git omitted squash commit parents")?;
+        let tree = fields.next().context("Git omitted squash commit tree")?;
+        let message = fields.next().context("Git omitted squash commit message")?;
+        Ok(CommitFacts {
+            parents: String::from_utf8(parents.to_vec())?
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
+            tree: String::from_utf8(tree.to_vec())?,
+            message: String::from_utf8(message.to_vec())?.trim_end().to_owned(),
+        })
     }
 
     pub(crate) fn staged(self, target: Option<&str>) -> Result<StagedChanges> {
@@ -1463,7 +1498,7 @@ fn stable_diff(cwd: &Path, range: &str, extra: Option<&str>) -> Result<String> {
 /// Panics if the child's piped stdin is unavailable, which cannot happen for a
 /// process spawned with `Stdio::piped`.
 fn commit_message_stdin_impl(cwd: &Path, message: &str) -> Result<String> {
-    let output = GitProcess::new(cwd, ["commit", "--file", "-"])
+    let output = GitProcess::new(cwd, ["commit", "--cleanup=verbatim", "--file", "-"])
         .suppress_editor()
         .piped(
             message.as_bytes().to_vec(),

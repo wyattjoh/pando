@@ -1,13 +1,12 @@
-//! Collapsing a topic branch into one commit as part of the merge lifecycle.
+//! Opaque preparation and collapse of a topic branch into one commit.
 //!
-//! Squashing runs *after* any rebase and *before* the fast-forward merge, so by
-//! the time it starts the target is already an ancestor of the topic and the
-//! collapse is a `reset --soft` back to the target followed by one commit. That
-//! ordering is why this module never resolves a merge base: `lifecycle` has
-//! already guaranteed the linear relationship it depends on.
+//! Squashing runs after rebase and before validation. The capsule binds the
+//! generated message to observed topic, target, index, and worktree facts so
+//! lifecycle can durably checkpoint preparation without owning Git mutation.
 
 use std::{
     io::Write,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -17,7 +16,9 @@ use minijinja::{Environment, context};
 use crate::{
     WorktreeKind,
     config::{EffectiveConfig, EffectiveGeneration, GenerationSource},
-    git::{self, LifecycleMutation, Repository},
+    git::{
+        HistoryObservation, LifecycleMutation, RangeDiffSource, Repository, RepositoryObservation,
+    },
     trust,
 };
 
@@ -44,174 +45,375 @@ Diff against {{ target }}:
 {{ git_diff }}
 ";
 
-/// What squashing would do to the topic, decided before anything mutates.
-#[derive(Clone, Copy, Debug)]
-pub struct SquashPlan {
-    /// Squashing is enabled and there is more than one commit to collapse.
-    pub applicable: bool,
-    /// Commits currently between the target and the topic's `HEAD`.
-    pub commit_count: usize,
-    /// A generator command is resolvable for the squash message.
-    pub generator_configured: bool,
-    /// Every shared generator value is approved for this clone.
-    pub generator_trusted: bool,
+/// Read-only inputs to squash assessment.
+#[derive(Clone, Copy)]
+pub(crate) struct AssessRequest<'a> {
+    pub(crate) repository: &'a Repository,
+    pub(crate) config: &'a EffectiveConfig,
+    pub(crate) target: &'a str,
+    pub(crate) enabled: bool,
+    pub(crate) final_history: bool,
+    pub(crate) include_staged: bool,
 }
 
-impl SquashPlan {
-    /// A plan that runs no squash, used whenever the policy or phase rules it out.
+/// Why assessment did not produce a squash capability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SkipReason {
+    Disabled,
+    SingleCommit,
+}
+
+/// A pre-mutation squash blocker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BlockReason {
+    GeneratorMissing,
+    ApprovalRequired,
+}
+
+/// Read-only squash assessment. The required value is opaque to callers.
+#[derive(Debug)]
+pub(crate) enum Assessment {
+    Skipped {
+        reason: SkipReason,
+        commit_count: usize,
+    },
+    Blocked {
+        reason: BlockReason,
+        commit_count: usize,
+    },
+    PendingFinalHistory,
+    Required(RequiredSquash),
+}
+
+impl Assessment {
     #[must_use]
-    pub const fn skipped() -> Self {
-        Self {
-            applicable: false,
-            commit_count: 0,
-            generator_configured: true,
-            generator_trusted: true,
+    pub(crate) const fn applicable(&self) -> bool {
+        matches!(
+            self,
+            Self::Blocked { .. } | Self::PendingFinalHistory | Self::Required(_)
+        )
+    }
+
+    #[must_use]
+    pub(crate) const fn commit_count(&self) -> usize {
+        match self {
+            Self::Skipped { commit_count, .. } | Self::Blocked { commit_count, .. } => {
+                *commit_count
+            }
+            Self::PendingFinalHistory => 0,
+            Self::Required(required) => required.commit_count,
         }
     }
 
-    /// Reports whether the plan is blocked on generator approval.
     #[must_use]
-    pub const fn approval_required(&self) -> bool {
-        self.applicable && !self.generator_trusted
+    pub(crate) const fn generator_configured(&self) -> bool {
+        !matches!(
+            self,
+            Self::Blocked {
+                reason: BlockReason::GeneratorMissing,
+                ..
+            }
+        )
+    }
+
+    #[must_use]
+    pub(crate) const fn generator_trusted(&self) -> bool {
+        !matches!(
+            self,
+            Self::Blocked {
+                reason: BlockReason::ApprovalRequired,
+                ..
+            }
+        )
+    }
+
+    #[must_use]
+    pub(crate) const fn approval_required(&self) -> bool {
+        matches!(
+            self,
+            Self::Blocked {
+                reason: BlockReason::ApprovalRequired,
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn into_required(self) -> Result<RequiredSquash> {
+        match self {
+            Self::Required(required) => Ok(required),
+            Self::Skipped {
+                reason: SkipReason::Disabled,
+                ..
+            } => bail!("squashing is disabled"),
+            Self::Skipped {
+                reason: SkipReason::SingleCommit,
+                ..
+            } => bail!("the topic already contains a single commit"),
+            Self::Blocked {
+                reason: BlockReason::GeneratorMissing,
+                ..
+            } => bail!(missing_generator_message()),
+            Self::Blocked {
+                reason: BlockReason::ApprovalRequired,
+                ..
+            } => bail!(approval_message()),
+            Self::PendingFinalHistory => {
+                bail!("final post-rebase history is required before squash preparation")
+            }
+        }
     }
 }
 
-/// Decides whether the topic will be squashed, without mutating anything.
-///
-/// Pass `countable = false` while a rebase is still in flight: `HEAD` then
-/// points at a partially replayed branch, so the range against `target` would
-/// describe a history that is about to change. The plan stays applicable, it
-/// just declines to claim a count it cannot yet trust.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot walk the range or trust cannot be read.
-pub fn plan(
-    repository: &Repository,
-    config: &EffectiveConfig,
-    target: &str,
-    enabled: bool,
-    countable: bool,
+/// Opaque authority to perform final squash preparation.
+#[derive(Debug)]
+pub(crate) struct RequiredSquash {
+    topic_worktree: PathBuf,
+    topic_branch: String,
+    target_branch: String,
+    commit_count: usize,
     include_staged: bool,
-) -> Result<SquashPlan> {
-    if !enabled || !config.squash {
-        return Ok(SquashPlan::skipped());
+    generation: EffectiveGeneration,
+}
+
+/// A final-history preparation result.
+pub(crate) enum Preparation {
+    Skipped,
+    Prepared(PreparedSquash),
+}
+
+/// Opaque prepared state consumed by [`collapse`].
+pub(crate) struct PreparedSquash {
+    checkpoint: PreparedCheckpoint,
+}
+
+impl PreparedSquash {
+    #[must_use]
+    pub(crate) fn message(&self) -> &str {
+        &self.checkpoint.message
     }
-    let commit_count = if countable {
-        let count =
-            git::HistoryObservation::new(&repository.current().path).count_from_head(target)?;
-        // One commit is already the shape a squash produces, unless staged
-        // yolo changes must be folded into a newly generated message.
-        if count < 2 && !include_staged {
-            return Ok(SquashPlan {
-                commit_count: count,
-                ..SquashPlan::skipped()
-            });
-        }
-        count
+
+    #[must_use]
+    pub(crate) fn commit_count(&self) -> usize {
+        self.checkpoint.commit_count
+    }
+
+    #[must_use]
+    pub(crate) fn checkpoint(&self) -> PreparedCheckpoint {
+        self.checkpoint.clone()
+    }
+}
+
+/// Semantic evidence persisted before generated-message presentation or reset.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PreparedCheckpoint {
+    topic_worktree: PathBuf,
+    topic_branch: String,
+    target_branch: String,
+    expected_topic_commit: String,
+    expected_target_commit: String,
+    expected_result_tree: String,
+    commit_count: usize,
+    include_staged: bool,
+    message: String,
+}
+
+impl PreparedCheckpoint {
+    pub(crate) fn topic_worktree(&self) -> &Path {
+        &self.topic_worktree
+    }
+    pub(crate) fn topic_branch(&self) -> &str {
+        &self.topic_branch
+    }
+    pub(crate) fn target_branch(&self) -> &str {
+        &self.target_branch
+    }
+    pub(crate) fn expected_topic_commit(&self) -> &str {
+        &self.expected_topic_commit
+    }
+    pub(crate) fn expected_target_commit(&self) -> &str {
+        &self.expected_target_commit
+    }
+    pub(crate) fn expected_result_tree(&self) -> &str {
+        &self.expected_result_tree
+    }
+    pub(crate) const fn commit_count(&self) -> usize {
+        self.commit_count
+    }
+    pub(crate) const fn include_staged(&self) -> bool {
+        self.include_staged
+    }
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// Verified result of a collapse.
+pub(crate) struct CollapsedSquash {
+    commit: String,
+}
+
+impl CollapsedSquash {
+    #[must_use]
+    pub(crate) fn commit(&self) -> &str {
+        &self.commit
+    }
+}
+
+/// Assesses applicability and generator readiness without mutation.
+pub(crate) fn assess(request: AssessRequest<'_>) -> Result<Assessment> {
+    if !request.enabled || !request.config.squash {
+        return Ok(Assessment::Skipped {
+            reason: SkipReason::Disabled,
+            commit_count: 0,
+        });
+    }
+    let history = HistoryObservation::new(&request.repository.current().path);
+    let commit_count = if request.final_history {
+        history.count_from_head(request.target)?
     } else {
         0
     };
-    let generation = &config.merge_generation;
-    Ok(SquashPlan {
-        applicable: true,
+    if request.final_history && commit_count < 2 && !request.include_staged {
+        return Ok(Assessment::Skipped {
+            reason: SkipReason::SingleCommit,
+            commit_count,
+        });
+    }
+    let generation = &request.config.merge_generation;
+    if generation.command.is_none() {
+        return Ok(Assessment::Blocked {
+            reason: BlockReason::GeneratorMissing,
+            commit_count,
+        });
+    }
+    if is_shared(generation) && !trust::is_merge_generation_trusted(request.repository, generation)?
+    {
+        return Ok(Assessment::Blocked {
+            reason: BlockReason::ApprovalRequired,
+            commit_count,
+        });
+    }
+    if !request.final_history {
+        return Ok(Assessment::PendingFinalHistory);
+    }
+    Ok(Assessment::Required(RequiredSquash {
+        topic_worktree: request.repository.current().path.clone(),
+        topic_branch: request.repository.current_branch()?.to_owned(),
+        target_branch: request.target.to_owned(),
         commit_count,
-        generator_configured: generation.command.is_some(),
-        generator_trusted: !is_shared(generation)
-            || trust::is_merge_generation_trusted(repository, generation)?,
-    })
+        include_staged: request.include_staged,
+        generation: generation.clone(),
+    }))
 }
 
-/// Fails unless a planned squash could actually run to completion.
-///
-/// Callers use this as a preflight so a missing or untrusted generator is
-/// reported before the lifecycle mutates anything.
-///
-/// # Errors
-///
-/// Returns an error when the squash applies but its generator is unconfigured
-/// or awaiting approval.
-pub fn ensure_ready(
-    repository: &Repository,
-    config: &EffectiveConfig,
-    target: &str,
-    countable: bool,
-    include_staged: bool,
-) -> Result<()> {
-    let plan = plan(repository, config, target, true, countable, include_staged)?;
-    if !plan.applicable {
-        return Ok(());
-    }
-    if !plan.generator_configured {
+/// Reobserves final history, generates once, and returns checkpoint-bound state.
+pub(crate) fn prepare(required: RequiredSquash) -> Result<Preparation> {
+    let repository = RepositoryObservation::new(&required.topic_worktree).repository()?;
+    verify_worktree(
+        &repository,
+        &required.topic_worktree,
+        &required.topic_branch,
+    )?;
+    let history = HistoryObservation::new(&required.topic_worktree);
+    let topic_commit = history.head_commit()?;
+    let target_commit = history.commit(&required.target_branch)?;
+    if !history.is_ancestor(&target_commit, &topic_commit)? {
         bail!(
-            "no squash message generator is configured; set merge.generation.command or commit.generation.command, or rerun with --no-squash"
+            "the target changed or is no longer an ancestor of the topic during squash preparation"
         );
     }
-    if !plan.generator_trusted {
-        bail!(
-            "shared squash message generator approval is required; run pando trust merge-approve, or rerun with --no-squash"
-        );
+    let commit_count = history.count_from_head(&target_commit)?;
+    if commit_count < 2 && !required.include_staged {
+        return Ok(Preparation::Skipped);
+    }
+    if required.generation.command.is_none() {
+        bail!(missing_generator_message());
+    }
+    if is_shared(&required.generation)
+        && !trust::is_merge_generation_trusted(&repository, &required.generation)?
+    {
+        bail!(approval_message());
+    }
+    let expected_result_tree = history.index_tree()?;
+    let message = generate_message(
+        &repository,
+        &required.generation,
+        &required.target_branch,
+        required.include_staged,
+    )?;
+    Ok(Preparation::Prepared(PreparedSquash {
+        checkpoint: PreparedCheckpoint {
+            topic_worktree: required.topic_worktree,
+            topic_branch: required.topic_branch,
+            target_branch: required.target_branch,
+            expected_topic_commit: topic_commit,
+            expected_target_commit: target_commit,
+            expected_result_tree,
+            commit_count,
+            include_staged: required.include_staged,
+            message,
+        },
+    }))
+}
+
+/// Revalidates prepared facts, owns reset plus commit, and proves the result.
+pub(crate) fn collapse(prepared: PreparedSquash) -> Result<CollapsedSquash> {
+    let checkpoint = prepared.checkpoint;
+    let repository = RepositoryObservation::new(&checkpoint.topic_worktree).repository()?;
+    verify_worktree(
+        &repository,
+        &checkpoint.topic_worktree,
+        &checkpoint.topic_branch,
+    )?;
+    let history = HistoryObservation::new(&checkpoint.topic_worktree);
+    if history.head_commit()? != checkpoint.expected_topic_commit
+        || history.commit(&checkpoint.target_branch)? != checkpoint.expected_target_commit
+        || !history.is_ancestor(
+            &checkpoint.expected_target_commit,
+            &checkpoint.expected_topic_commit,
+        )?
+    {
+        bail!("squash preparation is stale because topic or target history changed");
+    }
+    if history.index_tree()? != checkpoint.expected_result_tree {
+        bail!("squash preparation is stale because the prepared index tree changed");
+    }
+    if history.has_staged_changes()? != checkpoint.include_staged {
+        bail!("squash preparation is stale because staged-change mode changed");
+    }
+    let mutation = LifecycleMutation::new(&checkpoint.topic_worktree);
+    mutation.reset_soft(&checkpoint.expected_target_commit)?;
+    mutation.commit_message(&checkpoint.message)?;
+    let commit = history.head_commit()?;
+    let facts = history.commit_facts(&commit)?;
+    if facts.parents != [checkpoint.expected_target_commit]
+        || facts.tree != checkpoint.expected_result_tree
+        || facts.message.trim_end() != checkpoint.message
+    {
+        bail!("squash commit did not match its prepared parent, tree, and message");
+    }
+    Ok(CollapsedSquash { commit })
+}
+
+fn verify_worktree(repository: &Repository, path: &Path, branch: &str) -> Result<()> {
+    if repository.current().path != path || repository.current_branch()? != branch {
+        bail!("prepared squash no longer matches the registered topic worktree and branch");
     }
     Ok(())
 }
 
-/// Collapses the topic onto `target` under `message`.
-///
-/// Generation is a separate step ([`generate_message`]) so the caller can show
-/// the message it is about to commit before the history is rewritten.
-///
-/// Git's transcript is deliberately discarded on success: the caller has
-/// already rendered the message, and the fast-forward that follows reports the
-/// same diffstat. Failures still carry it, because `git` output is folded into
-/// the error.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot rewrite the branch.
-pub fn collapse(repository: &Repository, target: &str, message: &str) -> Result<()> {
-    let cwd = &repository.current().path;
-    LifecycleMutation::new(cwd).reset_soft(target)?;
-    LifecycleMutation::new(cwd).commit_message(message)?;
-    Ok(())
-}
-
-/// Renders the squash prompt and runs the configured generator.
-///
-/// The approval check is repeated here rather than left to the caller's
-/// preflight: this is where the configured command actually executes, so no
-/// future caller can reach it without having cleared trust.
-///
-/// # Errors
-///
-/// Returns an error when the generator is missing, untrusted, or fails, or
-/// when its output is not a usable message.
-///
-/// # Panics
-///
-/// Panics if the child's piped stdin is unavailable, which cannot happen for a
-/// process spawned with `Stdio::piped`.
-pub fn generate_message(
+fn generate_message(
     repository: &Repository,
-    config: &EffectiveConfig,
+    generation: &EffectiveGeneration,
     target: &str,
     include_staged: bool,
 ) -> Result<String> {
-    let generation = &config.merge_generation;
-    if is_shared(generation) && !trust::is_merge_generation_trusted(repository, generation)? {
-        bail!(
-            "shared squash message generator approval is required; run pando trust merge-approve, or rerun with --no-squash"
-        );
-    }
-    let command = &config
-        .merge_generation
+    let command = &generation
         .command
         .as_ref()
-        .context(
-            "no squash message generator is configured; set merge.generation.command or commit.generation.command, or rerun with --no-squash",
-        )?
+        .context(missing_generator_message())?
         .value;
-    let template = config
-        .merge_generation
+    let template = generation
         .template
         .as_ref()
         .map_or(BUILTIN_TEMPLATE, |value| value.value.as_str());
@@ -273,11 +475,11 @@ fn render_prompt(
         .context("failed to parse the squash generation template")?;
     let cwd = &repository.current().path;
     let diff_source = if include_staged {
-        git::RangeDiffSource::Staged
+        RangeDiffSource::Staged
     } else {
-        git::RangeDiffSource::Committed
+        RangeDiffSource::Committed
     };
-    let range = git::HistoryObservation::new(cwd).range_from_head(target, diff_source)?;
+    let range = HistoryObservation::new(cwd).range_from_head(target, diff_source)?;
     let branch = match &repository.current().kind {
         WorktreeKind::Branch(value) => value.as_str(),
         WorktreeKind::Detached => "(detached)",
@@ -290,9 +492,7 @@ fn render_prompt(
     environment
         .get_template("squash")?
         .render(context! {
-            branch,
-            target,
-            repo,
+            branch, target, repo,
             head_commit => range.head_commit,
             commit_count => range.commit_count,
             commits => range.messages,
@@ -302,12 +502,19 @@ fn render_prompt(
         .context("failed to render the squash generation template")
 }
 
-/// Reports whether any effective generator value came from committed configuration.
 fn is_shared(generation: &EffectiveGeneration) -> bool {
     [generation.command.as_ref(), generation.template.as_ref()]
         .into_iter()
         .flatten()
         .any(|value| value.source == GenerationSource::Shared)
+}
+
+const fn missing_generator_message() -> &'static str {
+    "no squash message generator is configured; set merge.generation.command or commit.generation.command, or rerun with --no-squash"
+}
+
+const fn approval_message() -> &'static str {
+    "shared squash message generator approval is required; run pando trust merge-approve, or rerun with --no-squash"
 }
 
 #[cfg(test)]
