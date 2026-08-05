@@ -7032,6 +7032,113 @@ fn json_version_one_request_envelope_is_strict_and_preserves_identity() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn json_version_one_rejection_is_characterized_across_every_command_family() {
+    let repo = Repository::new();
+    let cases: &[(&[&str], serde_json::Value, &str, bool, bool)] = &[
+        (
+            &["list", "--input-output", "json"],
+            serde_json::json!({}),
+            "json.unsupported_schema_version",
+            true,
+            false,
+        ),
+        (
+            &["get", "--input-output", "json"],
+            serde_json::json!({"property": "branch"}),
+            "json.unsupported_schema_version",
+            true,
+            false,
+        ),
+        (
+            &["switch", "--input-output", "json"],
+            serde_json::json!({}),
+            "json.invalid_request",
+            false,
+            false,
+        ),
+        (
+            &["create", "--input-output", "json"],
+            serde_json::json!({}),
+            "json.invalid_request",
+            false,
+            false,
+        ),
+        (
+            &["remove", "--input-output", "json"],
+            serde_json::json!({}),
+            "json.unsupported_schema_version",
+            true,
+            false,
+        ),
+        (
+            &["merge", "--input-output", "json"],
+            serde_json::json!({}),
+            "json.unsupported_schema_version",
+            true,
+            false,
+        ),
+        (
+            &["commit", "--input-output", "json"],
+            serde_json::json!({"selection": "staged", "message": {"source": "provided", "value": "message"}}),
+            "json.unsupported_schema_version",
+            true,
+            false,
+        ),
+        (
+            &["pr", "create", "--input-output", "json"],
+            serde_json::json!({}),
+            "json.unsupported_schema_version",
+            true,
+            true,
+        ),
+        (
+            &["trust", "status", "--input-output", "json"],
+            serde_json::json!({}),
+            "json.unsupported_schema_version",
+            true,
+            false,
+        ),
+        (
+            &["install", "--input-output", "json"],
+            serde_json::json!({}),
+            "json.unsupported_schema_version",
+            true,
+            false,
+        ),
+    ];
+
+    for (args, input, code, preserves_id, process_success) in cases {
+        let output = json_command(
+            &repo.main,
+            args,
+            Some(&serde_json::json!({
+                "schema_version": 2,
+                "request_id": "unsupported-family",
+                "input": input
+            })),
+        );
+        assert_eq!(output.status.success(), *process_success, "{args:?}");
+        let value = assert_json_pure(&output);
+        assert_eq!(value["schema_version"], 1, "{args:?}");
+        assert_eq!(
+            value["request_id"].as_str().is_some(),
+            *preserves_id,
+            "{args:?}"
+        );
+        if *preserves_id {
+            assert_eq!(value["request_id"], "unsupported-family", "{args:?}");
+        }
+        assert_eq!(value["status"], "error", "{args:?}");
+        assert_eq!(value["error"]["code"], *code, "{args:?}: {value}");
+        assert!(value["result"].is_null(), "{args:?}: {value}");
+        assert!(value["effects"].as_array().unwrap().is_empty());
+        assert!(value["diagnostics"].as_array().unwrap().is_empty());
+        assert!(value["next_steps"].as_array().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn json_version_one_responses_are_exclusive_single_documents() {
     let repo = Repository::new();
     let success = json_command(&repo.main, &["list", "--output", "json"], None);
@@ -7058,6 +7165,81 @@ fn json_version_one_responses_are_exclusive_single_documents() {
         assert!(response["effects"].is_array());
         assert!(response["diagnostics"].is_array());
         assert!(response["next_steps"].is_array());
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn json_version_one_exact_leaf_help_matches_the_compatibility_fixture() {
+    let fixture: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/version1/help.json")).unwrap();
+    let cases: &[(&str, &[&str])] = &[
+        ("cli", &["--help", "--output", "json"]),
+        ("list", &["list", "--help", "--output", "json"]),
+        ("get", &["get", "--help", "--output", "json"]),
+        ("switch", &["switch", "--help", "--output", "json"]),
+        ("create", &["create", "--help", "--output", "json"]),
+        ("remove", &["remove", "--help", "--output", "json"]),
+        ("merge", &["merge", "--help", "--output", "json"]),
+        ("commit", &["commit", "--help", "--output", "json"]),
+        ("pr.create", &["pr", "create", "--help", "--output", "json"]),
+        (
+            "trust.status",
+            &["trust", "status", "--help", "--output", "json"],
+        ),
+        (
+            "trust.reset",
+            &["trust", "reset", "--help", "--output", "json"],
+        ),
+        (
+            "trust.commit_status",
+            &["trust", "commit-status", "--help", "--output", "json"],
+        ),
+        (
+            "trust.commit_reset",
+            &["trust", "commit-reset", "--help", "--output", "json"],
+        ),
+        (
+            "trust.commit_approve",
+            &["trust", "commit-approve", "--help", "--output", "json"],
+        ),
+        (
+            "trust.pr_status",
+            &["trust", "pr-status", "--help", "--output", "json"],
+        ),
+        (
+            "trust.pr_reset",
+            &["trust", "pr-reset", "--help", "--output", "json"],
+        ),
+        (
+            "trust.pr_approve",
+            &["trust", "pr-approve", "--help", "--output", "json"],
+        ),
+        (
+            "trust.merge_status",
+            &["trust", "merge-status", "--help", "--output", "json"],
+        ),
+        (
+            "trust.merge_reset",
+            &["trust", "merge-reset", "--help", "--output", "json"],
+        ),
+        (
+            "trust.merge_approve",
+            &["trust", "merge-approve", "--help", "--output", "json"],
+        ),
+        ("install", &["install", "--help", "--output", "json"]),
+    ];
+    assert_eq!(fixture.len(), cases.len());
+
+    for (name, args) in cases {
+        let output = Command::cargo_bin("pando")
+            .unwrap()
+            .args(*args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{name}");
+        let actual = assert_json_pure(&output);
+        assert_eq!(&actual, fixture.get(*name).unwrap(), "{name}");
     }
 }
 
@@ -7110,6 +7292,8 @@ fn human_and_json_get_preserve_the_same_natural_values() {
         ("branch", "string"),
         ("port", "number"),
         ("worktree-path", "object"),
+        ("primary-worktree-path", "object"),
+        ("worktree-root", "object"),
     ] {
         let human = Command::cargo_bin("pando")
             .unwrap()
@@ -7142,7 +7326,7 @@ fn human_and_json_get_preserve_the_same_natural_values() {
                 value.as_u64().unwrap().to_string().as_bytes(),
                 &human.stdout[..human.stdout.len() - 1]
             ),
-            "worktree-path" => assert_eq!(
+            "worktree-path" | "primary-worktree-path" | "worktree-root" => assert_eq!(
                 value["value"].as_str().unwrap().as_bytes(),
                 &human.stdout[..human.stdout.len() - 1]
             ),

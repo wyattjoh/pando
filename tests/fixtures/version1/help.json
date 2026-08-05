@@ -1,0 +1,6103 @@
+{
+  "cli": {
+    "schema_version": 1,
+    "command": "cli",
+    "status": "success",
+    "result": {
+      "commands": [
+        {
+          "json_support": "full",
+          "name": "list"
+        },
+        {
+          "json_support": "full",
+          "name": "switch"
+        },
+        {
+          "json_support": "full",
+          "name": "create"
+        },
+        {
+          "json_support": "full",
+          "name": "get"
+        },
+        {
+          "json_support": "full",
+          "name": "remove"
+        },
+        {
+          "json_support": "full",
+          "name": "merge"
+        },
+        {
+          "json_support": "full",
+          "name": "commit"
+        },
+        {
+          "json_support": "full",
+          "name": "trust.status"
+        },
+        {
+          "json_support": "full",
+          "name": "trust.reset"
+        },
+        {
+          "json_support": "full",
+          "name": "trust.commit_status"
+        },
+        {
+          "json_support": "full",
+          "name": "trust.commit_reset"
+        },
+        {
+          "json_support": "full",
+          "name": "trust.commit_approve"
+        },
+        {
+          "json_support": "full",
+          "name": "install"
+        }
+      ],
+      "global_options": [
+        "--output human|json",
+        "--input-output json"
+      ],
+      "outcome": "help",
+      "response_schema_version": 1,
+      "supported_request_schema_versions": [
+        1
+      ]
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "list": {
+    "schema_version": 1,
+    "command": "list",
+    "status": "success",
+    "result": {
+      "actions": [],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "EmptyInput": {
+            "additionalProperties": false,
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/EmptyInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "title": "OptionalInputRequest_for_EmptyInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "ListSummary": {
+            "properties": {
+              "bare": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "dirty": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "inaccessible": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "locked": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "missing": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "prunable": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "total": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "unknown": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "bare",
+              "dirty",
+              "inaccessible",
+              "locked",
+              "missing",
+              "prunable",
+              "total",
+              "unknown"
+            ],
+            "type": "object"
+          },
+          "WorktreeRecord": {
+            "properties": {
+              "branch": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "condition": {
+                "type": "string"
+              },
+              "current": {
+                "type": "boolean"
+              },
+              "head": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "type": "string"
+              },
+              "last_commit_at": {
+                "description": "RFC 3339 committer timestamp for the worktree's HEAD commit.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "lock_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "navigable": {
+                "type": "boolean"
+              },
+              "path": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "prune_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "condition",
+              "current",
+              "kind",
+              "navigable",
+              "path"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "outcome": {
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/definitions/ListSummary"
+          },
+          "worktrees": {
+            "items": {
+              "$ref": "#/definitions/WorktreeRecord"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "outcome",
+          "summary",
+          "worktrees"
+        ],
+        "title": "ListResult",
+        "type": "object"
+      },
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "get": {
+    "schema_version": 1,
+    "command": "get",
+    "status": "success",
+    "result": {
+      "actions": [],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "get.invalid_property",
+        "repository.invalid",
+        "repository.detached",
+        "repository.primary_unavailable",
+        "repository.root_unavailable"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "GetProperty": {
+            "enum": [
+              "branch",
+              "port",
+              "worktree_path",
+              "primary_worktree_path",
+              "worktree_root"
+            ],
+            "type": "string"
+          },
+          "GetRequest": {
+            "additionalProperties": false,
+            "properties": {
+              "property": {
+                "$ref": "#/definitions/GetProperty"
+              }
+            },
+            "required": [
+              "property"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/GetRequest"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_GetRequest",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "PropertyWireValue": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "format": "uint16",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "$ref": "#/definitions/BytePath"
+              }
+            ]
+          }
+        },
+        "properties": {
+          "outcome": {
+            "type": "string"
+          },
+          "property": {
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/definitions/PropertyWireValue"
+          }
+        },
+        "required": [
+          "outcome",
+          "property",
+          "value"
+        ],
+        "title": "GetResult",
+        "type": "object"
+      },
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "switch": {
+    "schema_version": 1,
+    "command": "switch",
+    "status": "success",
+    "result": {
+      "actions": [
+        "fetch_base_ref",
+        "create_branch",
+        "create_worktree"
+      ],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid",
+        "switch.selection_required",
+        "switch.invalid_branch",
+        "switch.destination_unavailable",
+        "switch.destination_collision",
+        "switch.remote_selection_required",
+        "switch.fetch_not_applicable",
+        "switch.base_unavailable",
+        "switch.approval_required",
+        "trust.approval_required"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "SwitchInput": {
+            "additionalProperties": false,
+            "description": "Strict machine request for switching worktrees.",
+            "properties": {
+              "branch": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              },
+              "fetch": {
+                "default": false,
+                "type": "boolean"
+              },
+              "remote": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/SwitchInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_SwitchInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "anyOf": [
+          {
+            "properties": {
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "dry_run": {
+                "type": "boolean"
+              },
+              "outcome": {
+                "enum": [
+                  "existing"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "branch",
+              "destination",
+              "dry_run",
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_required": {
+                "type": "boolean"
+              },
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "outcome": {
+                "enum": [
+                  "creation_plan"
+                ],
+                "type": "string"
+              },
+              "start_point": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "approval_required",
+              "branch",
+              "destination",
+              "kind",
+              "outcome",
+              "start_point"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "creation_plan"
+                ],
+                "type": "string"
+              },
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start_point": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "branch",
+              "destination",
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "created"
+                ],
+                "type": "string"
+              },
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start_point": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "branch",
+              "destination",
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ],
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "description": "Version 1 success variants shared by switch and create adapters.",
+        "title": "OperationResult"
+      },
+      "selection_required_context_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "anyOf": [
+          {
+            "type": "object"
+          },
+          {
+            "$ref": "#/definitions/SwitchSelectionContext"
+          },
+          {
+            "$ref": "#/definitions/BranchContext"
+          },
+          {
+            "$ref": "#/definitions/ApprovalContext"
+          }
+        ],
+        "definitions": {
+          "ApprovalContext": {
+            "properties": {
+              "approval": {
+                "$ref": "#/definitions/HookApprovalContext"
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              }
+            },
+            "required": [
+              "approval",
+              "branch",
+              "destination"
+            ],
+            "type": "object"
+          },
+          "BranchContext": {
+            "properties": {
+              "branch": {
+                "type": "string"
+              },
+              "created": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "destination": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BytePath"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "hook_outcome": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "remotes": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "setup": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "branch"
+            ],
+            "type": "object"
+          },
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "HookApprovalCommand": {
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "command"
+            ],
+            "type": "object"
+          },
+          "HookApprovalContext": {
+            "properties": {
+              "commands": {
+                "items": {
+                  "$ref": "#/definitions/HookApprovalCommand"
+                },
+                "type": "array"
+              },
+              "identity": {
+                "type": "string"
+              },
+              "phase": {
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "commands",
+              "identity",
+              "phase",
+              "repository"
+            ],
+            "type": "object"
+          },
+          "RecoveryInvocation_for_Request_for_RetryInput": {
+            "additionalProperties": false,
+            "description": "A reproducible command invocation attached to a recovery action.",
+            "properties": {
+              "argv": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "stdin": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/Request_for_RetryInput"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "working_directory": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BytePath"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "argv"
+            ],
+            "type": "object"
+          },
+          "Request_for_RetryInput": {
+            "additionalProperties": false,
+            "properties": {
+              "input": {
+                "$ref": "#/definitions/RetryInput"
+              },
+              "request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "schema_version": {
+                "format": "uint32",
+                "minimum": 0.0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "input",
+              "schema_version"
+            ],
+            "type": "object"
+          },
+          "RetryInput": {
+            "properties": {
+              "branch": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "dry_run": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "fetch": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "SelectionHint": {
+            "properties": {
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "description"
+            ],
+            "type": "object"
+          },
+          "SwitchChoice": {
+            "properties": {
+              "branch": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "current": {
+                "type": "boolean"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "last_commit_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "retry": {
+                "$ref": "#/definitions/RecoveryInvocation_for_Request_for_RetryInput"
+              }
+            },
+            "required": [
+              "current",
+              "destination",
+              "retry"
+            ],
+            "type": "object"
+          },
+          "SwitchSelectionContext": {
+            "properties": {
+              "choices": {
+                "items": {
+                  "$ref": "#/definitions/SwitchChoice"
+                },
+                "type": "array"
+              },
+              "unregistered_branch": {
+                "$ref": "#/definitions/SelectionHint"
+              }
+            },
+            "required": [
+              "choices",
+              "unregistered_branch"
+            ],
+            "type": "object"
+          }
+        },
+        "title": "OperationContext"
+      }
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "create": {
+    "schema_version": 1,
+    "command": "create",
+    "status": "success",
+    "result": {
+      "actions": [
+        "fetch_base_ref",
+        "create_branch",
+        "create_worktree",
+        "set_branch_description"
+      ],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid",
+        "create.branch_required",
+        "create.invalid_branch",
+        "create.branch_registered",
+        "create.destination_unavailable",
+        "create.destination_collision",
+        "create.remote_selection_required",
+        "create.fetch_not_applicable",
+        "create.base_unavailable",
+        "create.creation_failed",
+        "create.description_failed",
+        "create.setup_failed",
+        "trust.approval_required"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "CreateInput": {
+            "additionalProperties": false,
+            "description": "Strict machine request for creating worktrees.",
+            "properties": {
+              "branch": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              },
+              "fetch": {
+                "default": false,
+                "type": "boolean"
+              },
+              "remote": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/CreateInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_CreateInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "anyOf": [
+          {
+            "properties": {
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "dry_run": {
+                "type": "boolean"
+              },
+              "outcome": {
+                "enum": [
+                  "existing"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "branch",
+              "destination",
+              "dry_run",
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_required": {
+                "type": "boolean"
+              },
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "outcome": {
+                "enum": [
+                  "creation_plan"
+                ],
+                "type": "string"
+              },
+              "start_point": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "approval_required",
+              "branch",
+              "destination",
+              "kind",
+              "outcome",
+              "start_point"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "creation_plan"
+                ],
+                "type": "string"
+              },
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start_point": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "branch",
+              "destination",
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "created"
+                ],
+                "type": "string"
+              },
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start_point": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "branch",
+              "destination",
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ],
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "description": "Version 1 success variants shared by switch and create adapters.",
+        "title": "OperationResult"
+      },
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "remove": {
+    "schema_version": 1,
+    "command": "remove",
+    "status": "success",
+    "result": {
+      "actions": [
+        "pre_remove_hooks",
+        "remove_worktree"
+      ],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid",
+        "remove.duplicate_target",
+        "remove.primary_forbidden",
+        "remove.force_required",
+        "remove.lifecycle_active",
+        "remove.journal_invalid",
+        "remove.unknown_target",
+        "remove.preflight_failed",
+        "remove.target_unavailable",
+        "trust.approval_required"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "RemovalInput": {
+            "additionalProperties": false,
+            "description": "Strict version 1 input for worktree removal.",
+            "properties": {
+              "branches": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/RemovalInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_RemovalInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": null,
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "merge": {
+    "schema_version": 1,
+    "command": "merge",
+    "status": "success",
+    "result": {
+      "actions": [
+        "journal",
+        "rebase",
+        "squash",
+        "pre_merge_hooks",
+        "fast_forward_merge",
+        "pre_remove_hooks",
+        "remove_worktree",
+        "destination",
+        "trust.review",
+        "merge.retry",
+        "trust.review_squash_generator"
+      ],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid",
+        "merge.primary_forbidden",
+        "merge.dirty",
+        "merge.not_fast_forwardable",
+        "merge.squash_generator_missing",
+        "merge.squash_approval_required",
+        "merge.policy_conflict",
+        "merge.hook_approval_required",
+        "merge.nothing_to_merge",
+        "merge.stale_plan",
+        "merge.rebase_conflict",
+        "merge.validation_failed",
+        "merge.cleanup_failed",
+        "merge.remove_failed",
+        "merge.journal_failed",
+        "merge.execution_failed",
+        "merge.blocked",
+        "trust.read_failed"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "MergeInput": {
+            "additionalProperties": false,
+            "description": "Strict version 1 input for the merge lifecycle.",
+            "properties": {
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              },
+              "no_rebase": {
+                "default": false,
+                "type": "boolean"
+              },
+              "no_remove": {
+                "default": false,
+                "type": "boolean"
+              },
+              "no_squash": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/MergeInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_MergeInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "MergePolicy": {
+            "properties": {
+              "no_rebase": {
+                "type": "boolean"
+              },
+              "no_remove": {
+                "type": "boolean"
+              },
+              "no_squash": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "no_rebase",
+              "no_remove",
+              "no_squash"
+            ],
+            "type": "object"
+          }
+        },
+        "description": "Public result shared by human and JSON merge adapters.",
+        "oneOf": [
+          {
+            "properties": {
+              "approval_required": {
+                "type": "boolean"
+              },
+              "outcome": {
+                "enum": [
+                  "dry_run"
+                ],
+                "type": "string"
+              },
+              "plan": {
+                "type": "string"
+              },
+              "policy": {
+                "$ref": "#/definitions/MergePolicy"
+              },
+              "ready": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "approval_required",
+              "outcome",
+              "plan",
+              "policy",
+              "ready"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "destination": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BytePath"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "in_place"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "destination": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BytePath"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "removed"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "destination": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BytePath"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "retained"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "MergeResult"
+      },
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "commit": {
+    "schema_version": 1,
+    "command": "commit",
+    "status": "success",
+    "result": {
+      "actions": [
+        "git.stage_paths",
+        "git.stage_patch",
+        "commit.stage_all",
+        "commit.retry_staged",
+        "trust.approve_commit_generator",
+        "help.command_json"
+      ],
+      "arguments": [
+        "--message",
+        "--stage-all",
+        "--dry-run"
+      ],
+      "error_codes": [
+        "cli.invalid_arguments",
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "commit.nothing_staged",
+        "commit.nothing_to_commit",
+        "commit.generator_failed",
+        "commit.git_failed",
+        "trust.approval_required"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "CommitRequest": {
+            "additionalProperties": false,
+            "properties": {
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              },
+              "message": {
+                "$ref": "#/definitions/MessageSource"
+              },
+              "selection": {
+                "$ref": "#/definitions/Selection"
+              }
+            },
+            "required": [
+              "message",
+              "selection"
+            ],
+            "type": "object"
+          },
+          "MessageSource": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "source": {
+                    "enum": [
+                      "provided"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "source": {
+                    "enum": [
+                      "configured_generator"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Selection": {
+            "enum": [
+              "staged",
+              "stage_all"
+            ],
+            "type": "string"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/CommitRequest"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_CommitRequest",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      }
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "pr.create": {
+    "schema_version": 1,
+    "command": "create",
+    "status": "success",
+    "result": {
+      "actions": [
+        "fetch_base_ref",
+        "create_branch",
+        "create_worktree",
+        "set_branch_description"
+      ],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid",
+        "create.branch_required",
+        "create.invalid_branch",
+        "create.branch_registered",
+        "create.destination_unavailable",
+        "create.destination_collision",
+        "create.remote_selection_required",
+        "create.fetch_not_applicable",
+        "create.base_unavailable",
+        "create.creation_failed",
+        "create.description_failed",
+        "create.setup_failed",
+        "trust.approval_required"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "CreateInput": {
+            "additionalProperties": false,
+            "description": "Strict machine request for creating worktrees.",
+            "properties": {
+              "branch": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "description": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              },
+              "fetch": {
+                "default": false,
+                "type": "boolean"
+              },
+              "remote": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/CreateInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_CreateInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "anyOf": [
+          {
+            "properties": {
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "dry_run": {
+                "type": "boolean"
+              },
+              "outcome": {
+                "enum": [
+                  "existing"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "branch",
+              "destination",
+              "dry_run",
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_required": {
+                "type": "boolean"
+              },
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "outcome": {
+                "enum": [
+                  "creation_plan"
+                ],
+                "type": "string"
+              },
+              "start_point": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "approval_required",
+              "branch",
+              "destination",
+              "kind",
+              "outcome",
+              "start_point"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "creation_plan"
+                ],
+                "type": "string"
+              },
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start_point": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "branch",
+              "destination",
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "created"
+                ],
+                "type": "string"
+              },
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start_point": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "branch",
+              "destination",
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ],
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "description": "Version 1 success variants shared by switch and create adapters.",
+        "title": "OperationResult"
+      },
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "trust.status": {
+    "schema_version": 1,
+    "command": "trust.status",
+    "status": "success",
+    "result": {
+      "actions": [],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "EmptyInput": {
+            "additionalProperties": false,
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/EmptyInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "title": "OptionalInputRequest_for_EmptyInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": null,
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "trust.reset": {
+    "schema_version": 1,
+    "command": "trust.reset",
+    "status": "success",
+    "result": {
+      "actions": [
+        "trust.reset"
+      ],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "DryRunInput": {
+            "additionalProperties": false,
+            "properties": {
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/DryRunInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_DryRunInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": null,
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "trust.commit_status": {
+    "schema_version": 1,
+    "command": "trust.commit_status",
+    "status": "success",
+    "result": {
+      "actions": [],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "EmptyInput": {
+            "additionalProperties": false,
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/EmptyInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "title": "OptionalInputRequest_for_EmptyInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": null,
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "trust.commit_reset": {
+    "schema_version": 1,
+    "command": "trust.commit_reset",
+    "status": "success",
+    "result": {
+      "actions": [
+        "trust.commit_reset"
+      ],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "DryRunInput": {
+            "additionalProperties": false,
+            "properties": {
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/DryRunInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_DryRunInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": null,
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "trust.commit_approve": {
+    "schema_version": 1,
+    "command": "trust.commit_approve",
+    "status": "success",
+    "result": {
+      "actions": [
+        "trust.approve_commit_generator"
+      ],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid",
+        "trust.approval_required"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "DryRunInput": {
+            "additionalProperties": false,
+            "properties": {
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/DryRunInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_DryRunInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": null,
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "trust.pr_status": {
+    "schema_version": 1,
+    "command": "trust.pr_status",
+    "status": "success",
+    "result": {
+      "actions": [],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid"
+      ],
+      "outcome": "help",
+      "request_schema": null,
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": null,
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "trust.pr_reset": {
+    "schema_version": 1,
+    "command": "trust.pr_reset",
+    "status": "success",
+    "result": {
+      "actions": [],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid"
+      ],
+      "outcome": "help",
+      "request_schema": null,
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": null,
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "trust.pr_approve": {
+    "schema_version": 1,
+    "command": "trust.pr_approve",
+    "status": "success",
+    "result": {
+      "actions": [],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid"
+      ],
+      "outcome": "help",
+      "request_schema": null,
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": null,
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "trust.merge_status": {
+    "schema_version": 1,
+    "command": "trust.merge_status",
+    "status": "success",
+    "result": {
+      "actions": [],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "EmptyInput": {
+            "additionalProperties": false,
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/EmptyInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "title": "OptionalInputRequest_for_EmptyInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": null,
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "trust.merge_reset": {
+    "schema_version": 1,
+    "command": "trust.merge_reset",
+    "status": "success",
+    "result": {
+      "actions": [
+        "trust.merge_reset"
+      ],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "DryRunInput": {
+            "additionalProperties": false,
+            "properties": {
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/DryRunInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_DryRunInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": null,
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "trust.merge_approve": {
+    "schema_version": 1,
+    "command": "trust.merge_approve",
+    "status": "success",
+    "result": {
+      "actions": [
+        "trust.approve_merge_generator"
+      ],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "repository.invalid",
+        "trust.approval_required"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "DryRunInput": {
+            "additionalProperties": false,
+            "properties": {
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/DryRunInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_DryRunInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": null,
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  },
+  "install": {
+    "schema_version": 1,
+    "command": "install",
+    "status": "success",
+    "result": {
+      "actions": [
+        "file.write",
+        "install.approve"
+      ],
+      "error_codes": [
+        "json.invalid_request",
+        "json.unsupported_schema_version",
+        "install.approval_required",
+        "install.write_failed"
+      ],
+      "outcome": "help",
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "InstallInput": {
+            "additionalProperties": false,
+            "properties": {
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/InstallInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_InstallInput",
+        "type": "object"
+      },
+      "response_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "Diagnostic": {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "original_size": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "stream": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "content",
+              "original_size",
+              "source",
+              "stream",
+              "truncated"
+            ],
+            "type": "object"
+          },
+          "Effect": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "attempted": {
+                "type": "boolean"
+              },
+              "completed": {
+                "type": "boolean"
+              },
+              "details": true
+            },
+            "required": [
+              "action",
+              "attempted",
+              "completed"
+            ],
+            "type": "object"
+          },
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "NextStep": {
+            "properties": {
+              "action": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "invocation": true,
+              "mutation": {
+                "type": "string"
+              },
+              "requires_human_approval": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "description",
+              "invocation",
+              "mutation",
+              "requires_human_approval"
+            ],
+            "type": "object"
+          }
+        },
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "context": true,
+          "diagnostics": {
+            "items": {
+              "$ref": "#/definitions/Diagnostic"
+            },
+            "type": "array"
+          },
+          "effects": {
+            "items": {
+              "$ref": "#/definitions/Effect"
+            },
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ErrorBody"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_steps": {
+            "items": {
+              "$ref": "#/definitions/NextStep"
+            },
+            "type": "array"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": true,
+          "schema_version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command",
+          "context",
+          "diagnostics",
+          "effects",
+          "next_steps",
+          "schema_version",
+          "status"
+        ],
+        "title": "Response",
+        "type": "object"
+      },
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "InstallPlan": {
+            "description": "Deterministic filesystem changes shared by installation adapters.",
+            "properties": {
+              "changed": {
+                "type": "boolean"
+              },
+              "configuration": {
+                "$ref": "#/definitions/InstallTarget"
+              },
+              "integration": {
+                "$ref": "#/definitions/InstallTarget"
+              },
+              "startup": {
+                "$ref": "#/definitions/InstallTarget"
+              }
+            },
+            "required": [
+              "changed",
+              "configuration",
+              "integration",
+              "startup"
+            ],
+            "type": "object"
+          },
+          "InstallTarget": {
+            "properties": {
+              "path": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "would_change": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "would_change"
+            ],
+            "type": "object"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "dry_run"
+                ],
+                "type": "string"
+              },
+              "plan": {
+                "$ref": "#/definitions/InstallPlan"
+              }
+            },
+            "required": [
+              "outcome",
+              "plan"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "already_current"
+                ],
+                "type": "string"
+              },
+              "plan": {
+                "$ref": "#/definitions/InstallPlan"
+              }
+            },
+            "required": [
+              "outcome",
+              "plan"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "installed"
+                ],
+                "type": "string"
+              },
+              "plan": {
+                "$ref": "#/definitions/InstallPlan"
+              }
+            },
+            "required": [
+              "outcome",
+              "plan"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "InstallResult"
+      },
+      "selection_required_context_schema": null
+    },
+    "error": null,
+    "context": {
+      "changes": {},
+      "repository": {}
+    },
+    "effects": [],
+    "diagnostics": [],
+    "next_steps": []
+  }
+}
