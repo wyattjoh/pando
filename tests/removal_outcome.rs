@@ -28,6 +28,7 @@ fn typed_removal_plan_and_executor_track_force_targets_and_effects() {
     git(&main, &["init", "-b", "main"]);
     git(&main, &["config", "user.name", "Pando Test"]);
     git(&main, &["config", "user.email", "pando@example.com"]);
+    git(&main, &["config", "commit.gpgsign", "false"]);
     fs::write(main.join("tracked"), "base\n").unwrap();
     git(&main, &["add", "tracked"]);
     git(&main, &["commit", "-m", "base"]);

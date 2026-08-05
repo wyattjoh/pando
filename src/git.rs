@@ -1843,6 +1843,7 @@ pub(crate) fn initialize_test_repository_with_commit(cwd: &Path) -> Result<()> {
         &["init", "-b", "main"][..],
         &["config", "user.name", "Pando Test"][..],
         &["config", "user.email", "pando@example.invalid"][..],
+        &["config", "commit.gpgsign", "false"][..],
     ] {
         let output = GitProcess::new(cwd, args)
             .captured()

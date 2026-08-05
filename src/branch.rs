@@ -358,6 +358,7 @@ mod tests {
             directory.path(),
             &["config", "user.email", "pando@example.com"],
         );
+        run(directory.path(), &["config", "commit.gpgsign", "false"]);
         run(
             directory.path(),
             &["commit", "--allow-empty", "-m", "initial"],

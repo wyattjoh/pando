@@ -42,6 +42,7 @@ impl Repository {
         git(&main, ["init", "-b", "main"]);
         git(&main, ["config", "user.email", "test@example.com"]);
         git(&main, ["config", "user.name", "Test User"]);
+        git(&main, ["config", "commit.gpgsign", "false"]);
         fs::write(main.join("README.md"), "initial\n").unwrap();
         git(&main, ["add", "README.md"]);
         git(&main, ["commit", "-m", "initial"]);
@@ -3314,6 +3315,141 @@ fn json_merge_exposes_the_squash_message_only_in_diagnostics() {
         "the generated message is not recoverable from diagnostics:\n{squash}"
     );
     assert!(squash.len() <= 16 * 1024, "squash diagnostic was unbounded");
+}
+
+#[test]
+fn json_merge_resumes_every_interrupted_squash_boundary_without_regeneration() {
+    for (first, second) in [
+        ("reset", "--soft"),
+        ("commit", "--cleanup=verbatim"),
+        ("show", "--no-patch"),
+    ] {
+        let repo = Repository::new();
+        let xdg = tempfile::tempdir().unwrap();
+        let calls = xdg.path().join("generator-calls");
+        fs::create_dir_all(xdg.path().join("pando")).unwrap();
+        fs::write(
+            xdg.path().join("pando/config.yaml"),
+            format!(
+                "merge:\n  generation:\n    command: \"printf x >> {} && cat >/dev/null && printf 'feat: recovered squash\\n\\n- reused the checkpoint\\n'\"\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        commit_three_on_topic(&repo);
+        let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+        let (_fake_bin, path, real_git) = failing_git(first, second);
+        let request = serde_json::json!({
+            "schema_version": 1,
+            "input": {"no_remove": true}
+        });
+
+        let interrupted = json_command_with_env(
+            &repo.linked,
+            &["merge", "--input-output", "json"],
+            Some(&request),
+            &[
+                ("XDG_CONFIG_HOME", xdg.path()),
+                ("PATH", Path::new(&path)),
+                ("REAL_GIT", &real_git),
+            ],
+        );
+        assert!(!interrupted.status.success(), "{first} {second}");
+        assert_eq!(fs::read(&calls).unwrap(), b"x", "{first} {second}");
+
+        let resumed = json_command_with_env(
+            &repo.linked,
+            &["merge", "--input-output", "json"],
+            Some(&request),
+            &[("XDG_CONFIG_HOME", xdg.path())],
+        );
+        assert!(
+            resumed.status.success(),
+            "{first} {second}: stdout={} stderr={}",
+            String::from_utf8_lossy(&resumed.stdout),
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        let value = assert_json_pure(&resumed);
+        assert_eq!(value["status"], "success");
+        assert_eq!(fs::read(&calls).unwrap(), b"x", "{first} {second}");
+        assert_eq!(
+            git_output(
+                &repo.main,
+                ["rev-list", "--count", &format!("{main_before}..HEAD")]
+            ),
+            "1",
+            "{first} {second}"
+        );
+        assert_eq!(
+            git_output(&repo.main, ["log", "-1", "--format=%s"]),
+            "feat: recovered squash",
+            "{first} {second}"
+        );
+    }
+}
+
+#[test]
+fn merge_retry_after_completed_squash_does_not_collapse_twice() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let calls = xdg.path().join("generator-calls");
+    let allow = repo.temp.path().join("allow-validation");
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        format!(
+            "merge:\n  generation:\n    command: \"printf x >> {} && cat >/dev/null && printf 'feat: durable squash\\n\\n- persisted completion\\n'\"\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        format!(
+            "hooks:\n  pre-merge:\n    - name: validation gate\n      command: test -f {}\n",
+            allow.display()
+        ),
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(&repo.linked, ["commit", "-m", "configure validation gate"]);
+    commit_three_on_topic(&repo);
+    let main_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let failed = run_pty_command(command, b"y\r");
+    assert!(!failed.status.success());
+    assert_eq!(fs::read(&calls).unwrap(), b"x");
+    let collapsed = git_output(&repo.linked, ["rev-parse", "HEAD"]);
+
+    fs::write(&allow, "allow\n").unwrap();
+    let retry = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--no-remove"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(fs::read(&calls).unwrap(), b"x");
+    assert_eq!(git_output(&repo.linked, ["rev-parse", "HEAD"]), collapsed);
+    assert_eq!(
+        git_output(
+            &repo.main,
+            ["rev-list", "--count", &format!("{main_before}..HEAD")]
+        ),
+        "1"
+    );
 }
 
 #[test]
@@ -6927,6 +7063,23 @@ fn json_command(
     run_json_command(command, stdin)
 }
 
+fn json_command_with_env(
+    cwd: &Path,
+    args: &[&str],
+    stdin: Option<&serde_json::Value>,
+    environment: &[(&str, &Path)],
+) -> std::process::Output {
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(args)
+        .current_dir(cwd)
+        .envs(environment.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run_json_command(command, stdin)
+}
+
 fn json_create_request(
     repo: &Repository,
     xdg: &TempDir,
@@ -8671,6 +8824,7 @@ fn advance_origin(repo: &Repository, origin: &Path) -> String {
     );
     git(&publisher, ["config", "user.email", "test@example.com"]);
     git(&publisher, ["config", "user.name", "Test User"]);
+    git(&publisher, ["config", "commit.gpgsign", "false"]);
     fs::write(publisher.join("published.txt"), "published\n").unwrap();
     git(&publisher, ["add", "published.txt"]);
     git(&publisher, ["commit", "-m", "published"]);

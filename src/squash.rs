@@ -5,6 +5,8 @@
 //! lifecycle can durably checkpoint preparation without owning Git mutation.
 
 use std::{
+    error::Error,
+    fmt,
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -184,6 +186,14 @@ pub(crate) enum Preparation {
 /// Opaque prepared state consumed by [`collapse`].
 pub(crate) struct PreparedSquash {
     checkpoint: PreparedCheckpoint,
+    recovery: RecoveryState,
+}
+
+#[derive(Clone, Copy)]
+enum RecoveryState {
+    NotStarted,
+    ResetApplied,
+    CommitCreated,
 }
 
 impl PreparedSquash {
@@ -218,6 +228,31 @@ pub(crate) struct PreparedCheckpoint {
 }
 
 impl PreparedCheckpoint {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_persisted(
+        topic_worktree: PathBuf,
+        topic_branch: String,
+        target_branch: String,
+        expected_topic_commit: String,
+        expected_target_commit: String,
+        expected_result_tree: String,
+        commit_count: usize,
+        include_staged: bool,
+        message: String,
+    ) -> Self {
+        Self {
+            topic_worktree,
+            topic_branch,
+            target_branch,
+            expected_topic_commit,
+            expected_target_commit,
+            expected_result_tree,
+            commit_count,
+            include_staged,
+            message,
+        }
+    }
+
     pub(crate) fn topic_worktree(&self) -> &Path {
         &self.topic_worktree
     }
@@ -250,6 +285,44 @@ impl PreparedCheckpoint {
 /// Verified result of a collapse.
 pub(crate) struct CollapsedSquash {
     commit: String,
+}
+
+/// Durable progress reached before a collapse failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CollapseProgress {
+    BeforeReset,
+    AfterReset,
+    AfterCommit,
+}
+
+/// A squash failure carrying the last semantically verified mutation boundary.
+#[derive(Debug)]
+pub(crate) struct CollapseFailure {
+    progress: CollapseProgress,
+    source: anyhow::Error,
+}
+
+impl CollapseFailure {
+    fn new(progress: CollapseProgress, source: anyhow::Error) -> Self {
+        Self { progress, source }
+    }
+
+    #[must_use]
+    pub(crate) const fn progress(&self) -> CollapseProgress {
+        self.progress
+    }
+}
+
+impl fmt::Display for CollapseFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl Error for CollapseFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source.source()
+    }
 }
 
 impl CollapsedSquash {
@@ -353,12 +426,12 @@ pub(crate) fn prepare(required: RequiredSquash) -> Result<Preparation> {
             include_staged: required.include_staged,
             message,
         },
+        recovery: RecoveryState::NotStarted,
     }))
 }
 
-/// Revalidates prepared facts, owns reset plus commit, and proves the result.
-pub(crate) fn collapse(prepared: PreparedSquash) -> Result<CollapsedSquash> {
-    let checkpoint = prepared.checkpoint;
+/// Reconstructs opaque prepared state from a durable checkpoint and fresh Git facts.
+pub(crate) fn resume(checkpoint: PreparedCheckpoint) -> Result<PreparedSquash> {
     let repository = RepositoryObservation::new(&checkpoint.topic_worktree).repository()?;
     verify_worktree(
         &repository,
@@ -366,6 +439,96 @@ pub(crate) fn collapse(prepared: PreparedSquash) -> Result<CollapsedSquash> {
         &checkpoint.topic_branch,
     )?;
     let history = HistoryObservation::new(&checkpoint.topic_worktree);
+    if history.commit(&checkpoint.target_branch)? != checkpoint.expected_target_commit
+        || !history.is_ancestor(
+            &checkpoint.expected_target_commit,
+            &checkpoint.expected_topic_commit,
+        )?
+    {
+        bail!("prepared squash recovery is stale because target history or ancestry changed");
+    }
+    let head = history.head_commit()?;
+    let recovery = if head == checkpoint.expected_topic_commit {
+        verify_prepared_index(history, &checkpoint)?;
+        RecoveryState::NotStarted
+    } else if head == checkpoint.expected_target_commit {
+        if history.index_tree()? != checkpoint.expected_result_tree {
+            bail!("prepared squash recovery is ambiguous because the reset index tree changed");
+        }
+        RecoveryState::ResetApplied
+    } else {
+        verify_result(history, &head, &checkpoint).context(
+            "prepared squash recovery is ambiguous because HEAD is not the checkpointed result",
+        )?;
+        RecoveryState::CommitCreated
+    };
+    Ok(PreparedSquash {
+        checkpoint,
+        recovery,
+    })
+}
+
+/// Revalidates prepared facts, owns reset plus commit, and proves the result.
+pub(crate) fn collapse(
+    prepared: PreparedSquash,
+) -> std::result::Result<CollapsedSquash, CollapseFailure> {
+    let checkpoint = prepared.checkpoint;
+    if matches!(prepared.recovery, RecoveryState::CommitCreated) {
+        let history = HistoryObservation::new(&checkpoint.topic_worktree);
+        let commit = history
+            .head_commit()
+            .map_err(|error| CollapseFailure::new(CollapseProgress::AfterCommit, error))?;
+        verify_result(history, &commit, &checkpoint)
+            .map_err(|error| CollapseFailure::new(CollapseProgress::AfterCommit, error))?;
+        return Ok(CollapsedSquash { commit });
+    }
+
+    let repository = RepositoryObservation::new(&checkpoint.topic_worktree)
+        .repository()
+        .map_err(|error| CollapseFailure::new(CollapseProgress::BeforeReset, error))?;
+    verify_worktree(
+        &repository,
+        &checkpoint.topic_worktree,
+        &checkpoint.topic_branch,
+    )
+    .map_err(|error| CollapseFailure::new(CollapseProgress::BeforeReset, error))?;
+    let history = HistoryObservation::new(&checkpoint.topic_worktree);
+    if matches!(prepared.recovery, RecoveryState::NotStarted) {
+        verify_prepared_history(history, &checkpoint)
+            .map_err(|error| CollapseFailure::new(CollapseProgress::BeforeReset, error))?;
+        LifecycleMutation::new(&checkpoint.topic_worktree)
+            .reset_soft(&checkpoint.expected_target_commit)
+            .map_err(|error| CollapseFailure::new(CollapseProgress::BeforeReset, error))?;
+    } else {
+        verify_reset_state(history, &checkpoint)
+            .map_err(|error| CollapseFailure::new(CollapseProgress::AfterReset, error))?;
+    }
+    if let Err(error) =
+        LifecycleMutation::new(&checkpoint.topic_worktree).commit_message(&checkpoint.message)
+    {
+        let progress = history
+            .head_commit()
+            .map_or(CollapseProgress::AfterReset, |head| {
+                if head == checkpoint.expected_target_commit {
+                    CollapseProgress::AfterReset
+                } else {
+                    CollapseProgress::AfterCommit
+                }
+            });
+        return Err(CollapseFailure::new(progress, error));
+    }
+    let commit = history
+        .head_commit()
+        .map_err(|error| CollapseFailure::new(CollapseProgress::AfterCommit, error))?;
+    verify_result(history, &commit, &checkpoint)
+        .map_err(|error| CollapseFailure::new(CollapseProgress::AfterCommit, error))?;
+    Ok(CollapsedSquash { commit })
+}
+
+fn verify_prepared_history(
+    history: HistoryObservation<'_>,
+    checkpoint: &PreparedCheckpoint,
+) -> Result<()> {
     if history.head_commit()? != checkpoint.expected_topic_commit
         || history.commit(&checkpoint.target_branch)? != checkpoint.expected_target_commit
         || !history.is_ancestor(
@@ -375,24 +538,47 @@ pub(crate) fn collapse(prepared: PreparedSquash) -> Result<CollapsedSquash> {
     {
         bail!("squash preparation is stale because topic or target history changed");
     }
+    verify_prepared_index(history, checkpoint)
+}
+
+fn verify_prepared_index(
+    history: HistoryObservation<'_>,
+    checkpoint: &PreparedCheckpoint,
+) -> Result<()> {
     if history.index_tree()? != checkpoint.expected_result_tree {
         bail!("squash preparation is stale because the prepared index tree changed");
     }
     if history.has_staged_changes()? != checkpoint.include_staged {
         bail!("squash preparation is stale because staged-change mode changed");
     }
-    let mutation = LifecycleMutation::new(&checkpoint.topic_worktree);
-    mutation.reset_soft(&checkpoint.expected_target_commit)?;
-    mutation.commit_message(&checkpoint.message)?;
-    let commit = history.head_commit()?;
-    let facts = history.commit_facts(&commit)?;
-    if facts.parents != [checkpoint.expected_target_commit]
+    Ok(())
+}
+
+fn verify_reset_state(
+    history: HistoryObservation<'_>,
+    checkpoint: &PreparedCheckpoint,
+) -> Result<()> {
+    if history.head_commit()? != checkpoint.expected_target_commit
+        || history.index_tree()? != checkpoint.expected_result_tree
+    {
+        bail!("prepared squash recovery no longer matches the reset state");
+    }
+    Ok(())
+}
+
+fn verify_result(
+    history: HistoryObservation<'_>,
+    commit: &str,
+    checkpoint: &PreparedCheckpoint,
+) -> Result<()> {
+    let facts = history.commit_facts(commit)?;
+    if facts.parents != [checkpoint.expected_target_commit.as_str()]
         || facts.tree != checkpoint.expected_result_tree
         || facts.message.trim_end() != checkpoint.message
     {
         bail!("squash commit did not match its prepared parent, tree, and message");
     }
-    Ok(CollapsedSquash { commit })
+    Ok(())
 }
 
 fn verify_worktree(repository: &Repository, path: &Path, branch: &str) -> Result<()> {
