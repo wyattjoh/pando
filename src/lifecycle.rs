@@ -428,9 +428,10 @@ pub(crate) fn execute_merge_request(input: &MergeInput) -> MergeOutcome {
 fn run_prepared_merge(
     plan: &MergePlan,
     input: &MergeInput,
+    changes: journaled_merge::ChangePolicy,
     output: &journaled_merge::MergeExecutionOutput,
 ) -> MergeOutcome {
-    let execution = execute_merge(plan, output);
+    let execution = execute_merge(plan, changes, output);
     let diagnostics = merge_diagnostics(execution.diagnostics);
     if let Some((kind, message)) = execution.failure {
         let working_directory = execution
@@ -522,7 +523,10 @@ fn merge_trust_recovery(
 /// # Errors
 /// Returns an error for an invalid or blocked lifecycle state.
 #[allow(clippy::too_many_lines)]
-fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
+fn plan_merge(
+    policy: MergePolicy,
+    changes: journaled_merge::ChangePolicy,
+) -> PreflightResult<MergePlan> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = RepositoryObservation::new(&cwd).repository()?;
     let primary = repository
@@ -550,6 +554,7 @@ fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
         if state.no_rebase != policy.no_rebase
             || state.no_remove != policy.no_remove
             || state.no_squash != policy.no_squash
+            || state.yolo_stage_all != matches!(changes, journaled_merge::ChangePolicy::IncludeAll)
         {
             return Err(preflight(
                 PreflightFailureKind::PolicyConflict,
@@ -557,11 +562,18 @@ fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
             ));
         }
     }
-    if !rebase_active
+    let dirty = !rebase_active && current_history.status()?.is_dirty();
+    if journal.is_none() && matches!(changes, journaled_merge::ChangePolicy::IncludeAll) && !dirty {
+        return Err(preflight(
+            PreflightFailureKind::NothingToMerge,
+            "nothing to commit",
+        ));
+    }
+    if dirty
         && journal
             .as_ref()
             .is_none_or(|state| !state.squash.prepared())
-        && current_history.status()?.is_dirty()
+        && matches!(changes, journaled_merge::ChangePolicy::RequireClean)
     {
         return Err(preflight(
             PreflightFailureKind::Dirty,
@@ -624,7 +636,7 @@ fn plan_merge(policy: MergePolicy) -> PreflightResult<MergePlan> {
         target: &target,
         enabled: squash_enabled,
         final_history: !rebase_active,
-        include_staged: false,
+        include_staged: matches!(changes, journaled_merge::ChangePolicy::IncludeAll),
     })?;
     if squash.applicable() && !squash.generator_configured() {
         return Err(preflight(
@@ -824,6 +836,7 @@ enum SquashStateV2 {
 }
 
 impl SquashStateV2 {
+    #[cfg(test)]
     const fn completed(&self) -> bool {
         matches!(self, Self::Completed { .. })
     }
@@ -1525,18 +1538,6 @@ fn push_removal_git_diagnostic(
     });
 }
 
-#[derive(Clone, Copy)]
-enum MergeWorktreeOutcome {
-    Retained,
-    Removed,
-    SwitchedInPlace,
-}
-
-#[derive(Clone, Copy)]
-enum MergeIntent {
-    StageAll,
-}
-
 /// Removes selected topic worktrees and emits a destination only if the current
 /// worktree was removed.
 ///
@@ -1757,6 +1758,7 @@ fn execution_failure(
 #[allow(clippy::too_many_lines)]
 fn execute_merge(
     plan: &MergePlan,
+    changes: journaled_merge::ChangePolicy,
     output: &journaled_merge::MergeExecutionOutput,
 ) -> MergeExecutionOutcome {
     let mut effects = plan.effects.clone();
@@ -1777,6 +1779,7 @@ fn execute_merge(
             .is_ok_and(|head| head == plan.context.target_commit)
         || (!plan.context.rebase_active
             && !plan.resuming_squash
+            && matches!(changes, journaled_merge::ChangePolicy::RequireClean)
             && current_history
                 .status()
                 .map_or(true, |status| status.is_dirty()))
@@ -1836,7 +1839,7 @@ fn execute_merge(
             no_rebase: plan.context.policy.no_rebase,
             no_remove: plan.context.policy.no_remove,
             no_squash: plan.context.policy.no_squash,
-            yolo_stage_all: false,
+            yolo_stage_all: matches!(changes, journaled_merge::ChangePolicy::IncludeAll),
             squash: initial_squash_state(
                 plan.context.policy.no_squash || !plan.config.squash,
                 &plan.squash,
@@ -1864,6 +1867,29 @@ fn execute_merge(
         mark_effect(&mut effects, "journal", true, true);
     }
 
+    if matches!(changes, journaled_merge::ChangePolicy::IncludeAll)
+        && state.squash.not_started()
+        && current_history
+            .status()
+            .is_ok_and(|status| status.is_dirty())
+    {
+        if let Err(error) = output.run_action(
+            "Staging all changes...",
+            "Staged all changes",
+            "Failed to stage changes",
+            || LifecycleMutation::new(&current.path).stage_all(),
+        ) {
+            return execution_failure(
+                plan,
+                effects,
+                diagnostics,
+                MergePhase::Planned,
+                MergeExecutionFailureKind::StalePlan,
+                error,
+            );
+        }
+    }
+
     if plan.needs_rebase || plan.context.rebase_active {
         mark_effect(&mut effects, "rebase", true, false);
         let rebase_result = if plan.context.rebase_active {
@@ -1879,7 +1905,13 @@ fn execute_merge(
                 &format!("Rebased onto {}", state.target_branch),
                 &format!("Failed to rebase onto {}", state.target_branch),
                 |policy| {
-                    LifecycleMutation::new(&current.path).rebase_onto(&state.target_branch, policy)
+                    if matches!(changes, journaled_merge::ChangePolicy::IncludeAll) {
+                        LifecycleMutation::new(&current.path)
+                            .rebase_onto_autostash(&state.target_branch, policy)
+                    } else {
+                        LifecycleMutation::new(&current.path)
+                            .rebase_onto(&state.target_branch, policy)
+                    }
                 },
             )
         };
@@ -1899,6 +1931,28 @@ fn execute_merge(
                     error,
                 );
             }
+        }
+    }
+    if matches!(changes, journaled_merge::ChangePolicy::IncludeAll)
+        && state.squash.not_started()
+        && current_history
+            .status()
+            .is_ok_and(|status| status.is_dirty())
+    {
+        if let Err(error) = output.run_action(
+            "Staging all changes...",
+            "Staged all changes",
+            "Failed to stage changes",
+            || LifecycleMutation::new(&current.path).stage_all(),
+        ) {
+            return execution_failure(
+                plan,
+                effects,
+                diagnostics,
+                MergePhase::Rebase,
+                MergeExecutionFailureKind::StalePlan,
+                error,
+            );
         }
     }
     if let SquashStateV2::Prepared { checkpoint } = &state.squash {
@@ -1988,7 +2042,7 @@ fn execute_merge(
                 target: &state.target_branch,
                 enabled: true,
                 final_history: true,
-                include_staged: false,
+                include_staged: matches!(changes, journaled_merge::ChangePolicy::IncludeAll),
             });
             let required = match assessment {
                 Ok(squash::Assessment::Required(required)) => required,
@@ -2573,7 +2627,11 @@ pub fn merge(no_rebase: bool, no_remove: bool, no_squash: bool) -> Result<()> {
         no_squash,
         dry_run: false,
     };
-    let mut preparation = journaled_merge::prepare(journaled_merge::MergeRequest::ordinary(&input));
+    run_human_merge(journaled_merge::MergeRequest::ordinary(&input))
+}
+
+fn run_human_merge(request: journaled_merge::MergeRequest) -> Result<()> {
+    let mut preparation = journaled_merge::prepare(request);
     loop {
         match preparation {
             journaled_merge::Preparation::Ready(prepared) => {
@@ -2636,309 +2694,12 @@ fn finish_human_merge(outcome: &MergeOutcome) -> Result<()> {
 ///
 /// Returns an error when merge preconditions, hooks, Git execution, or cleanup fails.
 pub fn merge_yolo(no_rebase: bool, no_remove: bool) -> Result<()> {
-    merge_inner(
-        MergePolicy::new(no_rebase, no_remove, false),
-        MergeIntent::StageAll,
-    )
-}
-
-#[allow(clippy::too_many_lines)] // This is the explicit lifecycle state-machine boundary.
-fn merge_inner(policy: MergePolicy, intent: MergeIntent) -> Result<()> {
-    let yolo_stage_all = matches!(intent, MergeIntent::StageAll);
-    let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = RepositoryObservation::new(&cwd).repository()?;
-    let primary = repository
-        .primary
-        .as_ref()
-        .context("cannot merge from a bare repository")?;
-    let in_place = repository.current().path == *primary;
-    let current_history = HistoryObservation::new(&repository.current().path);
-    let primary_history = HistoryObservation::new(primary);
-    let identity = RepositoryObservation::new(&repository.current().path).worktree_identity()?;
-    let mut journal = read_journal(&repository.common_dir, &identity)?;
-    let rebase_active = LifecycleMutation::new(&repository.current().path).rebase_in_progress()?;
-    let source = match &journal {
-        Some(state) => state.source_branch.clone(),
-        None => repository.current_branch()?.to_owned(),
-    };
-    let dirty = !rebase_active && current_history.status()?.is_dirty();
-    if dirty && !yolo_stage_all {
-        bail!("the topic worktree has local changes; commit or discard them before merging");
-    }
-    if yolo_stage_all && journal.is_none() && !dirty {
-        bail!("nothing to commit");
-    }
-    let config = EffectiveConfig::load(&repository)?;
-    if let Some(existing) = &journal {
-        if existing.squash.prepared() {
-            bail!("prepared squash recovery requires the journaled merge executor")
-        }
-        if existing.topic_path != repository.current().path {
-            bail!("lifecycle journal is unsupported or does not match the current topic worktree");
-        }
-        if existing.topic_identity != identity {
-            bail!(
-                "a different lifecycle operation is recorded for this topic worktree; inspect its journal before retrying"
-            );
-        }
-        if existing.no_rebase != policy.no_rebase
-            || existing.no_remove != policy.no_remove
-            || existing.no_squash != policy.no_squash
-            || existing.yolo_stage_all != yolo_stage_all
-        {
-            bail!(
-                "merge retry flags conflict with the journaled lifecycle policy; rerun with the original flags"
-            );
-        }
-    }
-    let snapshot = Snapshot::observe(&repository)?;
-    let target = match &journal {
-        Some(state) => state.target_branch.clone(),
-        None => snapshot
-            .target(config.target_branch.as_deref())
-            .context("failed to resolve merge target")?,
-    };
-    snapshot.validate(&target)?;
-    let checked_out = primary_branch(&repository)?;
-    if in_place {
-        if journal.is_none() && checked_out == target {
-            bail!(
-                "the primary worktree is already on {target:?}; check out a topic branch before merging"
-            );
-        }
-    } else if checked_out != target {
-        bail!(
-            "configured target branch {target:?} must be checked out in the primary worktree (currently {checked_out:?})"
-        );
-    }
-    if let Some(state) = journal.as_ref().filter(|state| state.cleanup_pending) {
-        return cleanup_merge(&repository, state);
-    }
-    // Refuse an impossible squash before the journal, the rebase, or any other
-    // mutation. Discovering a missing or untrusted generator only after the
-    // rebase has landed would leave work to recover for no reason.
-    if !policy.no_squash
-        && journal
-            .as_ref()
-            .is_none_or(|state| state.squash.not_started())
-    {
-        let assessment = squash::assess(squash::AssessRequest {
-            repository: &repository,
-            config: &config,
-            target: &target,
-            enabled: true,
-            final_history: !rebase_active,
-            include_staged: yolo_stage_all,
-        })?;
-        if matches!(assessment, squash::Assessment::Blocked { .. }) {
-            assessment.into_required()?;
-        }
-    }
-    // Preserve squash-generator preflight precedence, then approve validation
-    // hooks before the journal or any Git mutation protected by them.
-    hook_approval::approve_interactively(&repository, HookPhase::PreMerge, &config.pre_merge)?;
-    if journal.is_none() {
-        let squash_plan = squash::assess(squash::AssessRequest {
-            repository: &repository,
-            config: &config,
-            target: &target,
-            enabled: !policy.no_squash,
-            final_history: !rebase_active,
-            include_staged: yolo_stage_all,
-        })?;
-        let state = MergeJournal {
-            topic_path: repository.current().path.clone(),
-            topic_identity: identity,
-            source_branch: source.clone(),
-            target_branch: target.clone(),
-            no_rebase: policy.no_rebase,
-            no_remove: policy.no_remove,
-            no_squash: policy.no_squash,
-            yolo_stage_all,
-            squash: initial_squash_state(policy.no_squash || !config.squash, &squash_plan),
-            cleanup_pending: false,
-            validated_source: None,
-            validated_target: None,
-        };
-        write_journal(&repository.common_dir, &state)?;
-        journal = Some(state);
-    }
-
-    if yolo_stage_all
-        && journal
-            .as_ref()
-            .is_some_and(|state| state.squash.not_started())
-        && current_history.status()?.is_dirty()
-    {
-        // Preflight and journal creation must precede this mutation.
-        ui::run_timed(
-            true,
-            "Staging all changes...",
-            "Staged all changes",
-            "Failed to stage changes",
-            |_| LifecycleMutation::new(&repository.current().path).stage_all(),
-        )?;
-    }
-    if rebase_active {
-        report(&ui::run_timed(
-            true,
-            "Continuing rebase...",
-            "Continued rebase",
-            "Failed to continue the rebase",
-            |animated| {
-                LifecycleMutation::new(&repository.current().path)
-                    .continue_rebase(output_for(animated))
-            },
-        )?)?;
-    }
-    if !current_history.is_ancestor(&target, &source)? {
-        if policy.no_rebase {
-            bail!(
-                "the topic is not fast-forwardable onto {target:?}; rerun without --no-rebase to rebase it"
-            );
-        }
-        report(&ui::run_timed(
-            true,
-            &format!("Rebasing onto {target}..."),
-            &format!("Rebased onto {target}"),
-            &format!("Failed to rebase onto {target}"),
-            |animated| {
-                if yolo_stage_all {
-                    LifecycleMutation::new(&repository.current().path)
-                        .rebase_onto_autostash(&target, output_for(animated))
-                } else {
-                    LifecycleMutation::new(&repository.current().path)
-                        .rebase_onto(&target, output_for(animated))
-                }
-            },
-        )?)?;
-    }
-    if yolo_stage_all
-        && journal
-            .as_ref()
-            .is_some_and(|state| state.squash.not_started())
-        && current_history.status()?.is_dirty()
-    {
-        ui::run_timed(
-            true,
-            "Staging all changes...",
-            "Staged all changes",
-            "Failed to stage changes",
-            |_| LifecycleMutation::new(&repository.current().path).stage_all(),
-        )?;
-    }
-    let mut state = journal.context("lifecycle journal was not recorded before integration")?;
-    // Squash after the rebase so the collapse starts from the replayed history,
-    // and before validation so the pre-merge hooks see the commit that actually
-    // lands on the target.
-    if !state.no_squash && state.squash.not_started() {
-        let assessment = squash::assess(squash::AssessRequest {
-            repository: &repository,
-            config: &config,
-            target: &target,
-            enabled: true,
-            final_history: true,
-            include_staged: yolo_stage_all,
-        })?;
-        if assessment.applicable() {
-            let required = assessment.into_required()?;
-            let preparation = ui::run_timed(
-                true,
-                "Generating squash commit message...",
-                "Generated squash commit message:",
-                "Failed to generate the squash commit message",
-                |_| {
-                    let preparation = squash::prepare(required)?;
-                    if let squash::Preparation::Prepared(prepared) = &preparation {
-                        state.squash = SquashStateV2::Prepared {
-                            checkpoint: squash_checkpoint_v2(&prepared.checkpoint()),
-                        };
-                        write_journal(&repository.common_dir, &state)?;
-                    }
-                    Ok(preparation)
-                },
-            )?;
-            let squash::Preparation::Prepared(prepared) = preparation else {
-                state.squash = SquashStateV2::Skipped {
-                    reason: SquashSkipReasonV2::SingleCommit,
-                };
-                write_journal(&repository.common_dir, &state)?;
-                return merge_inner(policy, intent);
-            };
-            ui::step(render::commit_message(prepared.message()))?;
-            let commit_count = prepared.commit_count();
-            let collapsed = ui::run_timed(
-                true,
-                &format!("Squashing {commit_count} commits..."),
-                "Squashed the topic into a single commit",
-                "Failed to squash the topic",
-                |_| squash::collapse(prepared).map_err(anyhow::Error::from),
-            )?;
-            state.squash = SquashStateV2::Completed {
-                resulting_commit: collapsed.commit().to_owned(),
-            };
-            write_journal(&repository.common_dir, &state)?;
-        }
-    }
-    let refreshed = current_history.head_commit()?;
-    let target_commit = primary_history.commit(&target)?;
-    if state.validated_source.as_deref() != Some(&refreshed)
-        || state.validated_target.as_deref() != Some(&target_commit)
-    {
-        let config = EffectiveConfig::load(&repository)?;
-        hook_approval::approve_interactively(&repository, HookPhase::PreMerge, &config.pre_merge)?;
-        execute_merge_hooks(
-            HookPhase::PreMerge,
-            "pre_merge",
-            &config.pre_merge,
-            &repository.current().path,
-            &journaled_merge::MergeExecutionOutput::Human,
-            &mut Vec::new(),
-        )?;
-        if current_history.status()?.is_dirty() {
-            bail!(
-                "pre-merge hooks left the topic worktree dirty; restore cleanliness before retrying"
-            );
-        }
-        if current_history.head_commit()? != refreshed {
-            return merge_inner(policy, intent);
-        }
-        state.validated_source = Some(refreshed.clone());
-        state.validated_target = Some(target_commit);
-        write_journal(&repository.common_dir, &state)?;
-    }
-    if !current_history.is_ancestor(&target, &refreshed)? {
-        bail!("the target advanced during validation; rerun merge to revalidate the new candidate");
-    }
-    // In place, the target is not checked out anywhere yet; claim it in the
-    // primary worktree so the fast-forward has somewhere to land.
-    if in_place && primary_branch(&repository)? != target {
-        report(&ui::run_timed(
-            true,
-            &format!("Switching to {target}..."),
-            &format!("Switched to {target}"),
-            &format!("Failed to switch to {target}"),
-            |animated| LifecycleMutation::new(primary).switch_branch(&target, output_for(animated)),
-        )?)?;
-    }
-    report(&ui::run_timed(
-        true,
-        &format!("Merging into {target}..."),
-        &format!("Merged into {target}"),
-        &format!("Failed to merge into {target}"),
-        |animated| LifecycleMutation::new(primary).fast_forward(&source, output_for(animated)),
-    )?)?;
-    if in_place {
-        remove_journal(&repository.common_dir, &state.topic_identity)?;
-        return ui::finish(merge_summary(&state, MergeWorktreeOutcome::SwitchedInPlace));
-    }
-    if state.no_remove {
-        remove_journal(&repository.common_dir, &state.topic_identity)?;
-        return ui::finish(merge_summary(&state, MergeWorktreeOutcome::Retained));
-    }
-    state.cleanup_pending = true;
-    write_journal(&repository.common_dir, &state)?;
-    cleanup_merge(&repository, &state)
+    run_human_merge(journaled_merge::MergeRequest::include_all(&MergeInput {
+        no_rebase,
+        no_remove,
+        no_squash: false,
+        dry_run: false,
+    }))
 }
 
 /// Renders a captured Git transcript inside the terminal UI rail.
@@ -2950,54 +2711,6 @@ fn report(transcript: &str) -> Result<()> {
         return Ok(());
     }
     ui::step(render::git_output(transcript.trim_end()))
-}
-
-fn cleanup_merge(repository: &Repository, state: &MergeJournal) -> Result<()> {
-    let config = EffectiveConfig::load_for_worktree(repository, &state.topic_path)?;
-    hook_approval::approve_interactively(repository, HookPhase::PreRemove, &config.pre_remove)?;
-    execute_merge_hooks(
-        HookPhase::PreRemove,
-        "pre_remove",
-        &config.pre_remove,
-        &state.topic_path,
-        &journaled_merge::MergeExecutionOutput::Human,
-        &mut Vec::new(),
-    )?;
-    let worktree = repository
-        .worktrees
-        .iter()
-        .find(|worktree| worktree.path == state.topic_path)
-        .context("journaled topic worktree is no longer registered")?;
-    check_removable(worktree, false)?;
-    let primary = repository
-        .primary
-        .as_ref()
-        .context("cleanup requires a primary worktree")?;
-    git::WorktreeMutation::new(primary).remove(
-        &state.topic_path,
-        git::RemovalMode::Safe,
-        git::RemovalOutput::Displayed,
-    )?;
-    remove_journal(&repository.common_dir, &state.topic_identity)?;
-    write_destination(primary)?;
-    ui::finish(merge_summary(state, MergeWorktreeOutcome::Removed))
-}
-
-fn merge_summary(state: &MergeJournal, worktree_outcome: MergeWorktreeOutcome) -> String {
-    let epilogue = match worktree_outcome {
-        MergeWorktreeOutcome::Retained => "; worktree retained.".to_owned(),
-        MergeWorktreeOutcome::Removed => "; worktree removed.".to_owned(),
-        MergeWorktreeOutcome::SwitchedInPlace => format!(
-            "; primary worktree now on {}, branch retained.",
-            state.target_branch
-        ),
-    };
-    styled_merge_summary(
-        &state.source_branch,
-        &state.target_branch,
-        state.squash.completed(),
-        &epilogue,
-    )
 }
 
 fn styled_merge_summary(source: &str, target: &str, squashed: bool, epilogue: &str) -> String {

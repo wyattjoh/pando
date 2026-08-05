@@ -14,15 +14,31 @@ use super::{
     push_captured_merge_diagnostic, push_merge_diagnostic, run_prepared_merge, write_destination,
 };
 
+/// Policy for local changes at the journaled merge boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ChangePolicy {
+    RequireClean,
+    IncludeAll,
+}
+
 /// Read-only request accepted by the journaled merge preparation seam.
 pub(crate) struct MergeRequest {
     input: MergeInput,
+    changes: ChangePolicy,
 }
 
 impl MergeRequest {
     pub(crate) fn ordinary(input: &MergeInput) -> Self {
         Self {
             input: input.clone(),
+            changes: ChangePolicy::RequireClean,
+        }
+    }
+
+    pub(crate) fn include_all(input: &MergeInput) -> Self {
+        Self {
+            input: input.clone(),
+            changes: ChangePolicy::IncludeAll,
         }
     }
 }
@@ -104,7 +120,12 @@ pub(crate) struct PreparedMerge {
 impl PreparedMerge {
     #[must_use]
     pub(crate) fn run(self, output: &MergeExecutionOutput) -> MergeOutcome {
-        run_prepared_merge(&self.plan, &self.request.input, output)
+        run_prepared_merge(
+            &self.plan,
+            &self.request.input,
+            self.request.changes,
+            output,
+        )
     }
 }
 
@@ -261,7 +282,7 @@ impl MergeExecutionOutput {
 /// Performs read-only planning and returns at most one ordered requirement.
 #[must_use]
 pub(crate) fn prepare(request: MergeRequest) -> Preparation {
-    let plan = match plan_merge(request.input.policy()) {
+    let plan = match plan_merge(request.input.policy(), request.changes) {
         Ok(plan) => plan,
         Err(error) => return Preparation::Complete(merge_preflight_outcome(&error)),
     };

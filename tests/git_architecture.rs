@@ -83,7 +83,7 @@ fn obsolete_branch_forwarding_interfaces_do_not_return() {
 }
 
 #[test]
-fn ordinary_merge_adapters_only_enter_the_journaled_executor_seam() {
+fn all_merge_adapters_only_enter_the_journaled_executor_seam() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let lifecycle = fs::read_to_string(source_root.join("lifecycle.rs"))
         .expect("lifecycle source should be readable");
@@ -94,7 +94,14 @@ fn ordinary_merge_adapters_only_enter_the_journaled_executor_seam() {
     let compact = without_whitespace(&journaled);
 
     assert!(lifecycle.contains("journaled_merge::prepare"));
+    assert!(lifecycle.contains("journaled_merge::MergeRequest::include_all"));
     assert!(lifecycle.contains("prepared.run(&journaled_merge::MergeExecutionOutput::Human)"));
+    for obsolete in ["fn merge_inner", "enum MergeIntent", "fn cleanup_merge"] {
+        assert!(
+            !lifecycle.contains(obsolete),
+            "the duplicate yolo lifecycle `{obsolete}` must stay deleted"
+        );
+    }
     assert!(machine.contains("lifecycle::execute_merge_request(&input)"));
     for forbidden in [
         "plan_merge",

@@ -2349,6 +2349,72 @@ fn merge_yolo_rebases_staged_changes_into_the_generated_squash() {
 }
 
 #[test]
+fn merge_yolo_cleanup_retry_only_repeats_cleanup() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let generator_calls = xdg.path().join("generator-calls");
+    let cleanup_calls = xdg.path().join("cleanup-calls");
+    let allow_cleanup = xdg.path().join("allow-cleanup");
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        format!(
+            "merge:\n  generation:\n    command: \"printf x >> {} && cat >/dev/null && printf 'feat: durable yolo\\n'\"\n",
+            generator_calls.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        format!(
+            "worktrees:\n  target-branch: main\nhooks:\n  pre-remove:\n    - name: cleanup gate\n      command: printf x >> {}; test -f {}\n",
+            shell_quote(&cleanup_calls),
+            shell_quote(&allow_cleanup),
+        ),
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(&repo.linked, ["commit", "-m", "configure yolo lifecycle"]);
+    fs::write(repo.linked.join("yolo.txt"), "ship it\n").unwrap();
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--yolo"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
+    let failed = run_pty_command(command, b"y\r");
+
+    assert!(!failed.status.success(), "{}", failed.stderr);
+    assert!(failed.stdout.is_empty());
+    assert!(repo.linked.exists());
+    assert!(generator_calls.exists(), "{}", failed.stderr);
+    assert_eq!(fs::read(&generator_calls).unwrap(), b"x");
+    assert_eq!(fs::read(&cleanup_calls).unwrap(), b"x");
+    let integrated = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    fs::write(&allow_cleanup, "allow\n").unwrap();
+    let retry = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--yolo"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), integrated);
+    assert_eq!(fs::read(&generator_calls).unwrap(), b"x");
+    assert_eq!(fs::read(&cleanup_calls).unwrap(), b"xx");
+    assert!(!repo.linked.exists());
+}
+
+#[test]
 fn merge_yolo_no_squash_uses_the_commit_generator() {
     let repo = Repository::new();
     fs::write(
