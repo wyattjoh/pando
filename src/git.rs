@@ -86,7 +86,9 @@ impl GitProcess {
             .join()
             .map_err(|_| anyhow!(contexts.writer_panicked))?;
         let output = output.context(contexts.await_output)?;
-        writer?;
+        if output.status.success() {
+            writer?;
+        }
         Ok(output)
     }
 }
