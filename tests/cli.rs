@@ -7063,6 +7063,11 @@ fn commit_streams_pre_commit_hook_output_on_stderr() {
         "{}",
         output.stderr
     );
+    let plain_stderr = console::strip_ansi_codes(&output.stderr);
+    let creating = plain_stderr.find("Creating commit").unwrap();
+    let hook = plain_stderr.find("pre-commit stdout").unwrap();
+    let created = plain_stderr.find("Created commit").unwrap();
+    assert!(creating < hook && hook < created, "{}", output.stderr);
 }
 
 #[test]
