@@ -376,7 +376,7 @@ pub fn get(property: GetProperty) -> Result<GetResult, QueryFailure> {
         .context("failed to read current directory")
         .map_err(|error| QueryFailure::repository(&error))?;
     let repository = RepositoryObservation::new(&cwd)
-        .repository()
+        .repository_for_navigation()
         .map_err(|error| QueryFailure::repository(&error))?;
     let (property, value) = match property {
         GetProperty::Branch => match &repository.current().kind {

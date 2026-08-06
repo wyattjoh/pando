@@ -13,7 +13,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, FixedOffset};
 
-use crate::{Condition, Worktree, WorktreeKind};
+use crate::{Condition, Worktree, WorktreeKind, debug};
 
 /// Private execution kernel for the installed Git executable.
 ///
@@ -22,6 +22,7 @@ use crate::{Condition, Worktree, WorktreeKind};
 /// editor suppression stay local to this module.
 struct GitProcess {
     command: Command,
+    diagnostic_label: String,
 }
 
 struct PipedContexts {
@@ -38,9 +39,24 @@ impl GitProcess {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        let args: Vec<OsString> = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_owned())
+            .collect();
+        let diagnostic_label = args
+            .iter()
+            .take(2)
+            .fold(String::from("git"), |mut label, arg| {
+                label.push(' ');
+                label.push_str(&arg.to_string_lossy());
+                label
+            });
         let mut command = Command::new("git");
-        command.args(args).current_dir(cwd);
-        Self { command }
+        command.args(&args).current_dir(cwd);
+        Self {
+            command,
+            diagnostic_label,
+        }
     }
 
     fn suppress_editor(mut self) -> Self {
@@ -54,14 +70,17 @@ impl GitProcess {
     }
 
     fn captured(mut self) -> std::io::Result<Output> {
+        let _span = debug::Span::new(self.diagnostic_label);
         self.command.stdin(Stdio::null()).output()
     }
 
     fn captured_inheriting_stdin(mut self) -> std::io::Result<Output> {
+        let _span = debug::Span::new(self.diagnostic_label);
         self.command.stdin(Stdio::inherit()).output()
     }
 
     fn streamed(mut self) -> Result<Output> {
+        let _span = debug::Span::new(self.diagnostic_label);
         let mut child = self
             .command
             .stdin(Stdio::inherit())
@@ -98,6 +117,7 @@ impl GitProcess {
     }
 
     fn piped(mut self, input: Vec<u8>, contexts: &PipedContexts) -> Result<Output> {
+        let _span = debug::Span::new(self.diagnostic_label);
         let mut child = self
             .command
             .stdin(Stdio::piped())
@@ -598,7 +618,14 @@ impl<'cwd> RepositoryObservation<'cwd> {
 
     fn discover(self) -> Result<Discovery> {
         Ok(Discovery {
-            worktrees: discover_worktrees(self.cwd)?,
+            worktrees: discover_worktrees(self.cwd, ConditionObservation::Full)?,
+            metadata_warning: None,
+        })
+    }
+
+    fn discover_for_navigation(self) -> Result<Discovery> {
+        Ok(Discovery {
+            worktrees: discover_worktrees(self.cwd, ConditionObservation::Accessibility)?,
             metadata_warning: None,
         })
     }
@@ -613,6 +640,10 @@ impl<'cwd> RepositoryObservation<'cwd> {
 
     pub(crate) fn repository(self) -> Result<Repository> {
         repository_from_worktrees(self.cwd, self.discover()?)
+    }
+
+    pub(crate) fn repository_for_navigation(self) -> Result<Repository> {
+        repository_from_worktrees(self.cwd, self.discover_for_navigation()?)
     }
 
     /// Resolves repository context and enriches worktrees with commit timestamps.
@@ -649,8 +680,8 @@ impl<'cwd> RepositoryObservation<'cwd> {
         canonical_or_normalized(path)
     }
 
-    pub(crate) fn branches(self) -> Result<Vec<BranchRecord>> {
-        Ok(discover_branch_refs(self.cwd)?.0)
+    pub(crate) fn completion_branch_names(self) -> Result<CompletionBranchNames> {
+        discover_completion_branch_names(self.cwd)
     }
 
     pub(crate) fn configured_editor(self) -> Result<Option<String>> {
@@ -672,20 +703,11 @@ impl<'cwd> RepositoryObservation<'cwd> {
             .context("repository pull-request template is not UTF-8")
             .map(Some)
     }
+}
 
-    pub(crate) fn remote_branches(self) -> Result<Vec<String>> {
-        let output = run_git(
-            self.cwd,
-            [
-                "for-each-ref",
-                "--format=%(refname:short)%00%(symref)%00",
-                "refs/remotes",
-            ],
-        )
-        .context("failed to list remote branches")?;
-        ensure_success(&output, "git for-each-ref")?;
-        Ok(parse_remote_branch_refs(&output.stdout))
-    }
+pub(crate) struct CompletionBranchNames {
+    pub(crate) local: Vec<String>,
+    pub(crate) remote: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -739,7 +761,13 @@ impl Repository {
     }
 }
 
-fn discover_worktrees(cwd: &Path) -> Result<Vec<Worktree>> {
+#[derive(Clone, Copy)]
+enum ConditionObservation {
+    Full,
+    Accessibility,
+}
+
+fn discover_worktrees(cwd: &Path, observation: ConditionObservation) -> Result<Vec<Worktree>> {
     let output = run_git(cwd, ["worktree", "list", "--porcelain", "-z"])
         .context("failed to list Git worktrees for the current repository")?;
     ensure_success(&output, "git worktree list")?;
@@ -748,7 +776,12 @@ fn discover_worktrees(cwd: &Path) -> Result<Vec<Worktree>> {
     let current = current_record(&worktrees, cwd);
     for (index, worktree) in worktrees.iter_mut().enumerate() {
         worktree.current = current == Some(index);
-        worktree.condition = inspect_condition(worktree);
+        worktree.condition = match observation {
+            ConditionObservation::Full => inspect_condition(worktree),
+            ConditionObservation::Accessibility => {
+                inspect_accessibility(worktree).unwrap_or(Condition::Unknown)
+            }
+        };
     }
     Ok(worktrees)
 }
@@ -833,6 +866,7 @@ pub(crate) struct BranchRecord {
     pub(crate) branch: String,
     pub(crate) head: String,
     pub(crate) last_commit_at: Option<DateTime<FixedOffset>>,
+    upstream: Option<String>,
 }
 
 /// A repository's worktrees together with its local branches.
@@ -847,7 +881,7 @@ pub(crate) struct RepositoryBranches {
 }
 
 fn repository_with_branches_observed(cwd: &Path) -> Result<RepositoryBranches> {
-    let mut worktrees = discover_worktrees(cwd)?;
+    let mut worktrees = discover_worktrees(cwd, ConditionObservation::Full)?;
     let (mut branches, non_utf8) = discover_branch_refs(cwd)?;
 
     let worktree_heads = worktrees
@@ -901,7 +935,7 @@ fn discover_branch_refs(cwd: &Path) -> Result<(Vec<BranchRecord>, Vec<String>)> 
         cwd,
         [
             "for-each-ref",
-            "--format=%(objectname)%00%(refname:short)%00",
+            "--format=%(objectname)%00%(refname:short)%00%(upstream:short)%00",
             "refs/heads",
         ],
     )
@@ -910,7 +944,49 @@ fn discover_branch_refs(cwd: &Path) -> Result<(Vec<BranchRecord>, Vec<String>)> 
     Ok(parse_branch_refs(&output.stdout))
 }
 
-/// Parses NUL-delimited `<objectname>\0<refname:short>\0` records.
+fn discover_completion_branch_names(cwd: &Path) -> Result<CompletionBranchNames> {
+    let output = run_git(
+        cwd,
+        [
+            "for-each-ref",
+            "--format=%(refname)%00%(symref)%00",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )
+    .context("failed to list branch names for completion")?;
+    ensure_success(&output, "git for-each-ref")?;
+    Ok(parse_completion_branch_names(&output.stdout))
+}
+
+fn parse_completion_branch_names(bytes: &[u8]) -> CompletionBranchNames {
+    let mut local = Vec::new();
+    let mut remote = Vec::new();
+    let mut fields = bytes.split(|byte| *byte == 0);
+    while let Some(raw_name) = fields.next() {
+        let name = raw_name.strip_prefix(b"\n").unwrap_or(raw_name);
+        if name.is_empty() {
+            break;
+        }
+        let Some(symref) = fields.next() else {
+            break;
+        };
+        if !symref.is_empty() {
+            continue;
+        }
+        let Ok(name) = std::str::from_utf8(name) else {
+            continue;
+        };
+        if let Some(branch) = name.strip_prefix("refs/heads/") {
+            local.push(branch.to_owned());
+        } else if let Some(branch) = name.strip_prefix("refs/remotes/") {
+            remote.push(branch.to_owned());
+        }
+    }
+    CompletionBranchNames { local, remote }
+}
+
+/// Parses NUL-delimited `<objectname>\0<refname:short>\0<upstream:short>\0` records.
 fn parse_branch_refs(bytes: &[u8]) -> (Vec<BranchRecord>, Vec<String>) {
     let mut records = Vec::new();
     let mut excluded = Vec::new();
@@ -920,7 +996,7 @@ fn parse_branch_refs(bytes: &[u8]) -> (Vec<BranchRecord>, Vec<String>) {
         if head_field.is_empty() {
             break;
         }
-        let Some(raw_branch) = fields.next() else {
+        let (Some(raw_branch), Some(raw_upstream)) = (fields.next(), fields.next()) else {
             break;
         };
         let branch_field = raw_branch.strip_prefix(b"\n").unwrap_or(raw_branch);
@@ -930,6 +1006,8 @@ fn parse_branch_refs(bytes: &[u8]) -> (Vec<BranchRecord>, Vec<String>) {
                 branch: branch.to_owned(),
                 head,
                 last_commit_at: None,
+                upstream: (!raw_upstream.is_empty())
+                    .then(|| String::from_utf8_lossy(raw_upstream).into_owned()),
             }),
             Err(_) => excluded.push(String::from_utf8_lossy(branch_field).into_owned()),
         }
@@ -937,27 +1015,61 @@ fn parse_branch_refs(bytes: &[u8]) -> (Vec<BranchRecord>, Vec<String>) {
     (records, excluded)
 }
 
-/// Parses NUL-delimited `<refname:short>\0<symref>\0` records.
-fn parse_remote_branch_refs(bytes: &[u8]) -> Vec<String> {
+#[derive(Debug)]
+struct RemoteBranchRecord {
+    branch: String,
+    head: String,
+}
+
+fn discover_remote_branch_refs(cwd: &Path) -> Result<(Vec<RemoteBranchRecord>, Option<String>)> {
+    let output = run_git(
+        cwd,
+        [
+            "for-each-ref",
+            "--format=%(objectname)%00%(refname)%00%(symref)%00",
+            "refs/remotes",
+        ],
+    )
+    .context("failed to list remote branches")?;
+    ensure_success(&output, "git for-each-ref")?;
+    Ok(parse_remote_branch_refs(&output.stdout))
+}
+
+/// Parses NUL-delimited `<objectname>\0<refname>\0<symref>\0` records.
+fn parse_remote_branch_refs(bytes: &[u8]) -> (Vec<RemoteBranchRecord>, Option<String>) {
     let mut records = Vec::new();
+    let mut origin_head = None;
     let mut fields = bytes.split(|byte| *byte == 0);
-    while let Some(raw_name) = fields.next() {
-        let name_field = raw_name.strip_prefix(b"\n").unwrap_or(raw_name);
-        if name_field.is_empty() {
+    while let Some(raw_head) = fields.next() {
+        let head = raw_head.strip_prefix(b"\n").unwrap_or(raw_head);
+        if head.is_empty() {
             break;
         }
-        let Some(raw_symref) = fields.next() else {
+        let (Some(raw_name), Some(raw_symref)) = (fields.next(), fields.next()) else {
             break;
         };
-        let symref_field = raw_symref.strip_prefix(b"\n").unwrap_or(raw_symref);
-        if !symref_field.is_empty() {
+        let Ok(name) = std::str::from_utf8(raw_name) else {
+            continue;
+        };
+        if !raw_symref.is_empty() {
+            if name == "refs/remotes/origin/HEAD" {
+                origin_head = std::str::from_utf8(raw_symref)
+                    .ok()
+                    .and_then(|target| target.strip_prefix("refs/remotes/origin/"))
+                    .filter(|branch| !branch.is_empty())
+                    .map(str::to_owned);
+            }
             continue;
         }
-        if let Ok(name) = std::str::from_utf8(name_field) {
-            records.push(name.to_owned());
-        }
+        let Some(branch) = name.strip_prefix("refs/remotes/") else {
+            continue;
+        };
+        records.push(RemoteBranchRecord {
+            branch: branch.to_owned(),
+            head: String::from_utf8_lossy(head).into_owned(),
+        });
     }
-    records
+    (records, origin_head)
 }
 
 fn normalized_head(head: &str) -> Option<String> {
@@ -1080,7 +1192,9 @@ pub(crate) struct PushPlan {
 /// Raw Git facts consumed by one immutable branch planning snapshot.
 pub(crate) struct BranchRefObservation {
     pub(crate) local: Vec<String>,
+    pub(crate) local_commits: HashMap<String, String>,
     pub(crate) remote_branches: Vec<String>,
+    pub(crate) remote_commits: HashMap<String, String>,
     pub(crate) remotes: Vec<String>,
     pub(crate) remote_urls: HashMap<String, String>,
     pub(crate) upstreams: HashMap<String, String>,
@@ -1089,31 +1203,34 @@ pub(crate) struct BranchRefObservation {
 
 /// Observes all branch publication and target facts in one bounded epoch.
 pub(crate) fn observe_branch_refs(cwd: &Path) -> Result<BranchRefObservation> {
-    let observation = RepositoryObservation::new(cwd);
-    let local: Vec<_> = observation
-        .branches()?
-        .into_iter()
-        .map(|record| record.branch)
-        .collect();
-    let remote_branches = observation.remote_branches()?;
-    let remotes = configured_remotes(cwd)?;
-    let remote_urls = remotes
-        .iter()
-        .map(|remote| remote_url(cwd, remote).map(|url| (remote.clone(), url)))
-        .collect::<Result<_>>()?;
+    let (local_records, _) = discover_branch_refs(cwd)?;
+    let (remote_records, origin_head) = discover_remote_branch_refs(cwd)?;
+    let mut local = Vec::with_capacity(local_records.len());
+    let mut local_commits = HashMap::with_capacity(local_records.len());
     let mut upstreams = HashMap::new();
-    for branch in &local {
-        if let Some(upstream) = branch_upstream(cwd, branch)? {
-            upstreams.insert(branch.clone(), upstream);
+    for record in local_records {
+        local_commits.insert(record.branch.clone(), record.head);
+        if let Some(upstream) = record.upstream {
+            upstreams.insert(record.branch.clone(), upstream);
         }
+        local.push(record.branch);
     }
+    let mut remote_branches = Vec::with_capacity(remote_records.len());
+    let mut remote_commits = HashMap::with_capacity(remote_records.len());
+    for record in remote_records {
+        remote_commits.insert(record.branch.clone(), record.head);
+        remote_branches.push(record.branch);
+    }
+    let (remotes, remote_urls) = configured_remote_urls(cwd)?;
     Ok(BranchRefObservation {
         local,
+        local_commits,
         remote_branches,
+        remote_commits,
         remotes,
         remote_urls,
         upstreams,
-        origin_head: origin_head_branch(cwd),
+        origin_head,
     })
 }
 
@@ -1142,33 +1259,24 @@ pub(crate) fn validate_branch_name(cwd: &Path, branch: &str) -> Result<()> {
     validate_branch(cwd, branch)
 }
 
-fn branch_upstream(cwd: &Path, branch: &str) -> Result<Option<String>> {
-    let output = run_git(
-        cwd,
-        [
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            &format!("{branch}@{{upstream}}"),
-        ],
-    )?;
-    if !output.status.success() {
-        return Ok(None);
+fn configured_remote_urls(cwd: &Path) -> Result<(Vec<String>, HashMap<String, String>)> {
+    let output = run_git(cwd, ["remote", "-v"])?;
+    ensure_success(&output, "git remote -v")?;
+    let mut remote_urls = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((remote, value)) = line.split_once('\t') else {
+            continue;
+        };
+        let Some(url) = value.strip_suffix(" (fetch)") else {
+            continue;
+        };
+        remote_urls
+            .entry(remote.to_owned())
+            .or_insert_with(|| url.to_owned());
     }
-    Ok(Some(
-        String::from_utf8_lossy(&output.stdout).trim().to_owned(),
-    ))
-}
-
-fn configured_remotes(cwd: &Path) -> Result<Vec<String>> {
-    let output = run_git(cwd, ["remote"])?;
-    ensure_success(&output, "git remote")?;
-    let mut remotes: Vec<_> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_owned)
-        .collect();
+    let mut remotes: Vec<_> = remote_urls.keys().cloned().collect();
     remotes.sort();
-    Ok(remotes)
+    Ok((remotes, remote_urls))
 }
 
 /// The remote-tracking ref a `fresh` new branch is cut from.
@@ -1186,18 +1294,6 @@ impl BaseRef {
     pub(crate) fn reference(&self) -> String {
         format!("{}/{}", self.remote, self.branch)
     }
-}
-
-pub(crate) fn origin_head_branch(cwd: &Path) -> Option<String> {
-    git_stdout(cwd, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
-        .ok()
-        .and_then(|value| {
-            value
-                .trim()
-                .strip_prefix("refs/remotes/origin/")
-                .map(str::to_owned)
-        })
-        .filter(|branch| !branch.is_empty())
 }
 
 /// The start point a genuinely new branch will be cut from.
@@ -1227,16 +1323,6 @@ fn fetch_base_ref(cwd: &Path, base: &BaseRef) -> Result<String> {
         &format!("fetch of {}", base.reference()),
         LifecycleOutput::Captured,
     )
-}
-
-/// Returns the configured URL for a named remote.
-///
-/// # Errors
-/// Returns an error when the remote is missing or Git cannot read it.
-fn remote_url(cwd: &Path, remote: &str) -> Result<String> {
-    let output = run_git(cwd, ["remote", "get-url", remote])?;
-    ensure_success(&output, "git remote get-url")?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// Publishes a branch with an ordinary fast-forward-safe push.
@@ -1721,14 +1807,20 @@ fn current_record(worktrees: &[Worktree], cwd: &Path) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-fn inspect_condition(worktree: &Worktree) -> Condition {
+fn inspect_accessibility(worktree: &Worktree) -> Option<Condition> {
     if worktree.is_bare() {
-        return Condition::Clean;
+        return Some(Condition::Clean);
     }
     match fs::metadata(&worktree.path) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Condition::Missing,
-        Ok(_) | Err(_) => return Condition::Inaccessible,
+        Ok(metadata) if metadata.is_dir() => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Condition::Missing),
+        Ok(_) | Err(_) => Some(Condition::Inaccessible),
+    }
+}
+
+fn inspect_condition(worktree: &Worktree) -> Condition {
+    if let Some(condition) = inspect_accessibility(worktree) {
+        return condition;
     }
 
     match run_git(
@@ -1899,14 +1991,15 @@ mod tests {
     use std::{collections::BTreeSet, os::unix::ffi::OsStrExt};
 
     use super::{
-        parse_branch_refs, parse_commit_batch, parse_committer_timestamp, parse_porcelain,
-        parse_remote_branch_refs, parse_status_porcelain,
+        parse_branch_refs, parse_commit_batch, parse_committer_timestamp,
+        parse_completion_branch_names, parse_porcelain, parse_remote_branch_refs,
+        parse_status_porcelain,
     };
     use crate::WorktreeKind;
 
     #[test]
     fn parses_nul_delimited_branch_refs() {
-        let input = b"aaaa\0feature/a\0\nbbbb\0main\0\n";
+        let input = b"aaaa\0feature/a\0origin/feature/a\0\nbbbb\0main\0\0\n";
 
         let (records, excluded) = parse_branch_refs(input);
 
@@ -1914,15 +2007,27 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].branch, "feature/a");
         assert_eq!(records[0].head, "aaaa");
+        assert_eq!(records[0].upstream.as_deref(), Some("origin/feature/a"));
         assert_eq!(records[1].branch, "main");
         assert_eq!(records[1].head, "bbbb");
+        assert_eq!(records[1].upstream, None);
+    }
+
+    #[test]
+    fn parses_completion_branch_names_without_symbolic_remote_heads() {
+        let input = b"refs/heads/main\0\0\nrefs/heads/topic\0\0\nrefs/remotes/origin/HEAD\0refs/remotes/origin/main\0\nrefs/remotes/origin/topic\0\0\n";
+
+        let names = parse_completion_branch_names(input);
+
+        assert_eq!(names.local, ["main", "topic"]);
+        assert_eq!(names.remote, ["origin/topic"]);
     }
 
     #[test]
     fn excludes_non_utf8_branch_names_without_dropping_them_silently() {
         let mut input = b"aaaa\0".to_vec();
         input.extend_from_slice(&[0xFF, 0xFE]);
-        input.extend_from_slice(b"\0\n");
+        input.extend_from_slice(b"\0\0\n");
 
         let (records, excluded) = parse_branch_refs(&input);
 
@@ -2008,24 +2113,30 @@ mod tests {
 
     #[test]
     fn remote_branch_refs_are_parsed_and_symbolic_refs_excluded() {
-        // `<refname:short>\0<symref>\0` per record. `origin/HEAD` carries a symref
-        // target and must be excluded: it is a pointer, not a branch.
-        let bytes =
-            b"origin/main\x00\x00origin/HEAD\x00refs/remotes/origin/main\x00upstream/dev\x00\x00";
+        // `<objectname>\0<refname>\0<symref>\0` per record. `origin/HEAD` carries
+        // a symref target and must be excluded as a branch while still pinning
+        // the remote's default branch.
+        let bytes = b"aaaa\0refs/remotes/origin/main\0\0\nbbbb\0refs/remotes/origin/HEAD\0refs/remotes/origin/main\0\ncccc\0refs/remotes/upstream/dev\0\0\n";
 
-        assert_eq!(
-            parse_remote_branch_refs(bytes),
-            vec!["origin/main".to_owned(), "upstream/dev".to_owned()]
-        );
+        let (records, origin_head) = parse_remote_branch_refs(bytes);
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].branch, "origin/main");
+        assert_eq!(records[0].head, "aaaa");
+        assert_eq!(records[1].branch, "upstream/dev");
+        assert_eq!(records[1].head, "cccc");
+        assert_eq!(origin_head.as_deref(), Some("main"));
     }
 
     #[test]
     fn non_utf8_remote_branch_refs_are_dropped() {
-        let bytes = b"origin/good\x00\x00origin/ba\xffd\x00\x00";
+        let bytes = b"aaaa\0refs/remotes/origin/good\0\0\nbbbb\0refs/remotes/origin/ba\xffd\0\0\n";
 
-        assert_eq!(
-            parse_remote_branch_refs(bytes),
-            vec!["origin/good".to_owned()]
-        );
+        let (records, origin_head) = parse_remote_branch_refs(bytes);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].branch, "origin/good");
+        assert_eq!(records[0].head, "aaaa");
+        assert_eq!(origin_head, None);
     }
 }

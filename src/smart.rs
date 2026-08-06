@@ -17,6 +17,7 @@ use crate::{
     Row, SortMode, Worktree, WorktreeKind,
     branch::{self, Snapshot},
     config::{EffectiveConfig, HookPhase},
+    debug,
     git::{self, HistoryObservation, Repository, RepositoryObservation},
     hook::{self, HookOutcome},
     hook_approval,
@@ -56,6 +57,7 @@ pub enum TrustCommand {
 ///
 /// Returns an error when repository planning, user approval, creation, or setup fails.
 pub fn switch(branch: Option<String>, branches: bool, fetch: bool) -> Result<()> {
+    let _span = debug::Span::new("switch");
     let fetch = FetchIntent::new(fetch, false);
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let Some(branch) = branch else {
@@ -64,18 +66,17 @@ pub fn switch(branch: Option<String>, branches: bool, fetch: bool) -> Result<()>
         } else {
             PickerView::Worktree
         };
-        return pick_and_switch(
-            &RepositoryObservation::new(&cwd).repository_with_branches()?,
-            initial_view,
-            fetch,
-        );
+        let repository = {
+            let _span = debug::Span::new("repository and branch discovery");
+            RepositoryObservation::new(&cwd).repository_with_branches()?
+        };
+        return pick_and_switch(&repository, initial_view, fetch);
     };
-    resolve_and_switch(
-        &RepositoryObservation::new(&cwd).repository()?,
-        &branch,
-        Intent::Switch,
-        fetch,
-    )
+    let repository = {
+        let _span = debug::Span::new("repository discovery");
+        RepositoryObservation::new(&cwd).repository_for_navigation()?
+    };
+    resolve_and_switch(&repository, &branch, Intent::Switch, fetch)
 }
 
 /// Creates a worktree for `branch` and emits its destination.
@@ -90,7 +91,7 @@ pub fn switch(branch: Option<String>, branches: bool, fetch: bool) -> Result<()>
 pub fn create(branch: &str, fetch: bool) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     resolve_and_switch(
-        &RepositoryObservation::new(&cwd).repository()?,
+        &RepositoryObservation::new(&cwd).repository_for_navigation()?,
         branch,
         Intent::Create,
         FetchIntent::new(fetch, false),
@@ -136,19 +137,25 @@ pub fn create_dry_run(branch: &str, fetch: bool) -> Result<()> {
 
 fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = RepositoryObservation::new(&cwd).repository()?;
-    let snapshot = Snapshot::observe(&repository)?;
-    snapshot.validate(branch)?;
-    let plan = match worktree_plan::plan(
-        &repository,
-        &snapshot,
-        intent,
-        branch,
-        None,
-        fetch,
-        None,
-        true,
-    )? {
+    let repository = RepositoryObservation::new(&cwd).repository_for_navigation()?;
+    let planned = if let Some(plan) =
+        worktree_plan::registered_plan(&repository, intent, branch, None, fetch, None, true)
+    {
+        plan
+    } else {
+        let snapshot = Snapshot::observe(&repository)?;
+        worktree_plan::plan(
+            &repository,
+            &snapshot,
+            intent,
+            branch,
+            None,
+            fetch,
+            None,
+            true,
+        )?
+    };
+    let plan = match planned {
         Ok(plan) => plan,
         Err(PlanBlocker::RemoteSelectionRequired { destination, .. }) => {
             return ui::finish(format!(
@@ -1291,29 +1298,42 @@ fn resolve_and_switch(
     intent: Intent,
     fetch: FetchIntent,
 ) -> Result<()> {
-    let mut snapshot = Snapshot::observe(repository)?;
-    snapshot.validate(branch)?;
+    let _span = debug::Span::new("resolve switch");
     let mut remote = None;
-    let plan = loop {
-        match worktree_plan::plan(
-            repository,
-            &snapshot,
-            intent,
-            branch,
-            remote.as_deref(),
-            fetch,
-            None,
-            false,
-        )? {
-            Ok(plan) => break plan,
-            Err(PlanBlocker::RemoteSelectionRequired { remotes, .. }) => {
-                remote = Some(choose_remote(&remotes, branch)?);
+    let plan = if let Some(plan) =
+        worktree_plan::registered_plan(repository, intent, branch, None, fetch, None, false)
+    {
+        plan.map_err(|blocker| render_plan_blocker(branch, blocker))?
+    } else {
+        let mut snapshot = {
+            let _span = debug::Span::new("branch snapshot");
+            Snapshot::observe(repository)?
+        };
+        loop {
+            let planned = {
+                let _span = debug::Span::new("worktree plan");
+                worktree_plan::plan(
+                    repository,
+                    &snapshot,
+                    intent,
+                    branch,
+                    remote.as_deref(),
+                    fetch,
+                    None,
+                    false,
+                )?
+            };
+            match planned {
+                Ok(plan) => break plan,
+                Err(PlanBlocker::RemoteSelectionRequired { remotes, .. }) => {
+                    remote = Some(choose_remote(&remotes, branch)?);
+                }
+                Err(PlanBlocker::ApprovalRequired { candidate, .. }) => {
+                    approve_planned_hooks(repository, &candidate)?;
+                    snapshot = Snapshot::observe(repository)?;
+                }
+                Err(blocker) => return Err(render_plan_blocker(branch, blocker)),
             }
-            Err(PlanBlocker::ApprovalRequired { candidate, .. }) => {
-                approve_planned_hooks(repository, &candidate)?;
-                snapshot = Snapshot::observe(repository)?;
-            }
-            Err(blocker) => return Err(render_plan_blocker(branch, blocker)),
         }
     };
     debug_assert_eq!(plan.intent, intent);
@@ -1519,6 +1539,7 @@ fn warn_dirty_source(repository: &Repository) -> Result<()> {
 }
 
 fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&str>) -> Result<()> {
+    let _span = debug::Span::new("enter existing worktree");
     let destination = resolved_path(destination)?;
     let worktree_identity = RepositoryObservation::new(&destination).worktree_identity()?;
     let setup_lifecycle = setup::Lifecycle::new(&repository.common_dir);

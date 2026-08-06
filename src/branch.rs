@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::{
     BaseMode, Worktree,
-    git::{self, BaseRef, HistoryObservation, NewBranchBase, PushPlan, Repository},
+    git::{self, BaseRef, NewBranchBase, PushPlan, Repository},
     worktree_for_branch,
 };
 
@@ -49,34 +49,27 @@ impl<'repository> Snapshot<'repository> {
     pub(crate) fn observe(repository: &'repository Repository) -> Result<Self> {
         let facts = git::observe_branch_refs(&repository.current().path)?;
         let mut remotes_by_branch: HashMap<String, Vec<String>> = HashMap::new();
-        let mut remote_commits = HashMap::new();
-        let history = HistoryObservation::new(&repository.current().path);
-        for remote_branch in facts.remote_branches {
+        for remote_branch in &facts.remote_branches {
             let Some((_, branch)) = remote_branch.split_once('/') else {
                 continue;
             };
-            remote_commits.insert(remote_branch.clone(), history.commit(&remote_branch)?);
             remotes_by_branch
                 .entry(branch.to_owned())
                 .or_default()
-                .push(remote_branch);
+                .push(remote_branch.clone());
         }
-        let local_commits = facts
-            .local
-            .iter()
-            .map(|branch| {
-                history
-                    .commit(branch)
-                    .map(|commit| (branch.clone(), commit))
-            })
-            .collect::<Result<_>>()?;
+        let head_commit = repository
+            .current()
+            .head
+            .clone()
+            .context("Git did not report a commit for the current worktree")?;
         Ok(Self {
             repository,
             local: facts.local,
             remotes_by_branch,
-            remote_commits,
-            local_commits,
-            head_commit: history.head_commit()?,
+            remote_commits: facts.remote_commits,
+            local_commits: facts.local_commits,
+            head_commit,
             origin_head: facts.origin_head,
             remotes: facts.remotes,
             remote_urls: facts.remote_urls,
@@ -100,16 +93,6 @@ impl<'repository> Snapshot<'repository> {
             })
     }
 
-    /// Local branch names in Git discovery order.
-    pub(crate) fn local(&self) -> &[String] {
-        &self.local
-    }
-
-    /// Registered worktrees, including the primary worktree.
-    pub(crate) fn registered(&self) -> &[Worktree] {
-        &self.repository.worktrees
-    }
-
     /// Returns a local branch identity pinned to this observation epoch.
     pub(crate) fn local_commit(&self, branch: &str) -> Option<&str> {
         self.local_commits.get(branch).map(String::as_str)
@@ -118,11 +101,6 @@ impl<'repository> Snapshot<'repository> {
     /// Returns a remote-tracking identity pinned to this observation epoch.
     pub(crate) fn remote_commit(&self, reference: &str) -> Option<&str> {
         self.remote_commits.get(reference).map(String::as_str)
-    }
-
-    /// Fetched remote matches grouped by their unqualified branch name.
-    pub(crate) fn remotes(&self) -> &HashMap<String, Vec<String>> {
-        &self.remotes_by_branch
     }
 
     /// Validates a branch name through Git's canonical ref-name parser.

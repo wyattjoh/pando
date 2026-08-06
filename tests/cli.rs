@@ -5103,6 +5103,182 @@ fn switch_explicitly_enters_an_existing_worktree() {
 }
 
 #[test]
+fn verbose_switch_reports_timings_without_polluting_stdout() {
+    let repo = Repository::new();
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["switch", "feature", "--verbose"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", repo.linked.canonicalize().unwrap().display()).as_bytes()
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("[verbose"), "{stderr}");
+    assert!(stderr.contains("switch"), "{stderr}");
+    assert!(stderr.contains("git worktree list"), "{stderr}");
+    assert!(stderr.contains("resolve switch"), "{stderr}");
+    assert!(stderr.contains("enter existing worktree"), "{stderr}");
+}
+
+#[test]
+fn registered_switch_skips_unrelated_branch_observation() {
+    let repo = Repository::new();
+    let fake_bin = repo.temp.path().join("registered-switch-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALL_LOG\"\nexec \"$REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+    let call_log = repo.temp.path().join("registered-switch-calls");
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["switch", "feature"])
+        .current_dir(&repo.main)
+        .env("PATH", &fake_bin)
+        .env("REAL_GIT", find_executable("git"))
+        .env("CALL_LOG", &call_log)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(call_log).unwrap();
+    assert!(calls.contains("worktree list --porcelain -z"), "{calls}");
+    assert!(!calls.contains("status --porcelain"), "{calls}");
+    assert!(!calls.contains("for-each-ref"), "{calls}");
+    assert!(!calls.contains("rev-parse --abbrev-ref"), "{calls}");
+    assert!(!calls.contains("rev-parse --verify"), "{calls}");
+}
+
+#[test]
+fn new_branch_planning_uses_a_bounded_number_of_git_processes() {
+    let repo = Repository::new();
+    for index in 0..12 {
+        let branch = format!("local-{index}");
+        git(&repo.main, ["branch", branch.as_str()]);
+    }
+    for index in 0..4 {
+        let reference = format!("refs/remotes/remote-{index}/topic");
+        git(&repo.main, ["update-ref", reference.as_str(), "HEAD"]);
+    }
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+    let fake_bin = repo.temp.path().join("bounded-planning-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALL_LOG\"\nexec \"$REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+    let call_log = repo.temp.path().join("bounded-planning-calls");
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["create", "new-topic", "--dry-run"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .env("PATH", &fake_bin)
+        .env("REAL_GIT", find_executable("git"))
+        .env("CALL_LOG", &call_log)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(call_log).unwrap();
+    assert!(!calls.contains("rev-parse --abbrev-ref"), "{calls}");
+    assert!(!calls.contains("rev-parse --verify"), "{calls}");
+    assert!(calls.lines().count() <= 20, "{calls}");
+}
+
+#[test]
+fn get_and_completion_keep_navigation_observation_lightweight() {
+    let repo = Repository::new();
+    let fake_bin = repo.temp.path().join("lightweight-observation-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let fake_git = fake_bin.join("git");
+    fs::write(
+        &fake_git,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALL_LOG\"\nexec \"$REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+    let call_log = repo.temp.path().join("lightweight-observation-calls");
+
+    let get = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["get", "branch"])
+        .current_dir(&repo.main)
+        .env("PATH", &fake_bin)
+        .env("REAL_GIT", find_executable("git"))
+        .env("CALL_LOG", &call_log)
+        .output()
+        .unwrap();
+    assert!(
+        get.status.success(),
+        "{}",
+        String::from_utf8_lossy(&get.stderr)
+    );
+    let calls = fs::read_to_string(&call_log).unwrap();
+    assert!(!calls.contains("status --porcelain"), "{calls}");
+    assert!(!calls.contains("for-each-ref"), "{calls}");
+
+    fs::write(&call_log, "").unwrap();
+    let completion = Command::cargo_bin("pando")
+        .unwrap()
+        .env("_PANDO_COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .env("PATH", &fake_bin)
+        .env("REAL_GIT", find_executable("git"))
+        .env("CALL_LOG", &call_log)
+        .arg("--")
+        .args(["pando", "switch", ""])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    assert!(completion.status.success());
+    let calls = fs::read_to_string(call_log).unwrap();
+    assert!(!calls.contains("status --porcelain"), "{calls}");
+    assert!(!calls.contains("%(objectname)"), "{calls}");
+    assert!(!calls.contains("%(upstream"), "{calls}");
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|call| call.contains("for-each-ref"))
+            .count(),
+        1,
+        "{calls}"
+    );
+    assert!(
+        calls.contains("--format=%(refname)%00%(symref)%00 refs/heads refs/remotes"),
+        "{calls}"
+    );
+}
+
+#[test]
 fn machine_readable_commands_keep_themed_feedback_off_stdout() {
     let repo = Repository::new();
     let mut get = Command::cargo_bin("pando").unwrap();
@@ -8684,7 +8860,7 @@ fn json_create_revalidates_the_planned_source_before_mutation() {
     let fake_git = fake_bin.join("git");
     fs::write(
         &fake_git,
-        "#!/bin/sh\ncase \"$*\" in\n  *topic/race*commit*)\n    if [ -f \"$COUNT_FILE\" ]; then IFS= read -r count < \"$COUNT_FILE\"; else count=0; fi\n    count=$((count + 1))\n    printf '%s' \"$count\" > \"$COUNT_FILE\"\n    if [ \"$count\" -eq 2 ]; then \"$REAL_GIT\" update-ref refs/heads/topic/race \"$ADVANCED\"; fi\n  ;;\nesac\nexec \"$REAL_GIT\" \"$@\"\n",
+        "#!/bin/sh\ncase \"$*\" in\n  *topic/race*commit*) \"$REAL_GIT\" update-ref refs/heads/topic/race \"$ADVANCED\" ;;\nesac\nexec \"$REAL_GIT\" \"$@\"\n",
     )
     .unwrap();
     fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
@@ -8697,7 +8873,6 @@ fn json_create_revalidates_the_planned_source_before_mutation() {
         .env("PATH", &fake_bin)
         .env("REAL_GIT", find_executable("git"))
         .env("ADVANCED", advanced)
-        .env("COUNT_FILE", repo.temp.path().join("source-count"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

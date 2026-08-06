@@ -67,7 +67,7 @@ printf '%s\n' '{"schema_version":1,"input":{"branch":"feature/login","descriptio
   | pando create --input-output json
 ```
 
-`--output json` instead uses ordinary argv flags as input. Both modes emit exactly one newline-terminated JSON document on stdout and no ordinary stderr on typed success or failure. Generated exact-leaf help restricts request and response `schema_version` to the literal `1`, and response `status` to `"success"` or `"error"`. Requests reject unknown fields, unsupported versions, trailing data, and mixed stdin/argv command input. Paths use tagged UTF-8 or base64 objects; responses carry typed results or errors plus context, effects, bounded diagnostics, and recovery steps. Structured `list` worktrees and `switch.selection_required` choices include nullable `last_commit_at` values as RFC 3339 committer timestamps with explicit offsets. These records stay in Git order regardless of personal sort configuration; metadata lookup failures use `null` values and a bounded diagnostic.
+`--output json` instead uses ordinary argv flags as input. Both modes emit exactly one newline-terminated JSON document on stdout and no ordinary stderr on typed success or failure unless `--verbose` explicitly enables diagnostics. Generated exact-leaf help restricts request and response `schema_version` to the literal `1`, and response `status` to `"success"` or `"error"`. Requests reject unknown fields, unsupported versions, trailing data, and mixed stdin/argv command input. Paths use tagged UTF-8 or base64 objects; responses carry typed results or errors plus context, effects, bounded diagnostics, and recovery steps. Structured `list` worktrees and `switch.selection_required` choices include nullable `last_commit_at` values as RFC 3339 committer timestamps with explicit offsets. These records stay in Git order regardless of personal sort configuration; metadata lookup failures use `null` values and a bounded diagnostic.
 
 JSON execution is deterministic and noninteractive. Mutating commands support dry-run planning, while shared trust approval and installer writes remain manual human operations. The canonical property is `primary-worktree-path` (`primary_worktree_path` in JSON); the former Main spelling is not an alias. The installed zsh wrappers for `pando` and `pd` pass JSON invocations and all noninteractive-shell invocations through byte-for-byte without destination capture or `cd`.
 
@@ -78,6 +78,12 @@ Switch directly to a branch or open the interactive picker:
 ```zsh
 pando switch feature/login
 pando switch
+```
+
+Pass the global `--verbose` flag when diagnosing a slow command. Pando disables animated progress and writes nested phase and Git subprocess timings to stderr while keeping the successful destination path alone on stdout, so the installed shell integration continues to switch directories correctly:
+
+```zsh
+pd switch main --verbose
 ```
 
 The picker lists navigable worktrees with aligned branch, last-commit, and path columns, defaults to the current worktree, and ends with **Create or switch branch…**. Path abbreviation matches `pando list`: once a full parent path is shown, consecutive descendant rows render its shared prefix as `.../`. Last commit means the HEAD commit's committer time and is shown in local time as `YYYY-MM-DD HH:MM`, or `unknown` when it cannot be resolved. The initial order comes from `worktrees.default-sort` and falls back to Git order. Ctrl-S cycles temporarily through Git order, branch A-Z, last commit newest-first, and path A-Z while preserving the filter and selected worktree. Escape cancels without changing directory.

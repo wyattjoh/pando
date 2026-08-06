@@ -2,6 +2,7 @@ pub(crate) mod branch;
 pub mod commit;
 pub mod completion;
 pub mod config;
+mod debug;
 pub mod git;
 mod hash;
 pub(crate) mod hook;
@@ -24,6 +25,11 @@ use std::{cmp::Ordering, os::unix::ffi::OsStrExt, path::PathBuf};
 
 use chrono::{DateTime, FixedOffset, Local, SecondsFormat};
 use serde::Deserialize;
+
+/// Enables or disables elapsed-time diagnostics on stderr.
+pub fn set_verbose(enabled: bool) {
+    debug::set_enabled(enabled);
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Worktree {

@@ -30,6 +30,9 @@ struct Cli {
     /// Read a versioned JSON request from stdin and emit JSON.
     #[arg(long, value_enum, global = true)]
     input_output: Option<OutputFormat>,
+    /// Write elapsed-time diagnostics to stderr.
+    #[arg(long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -199,6 +202,7 @@ fn main() {
         }
         Err(error) => error.exit(),
     };
+    pando::set_verbose(cli.verbose);
     if let Err(error) = run(cli) {
         if json_requested {
             let response = pando::protocol::failure(

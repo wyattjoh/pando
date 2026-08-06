@@ -45,6 +45,7 @@ the four operations above must go through `pando`, not `git`.
 |---|---|---|
 | `--output <OUTPUT>` | `human` (default), `json` | Human terminal output or one structured JSON document |
 | `--input-output <INPUT_OUTPUT>` | `json` only | Read a versioned JSON request from stdin, emit JSON. `human` is a hard error |
+| `--verbose` | — | Disable animated progress and write elapsed phase and Git subprocess diagnostics to stderr |
 | `-h`, `--help` | — | Print help (combine with `--output json` for generated JSON Schemas) |
 | `-V`, `--version` | — | Print version |
 
@@ -79,7 +80,7 @@ for leaf contracts and approval rules.
 
 ## Anatomy
 
-`pando [--output human|json] <command> [command flags]`
+`pando [--output human|json] [--verbose] <command> [command flags]`
 
 ## Commands
 
@@ -126,6 +127,7 @@ Source: README.md ("Global placement")
 pando switch feature/login   # exact branch
 pando switch                 # interactive picker
 pando switch --branches      # interactive picker, starting in branch view
+pd switch main --verbose     # diagnose elapsed phases on stderr
 pando create feature/login   # create without confirming; fails if it exists
 pando create --fetch topic   # refresh the fresh base ref first (base: fresh only)
 

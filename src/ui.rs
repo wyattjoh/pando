@@ -335,6 +335,8 @@ impl TimedProgress {
 /// The operation receives whether an animated spinner owns stderr. Callers that
 /// can otherwise stream subprocess progress should capture it only when this is
 /// `true`, avoiding interleaved output while preserving progress on plain stderr.
+/// Verbose diagnostics disable animation so their timing lines cannot corrupt an
+/// active spinner.
 ///
 /// # Errors
 ///
@@ -374,7 +376,7 @@ pub fn run_timed_completing<T>(
     completion: Completion,
     operation: impl FnOnce(bool) -> Result<T>,
 ) -> Result<T> {
-    if !enabled {
+    if !enabled || crate::debug::enabled() {
         return operation(false);
     }
 

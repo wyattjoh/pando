@@ -451,7 +451,7 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
     let repository = match if input.branch.is_none() && intent == Intent::Switch {
         observation.repository_with_metadata()
     } else {
-        observation.repository()
+        observation.repository_for_navigation()
     } {
         Ok(repository) => repository,
         Err(error) => return failure("repository.invalid", format!("{error:#}")),
@@ -529,20 +529,35 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
             destination: None,
         };
     };
-    let snapshot = match Snapshot::observe(&repository) {
-        Ok(snapshot) => snapshot,
-        Err(error) => return failure("repository.invalid", format!("{error:#}")),
-    };
-    let plan = match plan(
+    let fetch = FetchIntent::new(input.fetch, input.dry_run);
+    let registered = registered_plan(
         &repository,
-        &snapshot,
         intent,
         &branch,
         input.remote.as_deref(),
-        FetchIntent::new(input.fetch, input.dry_run),
+        fetch,
         input.description.clone(),
         input.dry_run,
-    ) {
+    );
+    let planned = if let Some(registered) = registered {
+        Ok(registered)
+    } else {
+        let snapshot = match Snapshot::observe(&repository) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return failure("repository.invalid", format!("{error:#}")),
+        };
+        plan(
+            &repository,
+            &snapshot,
+            intent,
+            &branch,
+            input.remote.as_deref(),
+            fetch,
+            input.description.clone(),
+            input.dry_run,
+        )
+    };
+    let plan = match planned {
         Ok(Ok(plan)) => plan,
         Ok(Err(blocker)) => {
             return blocker_outcome(intent, blocker, &branch, input, working_directory);
@@ -816,6 +831,44 @@ fn bounded_diagnostic(source: &str, stream: &str, bytes: &[u8]) -> Diagnostic {
     }
 }
 
+/// Resolves the registered-worktree fast path without observing unrelated refs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn registered_plan(
+    repository: &Repository,
+    intent: Intent,
+    branch: &str,
+    remote: Option<&str>,
+    fetch: FetchIntent,
+    description: Option<String>,
+    dry_run: bool,
+) -> Option<Result<Plan, Blocker>> {
+    let worktree = crate::worktree_for_branch(&repository.worktrees, branch)?.clone();
+    if let Err(error) = branch::reject_fetch(fetch.requested(), FETCH_REGISTERED_WORKTREE) {
+        return Some(Err(Blocker::FetchNotApplicable {
+            message: format!("{error:#}"),
+        }));
+    }
+    if remote.is_some() {
+        return Some(Err(Blocker::IrrelevantRemote));
+    }
+    if !worktree.navigable() {
+        return Some(Err(Blocker::DestinationUnavailable { worktree }));
+    }
+    if intent == Intent::Create {
+        return Some(Err(Blocker::RegisteredForCreate { worktree }));
+    }
+    Some(Ok(Plan {
+        intent,
+        branch: branch.to_owned(),
+        destination: worktree.path.clone(),
+        source: Source::Registered(worktree),
+        config: None,
+        description,
+        fetch,
+        dry_run,
+    }))
+}
+
 /// Plans the selected source and byte-preserving destination.
 ///
 /// The result is deterministic. Callers may satisfy a remote-choice blocker and
@@ -835,38 +888,24 @@ pub(crate) fn plan(
     description: Option<String>,
     dry_run: bool,
 ) -> Result<Result<Plan, Blocker>> {
+    if let Some(plan) = registered_plan(
+        repository,
+        intent,
+        branch,
+        remote,
+        fetch,
+        description.clone(),
+        dry_run,
+    ) {
+        return Ok(plan);
+    }
     if let Err(error) = snapshot.validate(branch) {
         return Ok(Err(Blocker::InvalidBranch {
             message: format!("{error:#}"),
         }));
     }
     let classification = snapshot.classify(branch);
-    if let Classification::Registered(worktree) = classification {
-        if let Err(error) = branch::reject_fetch(fetch.requested(), FETCH_REGISTERED_WORKTREE) {
-            return Ok(Err(Blocker::FetchNotApplicable {
-                message: format!("{error:#}"),
-            }));
-        }
-        if remote.is_some() {
-            return Ok(Err(Blocker::IrrelevantRemote));
-        }
-        if !worktree.navigable() {
-            return Ok(Err(Blocker::DestinationUnavailable { worktree }));
-        }
-        if intent == Intent::Create {
-            return Ok(Err(Blocker::RegisteredForCreate { worktree }));
-        }
-        return Ok(Ok(Plan {
-            intent,
-            branch: branch.to_owned(),
-            destination: worktree.path.clone(),
-            source: Source::Registered(worktree),
-            config: None,
-            description,
-            fetch,
-            dry_run,
-        }));
-    }
+    debug_assert!(!matches!(classification, Classification::Registered(_)));
 
     let Some(primary) = repository.primary.as_ref() else {
         return Ok(Err(Blocker::PrimaryUnavailable));
@@ -939,8 +978,8 @@ pub(crate) fn plan(
         Ok(SourceResolution::FetchRequired(requirement)) if fetch.refreshes() => {
             let output = git::RefMutation::new(&repository.current().path)
                 .fetch_base_ref(&requirement.base_ref)?;
-            let refreshed_repository =
-                RepositoryObservation::new(&repository.current().path).repository()?;
+            let refreshed_repository = RepositoryObservation::new(&repository.current().path)
+                .repository_for_navigation()?;
             let refreshed_snapshot = Snapshot::observe(&refreshed_repository)?;
             let mut rebuilt = match plan(
                 &refreshed_repository,
@@ -1302,21 +1341,13 @@ fn revalidate(repository: &Repository, plan: &Plan) -> Result<()> {
 }
 
 fn revalidate_new(repository: &Repository, base: &git::NewBranchBase) -> Result<()> {
-    let snapshot = Snapshot::observe(repository)?;
-    let mode = if base.base_ref.is_some() {
-        crate::BaseMode::Fresh
-    } else {
-        crate::BaseMode::Head
-    };
-    let configured_target = base
+    let reference = base
         .base_ref
         .as_ref()
-        .map(|base_ref| base_ref.branch.as_str());
-    let BaseResolution::Resolved(current) = snapshot.new_branch_base(mode, configured_target)?
-    else {
-        bail!("the planned new-branch source is no longer available");
-    };
-    let actual = current.commit;
+        .map_or_else(|| "HEAD".to_owned(), git::BaseRef::reference);
+    let actual = HistoryObservation::new(&repository.current().path)
+        .commit(&reference)
+        .context("the planned new-branch source is no longer available")?;
     if actual != base.commit {
         bail!(
             "planned new-branch source moved from {} to {actual}",
