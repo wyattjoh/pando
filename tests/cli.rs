@@ -699,7 +699,7 @@ fn metadata_failure_warns_once_for_human_list_and_is_structured_for_json() {
     let fake_git = fake_bin.join("git");
     fs::write(
         &fake_git,
-        "#!/bin/sh\nif [ \"$1\" = cat-file ]; then echo 'metadata command failed' >&2; exit 71; fi\nexec \"$REAL_GIT\" \"$@\"\n",
+        "#!/bin/sh\nif [ \"$1\" = cat-file ]; then cat >/dev/null; echo 'metadata command failed' >&2; exit 71; fi\nexec \"$REAL_GIT\" \"$@\"\n",
     )
     .unwrap();
     fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
@@ -5670,6 +5670,16 @@ fn ambiguous_remote_branches_fail_noninteractively_before_mutation() {
 #[test]
 fn remote_selection_caps_long_lists_to_a_scrollable_viewport() {
     let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        format!(
+            "worktrees:\n  root: {}\n",
+            repo.temp.path().join("worktrees").display()
+        ),
+    )
+    .unwrap();
     for index in 0..12 {
         let remote = format!("remote-{index:02}");
         git(
@@ -5686,7 +5696,11 @@ fn remote_selection_caps_long_lists_to_a_scrollable_viewport() {
     }
 
     let mut command = Command::cargo_bin("pando").unwrap();
-    command.args(["switch", "many"]).current_dir(&repo.main);
+    command
+        .args(["switch", "many"])
+        .current_dir(&repo.main)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path());
     let output = run_pty_command_with_rows(command, b"\x1b", 8);
 
     assert!(!output.status.success());
@@ -7610,6 +7624,16 @@ fn json_version_one_schema_help_matches_runtime_envelopes() {
 #[test]
 fn human_and_json_get_preserve_the_same_natural_values() {
     let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        format!(
+            "worktrees:\n  root: {}\n",
+            repo.temp.path().join("worktrees").display()
+        ),
+    )
+    .unwrap();
     for (property, expected_type) in [
         ("branch", "string"),
         ("port", "number"),
@@ -7621,12 +7645,19 @@ fn human_and_json_get_preserve_the_same_natural_values() {
             .unwrap()
             .args(["get", property])
             .current_dir(&repo.main)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", repo.temp.path())
             .output()
             .unwrap();
         assert!(human.status.success());
         assert!(human.stderr.is_empty());
 
-        let json = json_command(&repo.main, &["get", property, "--output", "json"], None);
+        let json = json_command_with_env(
+            &repo.main,
+            &["get", property, "--output", "json"],
+            None,
+            &[("XDG_CONFIG_HOME", xdg.path()), ("HOME", repo.temp.path())],
+        );
         assert!(json.status.success());
         let json = assert_json_pure(&json);
         let value = &json["result"]["value"];
