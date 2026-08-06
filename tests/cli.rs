@@ -6990,33 +6990,79 @@ fn commit_with_explicit_message_stages_all_change_kinds() {
 }
 
 #[test]
-fn commit_renders_pre_commit_hook_output_on_stderr() {
+fn commit_streams_pre_commit_hook_output_on_stderr() {
     let repo = Repository::new();
     let hook = repo.main.join(".git/hooks/pre-commit");
     fs::write(
         &hook,
-        "#!/bin/sh\nprintf 'pre-commit stdout\\n'\nprintf 'pre-commit stderr\\n' >&2\n",
+        "#!/bin/sh\nprintf 'pre-commit stdout\\n'\nprintf 'pre-commit stderr\\n' >&2\nsleep 2\nprintf 'pre-commit finished\\n'\n",
     )
     .unwrap();
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(repo.main.join("README.md"), "updated\n").unwrap();
 
-    let output = Command::cargo_bin("pando")
-        .unwrap()
-        .args(["commit", "--stage-all", "-m", "test: render hook output"])
-        .current_dir(&repo.main)
-        .output()
-        .unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["commit", "--stage-all", "-m", "test: stream hook output"])
+        .current_dir(&repo.main);
+    let window = Winsize {
+        ws_row: 24,
+        ws_col: 600,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let PtySession {
+        mut child,
+        master_writer,
+        mut master_reader,
+    } = start_pty_command(command, window);
+    drop(master_writer);
+    let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 1024];
+        let mut started_sender = Some(started_sender);
+        loop {
+            match master_reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    bytes.extend_from_slice(&buffer[..read]);
+                    if bytes
+                        .windows("pre-commit stderr".len())
+                        .any(|window| window == b"pre-commit stderr")
+                        && let Some(sender) = started_sender.take()
+                    {
+                        sender.send(()).unwrap();
+                    }
+                }
+            }
+        }
+        bytes
+    });
 
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    started_receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("pre-commit output was buffered until the hook completed");
+    assert!(child.try_wait().unwrap().is_none());
+    let output = finish_pty_command(child, reader);
+
+    assert!(output.status.success(), "{}", output.stderr);
     assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("pre-commit stdout"), "{stderr}");
-    assert!(stderr.contains("pre-commit stderr"), "{stderr}");
+    assert!(
+        output.stderr.contains("pre-commit stdout"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("pre-commit stderr"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("pre-commit finished"),
+        "{}",
+        output.stderr
+    );
 }
 
 #[test]
