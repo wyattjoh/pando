@@ -1,0 +1,9 @@
+hooks:
+  post-create:
+    - name: Build project
+      command: just build
+  pre-merge:
+    - name: Check formatting and lint
+      command: just lint
+    - name: Run tests
+      command: just test
