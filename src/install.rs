@@ -14,7 +14,11 @@ use std::{
     ffi::OsStr,
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt, process::ExitStatusExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, PermissionsExt},
+        process::ExitStatusExt,
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -164,10 +168,6 @@ pub struct InstallPlan {
     integration_path: PathBuf,
     #[serde(skip)]
     startup_path: PathBuf,
-    #[serde(skip)]
-    desired_config: Vec<u8>,
-    #[serde(skip)]
-    desired_startup: Vec<u8>,
 }
 
 #[derive(Debug, JsonSchema, Serialize)]
@@ -176,6 +176,54 @@ pub enum InstallResult {
     DryRun { plan: InstallPlan },
     AlreadyCurrent { plan: InstallPlan },
     Installed { plan: InstallPlan },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+    mode: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TargetObservation {
+    Absent {
+        ancestor_path: PathBuf,
+        ancestor: PathBuf,
+        ancestor_identity: FileIdentity,
+    },
+    File {
+        identity: FileIdentity,
+        content: Vec<u8>,
+    },
+    Symlink {
+        identity: FileIdentity,
+        link: PathBuf,
+        destination: PathBuf,
+        destination_identity: FileIdentity,
+        content: Vec<u8>,
+    },
+}
+
+#[derive(Debug)]
+struct ProposedWrite {
+    role: &'static str,
+    path: PathBuf,
+    desired: Vec<u8>,
+    observed: TargetObservation,
+    verb: &'static str,
+}
+
+#[derive(Debug)]
+struct InstallProposal {
+    writes: Vec<ProposedWrite>,
+}
+
+struct InstallApproval(());
+
+struct InstallAssessment {
+    plan: InstallPlan,
+    proposal: InstallProposal,
 }
 
 #[derive(Debug)]
@@ -201,24 +249,24 @@ pub struct InstallOutcome {
     pub recovery: Vec<RecoveryAction<protocol::EmptyInput>>,
 }
 
-/// Builds the deterministic installation plan.
-///
-/// # Errors
-/// Returns an error when paths or existing installation files cannot be read.
-pub fn plan() -> Result<InstallPlan> {
+/// Builds one deterministic installation assessment and its opaque proposal.
+fn assess() -> Result<InstallAssessment> {
     let config_path = config_home()?.join("pando/config.yaml");
     let integration_path = config_home()?.join("pando/pando.zsh");
     let startup_path = zshrc_path()?;
     let source_block = source_block(&integration_path);
-    let existing_config = read_optional(&config_path)?;
-    let existing_integration = read_optional(&integration_path)?;
-    let existing_startup = read_optional(&startup_path)?;
-    let desired_config = update_config_scaffold(&existing_config)?;
-    let desired_startup = update_source_block(&existing_startup, &source_block)?;
+    let observed_config = observe_target(&config_path)?;
+    let observed_integration = observe_target(&integration_path)?;
+    let observed_startup = observe_target(&startup_path)?;
+    let existing_config = observed_config.content();
+    let existing_integration = observed_integration.content();
+    let existing_startup = observed_startup.content();
+    let desired_config = update_config_scaffold(existing_config)?;
+    let desired_startup = update_source_block(existing_startup, &source_block)?;
     let configuration_changed = existing_config != desired_config;
     let integration_changed = existing_integration != INTEGRATION;
     let startup_changed = existing_startup != desired_startup;
-    Ok(InstallPlan {
+    let plan = InstallPlan {
         changed: configuration_changed || integration_changed || startup_changed,
         configuration: InstallTarget {
             path: BytePath::path(&config_path),
@@ -232,29 +280,201 @@ pub fn plan() -> Result<InstallPlan> {
             path: BytePath::path(&startup_path),
             would_change: startup_changed,
         },
-        config_path,
-        integration_path,
-        startup_path,
-        desired_config,
-        desired_startup,
+        config_path: config_path.clone(),
+        integration_path: integration_path.clone(),
+        startup_path: startup_path.clone(),
+    };
+    let writes = [
+        (
+            configuration_changed,
+            "configuration",
+            config_path,
+            desired_config,
+            observed_config,
+            "update",
+        ),
+        (
+            integration_changed,
+            "integration",
+            integration_path,
+            INTEGRATION.to_vec(),
+            observed_integration,
+            "write",
+        ),
+        (
+            startup_changed,
+            "startup",
+            startup_path,
+            desired_startup,
+            observed_startup,
+            "update",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(changed, role, path, desired, observed, verb)| {
+        changed.then_some(ProposedWrite {
+            role,
+            path,
+            desired,
+            observed,
+            verb,
+        })
+    })
+    .collect();
+    Ok(InstallAssessment {
+        plan,
+        proposal: InstallProposal { writes },
     })
 }
 
-fn effects(plan: &InstallPlan, attempted: bool) -> Vec<Effect> {
-    [
-        ("configuration", &plan.configuration),
-        ("integration", &plan.integration),
-        ("startup", &plan.startup),
-    ]
-    .into_iter()
-    .filter(|(_, target)| target.would_change)
-    .map(|(role, target)| Effect {
-        action: "file.write".into(),
-        attempted,
-        completed: attempted,
-        details: Some(serde_json::json!({"target":target.path,"role":role})),
+impl TargetObservation {
+    fn content(&self) -> &[u8] {
+        match self {
+            Self::Absent { .. } => &[],
+            Self::File { content, .. } | Self::Symlink { content, .. } => content,
+        }
+    }
+}
+
+fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
+    FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        mode: metadata.mode(),
+    }
+}
+
+fn observe_target(path: &Path) -> Result<TargetObservation> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let ancestor = nearest_existing_ancestor(path)?;
+            let ancestor_metadata = fs::metadata(&ancestor).with_context(|| {
+                format!(
+                    "failed to inspect destination ancestor {}",
+                    ancestor.display()
+                )
+            })?;
+            return Ok(TargetObservation::Absent {
+                ancestor_path: ancestor.clone(),
+                ancestor: fs::canonicalize(&ancestor).with_context(|| {
+                    format!(
+                        "failed to resolve destination ancestor {}",
+                        ancestor.display()
+                    )
+                })?,
+                ancestor_identity: file_identity(&ancestor_metadata),
+            });
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect destination {}", path.display()));
+        }
+    };
+    if !metadata.file_type().is_symlink() {
+        return Ok(TargetObservation::File {
+            identity: file_identity(&metadata),
+            content: fs::read(path)
+                .with_context(|| format!("failed to read existing file {}", path.display()))?,
+        });
+    }
+    let link = fs::read_link(path)
+        .with_context(|| format!("failed to inspect symlink {}", path.display()))?;
+    let destination = fs::canonicalize(path)
+        .with_context(|| format!("refusing to replace broken symlink {}", path.display()))?;
+    let destination_metadata = fs::metadata(&destination)
+        .with_context(|| format!("failed to inspect destination {}", destination.display()))?;
+    Ok(TargetObservation::Symlink {
+        identity: file_identity(&metadata),
+        link,
+        destination,
+        destination_identity: file_identity(&destination_metadata),
+        content: fs::read(path)
+            .with_context(|| format!("failed to read existing file {}", path.display()))?,
     })
-    .collect()
+}
+
+fn observation_matches(path: &Path, observed: &TargetObservation) -> Result<bool> {
+    let TargetObservation::Absent {
+        ancestor_path,
+        ancestor,
+        ancestor_identity,
+    } = observed
+    else {
+        return Ok(observe_target(path)? == *observed);
+    };
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => return Ok(false),
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::metadata(ancestor_path)?;
+    if file_identity(&metadata) != *ancestor_identity
+        || fs::canonicalize(ancestor_path)? != *ancestor
+    {
+        return Ok(false);
+    }
+    let relative_parent = path
+        .parent()
+        .and_then(|parent| parent.strip_prefix(ancestor_path).ok())
+        .context("installation target escaped its observed ancestor")?;
+    let mut current = ancestor_path.clone();
+    for component in relative_parent.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(true)
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf> {
+    let mut candidate = path.parent().context("installation target has no parent")?;
+    loop {
+        match fs::metadata(candidate) {
+            Ok(_) => return Ok(candidate.to_path_buf()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                candidate = candidate
+                    .parent()
+                    .context("installation target has no existing ancestor")?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to inspect destination ancestor {}",
+                        candidate.display()
+                    )
+                });
+            }
+        }
+    }
+}
+
+/// Builds the deterministic, non-executable installation plan.
+///
+/// # Errors
+/// Returns an error when paths or existing installation files cannot be read.
+pub fn plan() -> Result<InstallPlan> {
+    Ok(assess()?.plan)
+}
+
+fn effects(proposal: &InstallProposal) -> Vec<Effect> {
+    proposal
+        .writes
+        .iter()
+        .map(|write| Effect {
+            action: "file.write".into(),
+            attempted: false,
+            completed: false,
+            details: Some(serde_json::json!({
+                "target": BytePath::path(&write.path),
+                "role": write.role,
+            })),
+        })
+        .collect()
 }
 
 /// Returns the typed non-mutating outcome for structured installation.
@@ -262,7 +482,7 @@ fn effects(plan: &InstallPlan, attempted: bool) -> Vec<Effect> {
 /// # Errors
 /// Returns an error when the installation plan cannot be inspected.
 pub fn inspect(input: &InstallInput) -> Result<InstallOutcome> {
-    let plan = plan()?;
+    let InstallAssessment { plan, proposal } = assess()?;
     if !plan.changed {
         return Ok(InstallOutcome {
             result: Ok(InstallResult::AlreadyCurrent { plan }),
@@ -270,7 +490,7 @@ pub fn inspect(input: &InstallInput) -> Result<InstallOutcome> {
             recovery: Vec::new(),
         });
     }
-    let planned_effects = effects(&plan, false);
+    let planned_effects = effects(&proposal);
     if input.dry_run {
         return Ok(InstallOutcome {
             result: Ok(InstallResult::DryRun { plan }),
@@ -303,7 +523,7 @@ pub fn inspect(input: &InstallInput) -> Result<InstallOutcome> {
 /// # Errors
 /// Returns an error when paths or existing installation files cannot be read or rendered.
 pub fn preview() -> Result<()> {
-    let plan = plan()?;
+    let InstallAssessment { plan, .. } = assess()?;
     ui::info(ui::heading_style().apply_to("Planned zsh integration changes:"))?;
     for (path, changed) in [
         (&plan.integration_path, plan.integration.would_change),
@@ -333,7 +553,7 @@ pub fn preview() -> Result<()> {
 /// cannot be inspected, confirmation cannot be read, a planned write fails, or
 /// the selected agent cannot complete its session.
 pub fn run(guided: bool) -> Result<()> {
-    let plan = plan()?;
+    let InstallAssessment { plan, proposal } = assess()?;
     let shell_changed = plan.changed;
 
     if shell_changed {
@@ -370,7 +590,8 @@ pub fn run(guided: bool) -> Result<()> {
             ));
         }
 
-        let outcome = apply(&plan);
+        let approval = InstallApproval(());
+        let outcome = execute(proposal, approval, plan.clone());
         if let Err(failure) = outcome.result {
             bail!(failure.message);
         }
@@ -395,49 +616,62 @@ pub fn run(guided: bool) -> Result<()> {
     ui::finish(ui::success_style().apply_to(completion))
 }
 
-fn apply(plan: &InstallPlan) -> InstallOutcome {
-    let mut effects = effects(plan, false);
-    let writes = [
-        (
-            plan.configuration.would_change,
-            &plan.config_path,
-            plan.desired_config.as_slice(),
-            "update",
-        ),
-        (
-            plan.integration.would_change,
-            &plan.integration_path,
-            INTEGRATION,
-            "write",
-        ),
-        (
-            plan.startup.would_change,
-            &plan.startup_path,
-            plan.desired_startup.as_slice(),
-            "update",
-        ),
-    ];
-    let mut effect_index = 0;
-    for (changed, path, desired, verb) in writes {
-        if !changed {
-            continue;
+fn execute(
+    proposal: InstallProposal,
+    _approval: InstallApproval,
+    plan: InstallPlan,
+) -> InstallOutcome {
+    let mut effects = effects(&proposal);
+    for (index, write) in proposal.writes.into_iter().enumerate() {
+        match observation_matches(&write.path, &write.observed) {
+            Ok(true) => {}
+            Ok(false) => {
+                return install_failure(
+                    effects,
+                    format!(
+                        "refusing to {} {} because it changed after approval",
+                        write.verb,
+                        write.path.display()
+                    ),
+                );
+            }
+            Err(error) => {
+                return install_failure(
+                    effects,
+                    format!(
+                        "failed to revalidate {} before {}: {error:#}",
+                        write.path.display(),
+                        write.verb
+                    ),
+                );
+            }
         }
-        effects[effect_index].attempted = true;
-        if let Err(error) = write_atomic(path, desired) {
-            return InstallOutcome {
-                result: Err(InstallFailure {
-                    code: "install.write_failed",
-                    message: format!("failed to {verb} {}: {error:#}", path.display()),
-                }),
+        effects[index].attempted = true;
+        if let Err(error) = write_observed_target(&write.path, &write.observed, &write.desired) {
+            return install_failure(
                 effects,
-                recovery: Vec::new(),
-            };
+                format!(
+                    "failed to {} {}: {error:#}",
+                    write.verb,
+                    write.path.display()
+                ),
+            );
         }
-        effects[effect_index].completed = true;
-        effect_index += 1;
+        effects[index].completed = true;
     }
     InstallOutcome {
-        result: Ok(InstallResult::Installed { plan: plan.clone() }),
+        result: Ok(InstallResult::Installed { plan }),
+        effects,
+        recovery: Vec::new(),
+    }
+}
+
+fn install_failure(effects: Vec<Effect>, message: String) -> InstallOutcome {
+    InstallOutcome {
+        result: Err(InstallFailure {
+            code: "install.write_failed",
+            message,
+        }),
         effects,
         recovery: Vec::new(),
     }
@@ -887,6 +1121,17 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+fn write_observed_target(path: &Path, observed: &TargetObservation, content: &[u8]) -> Result<()> {
+    if !observation_matches(path, observed)? {
+        bail!("destination changed during approved installation");
+    }
+    let destination = match observed {
+        TargetObservation::Symlink { destination, .. } => destination,
+        TargetObservation::Absent { .. } | TargetObservation::File { .. } => path,
+    };
+    write_atomic_file(destination, content)
+}
+
 fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
     let destination = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(path)
@@ -945,11 +1190,16 @@ fn write_atomic_file(path: &Path, content: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+
     use super::{
         CONFIG_END_MARKER, CONFIG_START_MARKER, END_MARKER, INSTALL_END_MARKER,
-        INSTALL_START_MARKER, START_MARKER, agent_invocation, persist_install_command,
-        update_config_scaffold, update_install_command, update_source_block,
+        INSTALL_START_MARKER, InstallApproval, InstallPlan, InstallProposal, InstallTarget,
+        ProposedWrite, START_MARKER, agent_invocation, execute, observe_target,
+        persist_install_command, update_config_scaffold, update_install_command,
+        update_source_block,
     };
+    use crate::protocol::BytePath;
 
     #[test]
     fn config_scaffold_is_added_and_idempotent() {
@@ -1041,6 +1291,187 @@ mod tests {
                 .windows(b"# old scaffold".len())
                 .any(|window| window == b"# old scaffold")
         );
+    }
+
+    #[test]
+    fn execution_refuses_stale_content_before_attempting_the_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.yaml");
+        fs::write(&path, b"observed").unwrap();
+        let observed = observe_target(&path).unwrap();
+        fs::write(&path, b"changed").unwrap();
+
+        let outcome = execute(
+            proposal(&path, observed, b"desired"),
+            InstallApproval(()),
+            test_plan(&path),
+        );
+
+        assert!(outcome.result.is_err());
+        assert!(!outcome.effects[0].attempted);
+        assert!(!outcome.effects[0].completed);
+        assert_eq!(fs::read(path).unwrap(), b"changed");
+    }
+
+    #[test]
+    fn execution_attributes_partial_effects_and_stops_at_a_stale_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("config.yaml");
+        let second = directory.path().join("pando.zsh");
+        fs::write(&second, b"observed").unwrap();
+        let proposal = InstallProposal {
+            writes: vec![
+                proposed_write("configuration", &first, b"first"),
+                proposed_write("integration", &second, b"second"),
+            ],
+        };
+        fs::write(&second, b"stale").unwrap();
+
+        let outcome = execute(proposal, InstallApproval(()), test_plan(&first));
+
+        assert!(outcome.result.is_err());
+        assert!(outcome.effects[0].attempted);
+        assert!(outcome.effects[0].completed);
+        assert!(!outcome.effects[1].attempted);
+        assert!(!outcome.effects[1].completed);
+        assert_eq!(fs::read(first).unwrap(), b"first");
+        assert_eq!(fs::read(second).unwrap(), b"stale");
+    }
+
+    #[test]
+    fn execution_detects_identity_changes_with_identical_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(".zshrc");
+        let replacement = directory.path().join("replacement");
+        fs::write(&path, b"same").unwrap();
+        let observed = observe_target(&path).unwrap();
+        fs::write(&replacement, b"same").unwrap();
+        fs::rename(&replacement, &path).unwrap();
+
+        let outcome = execute(
+            proposal(&path, observed, b"desired"),
+            InstallApproval(()),
+            test_plan(&path),
+        );
+
+        assert!(outcome.result.is_err());
+        assert!(!outcome.effects[0].attempted);
+        assert_eq!(fs::read(path).unwrap(), b"same");
+    }
+
+    #[test]
+    fn execution_refuses_a_retargeted_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        let path = directory.path().join(".zshrc");
+        fs::write(&first, b"same").unwrap();
+        fs::write(&second, b"same").unwrap();
+        symlink(&first, &path).unwrap();
+        let observed = observe_target(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink(&second, &path).unwrap();
+
+        let outcome = execute(
+            proposal(&path, observed, b"desired"),
+            InstallApproval(()),
+            test_plan(&path),
+        );
+
+        assert!(outcome.result.is_err());
+        assert!(!outcome.effects[0].attempted);
+        assert_eq!(fs::read(first).unwrap(), b"same");
+        assert_eq!(fs::read(second).unwrap(), b"same");
+    }
+
+    #[test]
+    fn execution_refuses_a_new_parent_symlink_for_an_absent_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let approved_parent = directory.path().join("approved");
+        let redirected_parent = directory.path().join("redirected");
+        fs::create_dir(&approved_parent).unwrap();
+        fs::create_dir(&redirected_parent).unwrap();
+        let path = approved_parent.join("config.yaml");
+        let observed = observe_target(&path).unwrap();
+        fs::remove_dir(&approved_parent).unwrap();
+        symlink(&redirected_parent, &approved_parent).unwrap();
+
+        let outcome = execute(
+            proposal(&path, observed, b"desired"),
+            InstallApproval(()),
+            test_plan(&path),
+        );
+
+        assert!(outcome.result.is_err());
+        assert!(!outcome.effects[0].attempted);
+        assert!(!redirected_parent.join("config.yaml").exists());
+    }
+
+    #[test]
+    fn approved_write_preserves_observed_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(".zshrc");
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        let observed = observe_target(&path).unwrap();
+
+        let outcome = execute(
+            proposal(&path, observed, b"new"),
+            InstallApproval(()),
+            test_plan(&path),
+        );
+
+        assert!(outcome.result.is_ok());
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
+
+    fn proposal(
+        path: &Path,
+        observed: super::TargetObservation,
+        desired: &[u8],
+    ) -> InstallProposal {
+        InstallProposal {
+            writes: vec![ProposedWrite {
+                role: "configuration",
+                path: path.to_path_buf(),
+                desired: desired.to_vec(),
+                observed,
+                verb: "update",
+            }],
+        }
+    }
+
+    fn proposed_write(role: &'static str, path: &Path, desired: &[u8]) -> ProposedWrite {
+        ProposedWrite {
+            role,
+            path: path.to_path_buf(),
+            desired: desired.to_vec(),
+            observed: observe_target(path).unwrap(),
+            verb: "write",
+        }
+    }
+
+    fn test_plan(path: &Path) -> InstallPlan {
+        let target = || InstallTarget {
+            path: BytePath::path(path),
+            would_change: true,
+        };
+        InstallPlan {
+            changed: true,
+            configuration: target(),
+            integration: target(),
+            startup: target(),
+            config_path: path.to_path_buf(),
+            integration_path: path.to_path_buf(),
+            startup_path: path.to_path_buf(),
+        }
     }
 
     fn count_marker(value: &[u8], marker: &[u8]) -> usize {
