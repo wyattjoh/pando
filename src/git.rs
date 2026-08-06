@@ -347,7 +347,7 @@ impl<'cwd> LifecycleMutation<'cwd> {
             .with_context(|| format!("failed to create commit in {}", self.cwd.display()))
     }
 
-    pub(crate) fn commit(self, message: &str) -> Result<()> {
+    pub(crate) fn commit(self, message: &str) -> Result<MutationTranscript> {
         commit_impl(self.cwd, message)
             .with_context(|| format!("failed to create commit in {}", self.cwd.display()))
     }
@@ -1545,15 +1545,18 @@ fn recent_subjects_observed(cwd: &Path) -> Result<Vec<String>> {
 /// # Errors
 ///
 /// Returns an error when Git cannot create the commit.
-fn commit_impl(cwd: &Path, message: &str) -> Result<()> {
+fn commit_impl(cwd: &Path, message: &str) -> Result<MutationTranscript> {
     let output = GitProcess::new(cwd, ["commit", "-m", message])
         .captured_inheriting_stdin()
         .context("failed to start git commit")?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        bail!("git commit failed: {}", stderr_detail(&output))
+    if !output.status.success() {
+        bail!("git commit failed: {}", stderr_detail(&output));
     }
+    Ok(MutationTranscript {
+        succeeded: true,
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
 }
 
 fn status_observed(cwd: &Path) -> Result<StatusSnapshot> {

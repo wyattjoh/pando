@@ -6990,6 +6990,36 @@ fn commit_with_explicit_message_stages_all_change_kinds() {
 }
 
 #[test]
+fn commit_renders_pre_commit_hook_output_on_stderr() {
+    let repo = Repository::new();
+    let hook = repo.main.join(".git/hooks/pre-commit");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nprintf 'pre-commit stdout\\n'\nprintf 'pre-commit stderr\\n' >&2\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(repo.main.join("README.md"), "updated\n").unwrap();
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["commit", "--stage-all", "-m", "test: render hook output"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("pre-commit stdout"), "{stderr}");
+    assert!(stderr.contains("pre-commit stderr"), "{stderr}");
+}
+
+#[test]
 fn shared_commit_generator_requires_standalone_approval_interactively() {
     let repo = Repository::new();
     fs::write(

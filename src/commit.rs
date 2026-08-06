@@ -264,13 +264,15 @@ fn run_human(invocation: &Invocation, source: &MessageSource) -> Result<()> {
     ensure_staged(&repository)?;
     preview_staged(&repository.current().path)?;
     let message = resolve_message_human(&repository, source, config.as_ref())?;
-    ui::run_timed(
+    let transcript = ui::run_timed(
         true,
         "Creating commit...",
         "Created commit",
         "Failed to create commit",
         |_| LifecycleMutation::new(&repository.current().path).commit(&message.value),
     )?;
+    render_git_stream(&transcript.stdout)?;
+    render_git_stream(&transcript.stderr)?;
     let hash = git::HistoryObservation::new(&repository.current().path).head_commit()?;
     let rendered_message = render::commit_message(&message.value);
     if message.generated {
@@ -719,6 +721,14 @@ fn preview_staged(cwd: &Path) -> Result<()> {
         ui::heading_style().apply_to("Staged changes:"),
         render::git_output(&stat)
     ))
+}
+
+fn render_git_stream(stream: &[u8]) -> Result<()> {
+    let output = String::from_utf8_lossy(stream);
+    if output.trim().is_empty() {
+        return Ok(());
+    }
+    ui::step(render::git_output(output.trim_end()))
 }
 
 fn validate_template(template: &str) -> Result<()> {
