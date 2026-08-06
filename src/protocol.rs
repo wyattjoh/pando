@@ -7,15 +7,37 @@ use std::{
 
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use schemars::JsonSchema;
+use schemars::{
+    JsonSchema,
+    schema::{InstanceType, Schema, SchemaObject, SingleOrVec},
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+fn schema_version_schema(_: &mut schemars::r#gen::SchemaGenerator) -> Schema {
+    SchemaObject {
+        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Integer))),
+        enum_values: Some(vec![SCHEMA_VERSION.into()]),
+        ..SchemaObject::default()
+    }
+    .into()
+}
+
+fn response_status_schema(_: &mut schemars::r#gen::SchemaGenerator) -> Schema {
+    SchemaObject {
+        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
+        enum_values: Some(vec!["success".into(), "error".into()]),
+        ..SchemaObject::default()
+    }
+    .into()
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request<I> {
+    #[schemars(schema_with = "schema_version_schema")]
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
@@ -29,6 +51,7 @@ pub struct EmptyInput {}
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OptionalInputRequest<I> {
+    #[schemars(schema_with = "schema_version_schema")]
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
@@ -38,10 +61,12 @@ pub struct OptionalInputRequest<I> {
 
 #[derive(Clone, Debug, JsonSchema, Serialize)]
 pub struct Response {
+    #[schemars(schema_with = "schema_version_schema")]
     pub schema_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     pub command: String,
+    #[schemars(schema_with = "response_status_schema")]
     pub status: &'static str,
     pub result: Option<Value>,
     pub error: Option<ErrorBody>,

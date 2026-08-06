@@ -116,8 +116,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -261,11 +262,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -529,8 +535,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -675,11 +682,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -858,8 +870,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -1004,11 +1017,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -1455,8 +1473,9 @@
                 ]
               },
               "schema_version": {
-                "format": "uint32",
-                "minimum": 0.0,
+                "enum": [
+                  1
+                ],
                 "type": "integer"
               }
             },
@@ -1649,8 +1668,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -1795,11 +1815,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -2095,8 +2120,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -2241,11 +2267,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -2353,8 +2384,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -2499,11 +2531,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -2814,8 +2851,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -2960,11 +2998,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -3071,8 +3114,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -3217,11 +3261,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -3498,8 +3547,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -3643,11 +3693,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -3715,8 +3770,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -3861,11 +3917,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -3932,8 +3993,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -4077,11 +4139,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -4149,8 +4216,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -4295,11 +4363,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -4368,8 +4441,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -4514,11 +4588,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -4693,11 +4772,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -4872,11 +4956,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -5051,11 +5140,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -5122,8 +5216,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -5267,11 +5362,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -5339,8 +5439,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -5485,11 +5586,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -5558,8 +5664,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -5704,11 +5811,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },
@@ -5778,8 +5890,9 @@
             ]
           },
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           }
         },
@@ -5924,11 +6037,16 @@
           },
           "result": true,
           "schema_version": {
-            "format": "uint32",
-            "minimum": 0.0,
+            "enum": [
+              1
+            ],
             "type": "integer"
           },
           "status": {
+            "enum": [
+              "success",
+              "error"
+            ],
             "type": "string"
           }
         },

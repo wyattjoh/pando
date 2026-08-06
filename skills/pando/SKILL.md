@@ -61,7 +61,9 @@ scalar stdout. Read `status`, typed `result`/`error`, `effects`, bounded
 when a returned next step explicitly requires a person's approval.
 
 Requests reject unknown fields, trailing data, unsupported versions, and
-mixed command flags. Dry-run mutating requests use `input.dry_run:true`.
+mixed command flags. Generated exact-leaf help restricts request and response
+`schema_version` to the literal `1`, and response `status` to `"success"` or
+`"error"`. Dry-run mutating requests use `input.dry_run:true`.
 `create` requests may include `input.description` to set the repository-local
 Git branch description as part of creation, so do not follow a successful
 request with a separate `git config branch.<name>.description` call.
@@ -268,10 +270,13 @@ unsquashed. A generator set in committed `.pando.yaml` is untrusted until
 `merge.squash: false`.
 Source: README.md ("Lifecycle commands" / "Squashing")
 
-### Inspect the JSON request/response schema and Schema version
+### Inspect the JSON request/response schema and schema version
 ```sh
 pando commit --help --output json   # generated request/response JSON Schemas
 ```
+The generated schemas express the version 1 wire exactly: request and response
+`schema_version` accept only the integer `1`, and response `status` accepts only
+`"success"` or `"error"`.
 Source: README.md ("Structured (JSON) usage")
 
 ## References

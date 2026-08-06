@@ -7772,6 +7772,28 @@ fn json_version_one_schema_help_matches_runtime_envelopes() {
             .collect::<std::collections::BTreeSet<_>>(),
         ["input", "schema_version"].into_iter().collect()
     );
+    assert_eq!(
+        request_schema["properties"]["schema_version"]["type"],
+        "integer"
+    );
+    assert_eq!(
+        request_schema["properties"]["schema_version"]["enum"],
+        serde_json::json!([1])
+    );
+    let response_schema = &help["result"]["response_schema"];
+    assert_eq!(
+        response_schema["properties"]["schema_version"]["type"],
+        "integer"
+    );
+    assert_eq!(
+        response_schema["properties"]["schema_version"]["enum"],
+        serde_json::json!([1])
+    );
+    assert_eq!(response_schema["properties"]["status"]["type"], "string");
+    assert_eq!(
+        response_schema["properties"]["status"]["enum"],
+        serde_json::json!(["success", "error"])
+    );
 
     let output = json_command(&repo.main, &["get", "branch", "--output", "json"], None);
     let response = assert_json_pure(&output);
