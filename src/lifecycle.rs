@@ -197,6 +197,7 @@ pub struct MergeOutcome {
     pub effects: Vec<Effect>,
     pub diagnostics: Vec<Diagnostic>,
     pub recovery: Vec<RecoveryAction<protocol::Request<MergeInput>>>,
+    destination: Option<PathBuf>,
 }
 
 /// Stable version 1 merge protocol catalogs owned by the merge command.
@@ -297,6 +298,7 @@ pub fn merge_preflight_outcome(error: &PreflightFailure) -> MergeOutcome {
         effects: Vec::new(),
         diagnostics: Vec::new(),
         recovery: Vec::new(),
+        destination: None,
     }
 }
 
@@ -313,14 +315,6 @@ struct MergePlan {
     resuming_squash: bool,
     /// Ordered lifecycle effects. Planning never attempts or completes one.
     pub effects: Vec<Effect>,
-}
-
-fn output_for(animated: bool) -> LifecycleOutput {
-    if animated {
-        LifecycleOutput::Captured
-    } else {
-        LifecycleOutput::Displayed
-    }
 }
 
 /// One diagnostic produced by a lifecycle phase.
@@ -353,7 +347,7 @@ pub struct MergeExecutionOutcome {
     pub context: MergeContext,
     pub effects: Vec<Effect>,
     pub diagnostics: Vec<MergeDiagnostic>,
-    pub destination: Option<BytePath>,
+    pub destination: Option<PathBuf>,
     pub failure: Option<(MergeExecutionFailureKind, String)>,
 }
 
@@ -416,7 +410,10 @@ fn merge_approval_context(candidate: &hook_approval::Candidate) -> MergeApproval
 pub(crate) fn execute_merge_request(input: &MergeInput) -> MergeOutcome {
     match journaled_merge::prepare(journaled_merge::MergeRequest::ordinary(input)) {
         journaled_merge::Preparation::Ready(prepared) => {
-            prepared.run(&journaled_merge::MergeExecutionOutput::Captured)
+            let mut observations = journaled_merge::Observations::captured();
+            let outcome = prepared.run(&mut observations);
+            drop(observations.finish());
+            outcome
         }
         journaled_merge::Preparation::ApprovalRequired(pending) => pending.into_outcome(),
         journaled_merge::Preparation::Complete(outcome) => outcome,
@@ -429,14 +426,15 @@ fn run_prepared_merge(
     plan: &MergePlan,
     input: &MergeInput,
     changes: journaled_merge::ChangePolicy,
-    output: &journaled_merge::MergeExecutionOutput,
+    observations: &mut journaled_merge::Observations,
 ) -> MergeOutcome {
-    let execution = execute_merge(plan, changes, output);
+    let execution = execute_merge(plan, changes, observations);
     let diagnostics = merge_diagnostics(execution.diagnostics);
     if let Some((kind, message)) = execution.failure {
         let working_directory = execution
             .destination
-            .unwrap_or_else(|| plan.context.topic_worktree.clone());
+            .as_deref()
+            .map_or_else(|| plan.context.topic_worktree.clone(), BytePath::path);
         return MergeOutcome {
             result: Err(MergeError {
                 code: merge_failure_code(kind).into(),
@@ -460,19 +458,21 @@ fn run_prepared_merge(
                     working_directory: Some(working_directory),
                 },
             }],
+            destination: execution.destination,
         };
     }
+    let serialized_destination = execution.destination.as_deref().map(BytePath::path);
     let result = if plan.context.in_place {
         MergeResult::InPlace {
-            destination: execution.destination,
+            destination: serialized_destination,
         }
     } else if input.no_remove {
         MergeResult::Retained {
-            destination: execution.destination,
+            destination: serialized_destination,
         }
     } else {
         MergeResult::Removed {
-            destination: execution.destination,
+            destination: serialized_destination,
         }
     };
     MergeOutcome {
@@ -484,6 +484,7 @@ fn run_prepared_merge(
         effects: execution.effects,
         diagnostics,
         recovery: Vec::new(),
+        destination: execution.destination,
     }
 }
 
@@ -1118,15 +1119,18 @@ impl RemovalExecutionOutcome {
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn execute_removal(plan: &RemovalPlan) -> RemovalExecutionOutcome {
-    execute_removal_with_policy(plan, hook::OutputPolicy::Captured)
+    let mut observations = hook::Observations::captured();
+    let outcome = execute_removal_with_observations(plan, &mut observations);
+    drop(observations.finish());
+    outcome
 }
 
-/// Executes the shared removal operation with adapter-specific child output routing.
+/// Executes the shared removal operation while emitting non-authoritative hook observations.
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub(crate) fn execute_removal_with_policy(
+pub(crate) fn execute_removal_with_observations(
     plan: &RemovalPlan,
-    output_policy: hook::OutputPolicy,
+    observations: &mut hook::Observations,
 ) -> RemovalExecutionOutcome {
     let mut effects = plan.effects.clone();
     let mut diagnostics = Vec::new();
@@ -1200,7 +1204,7 @@ pub(crate) fn execute_removal_with_policy(
                 HookPhase::PreRemove,
                 &target.config.pre_remove,
                 &target.worktree.path,
-                output_policy,
+                observations,
             ) {
                 Ok(execution) => execution,
                 Err(error) => {
@@ -1215,18 +1219,16 @@ pub(crate) fn execute_removal_with_policy(
                     );
                 }
             };
-            if let hook::HookOutput::Captured(output) = execution.output {
-                for step in output {
-                    for (stream, captured) in [("stdout", step.stdout), ("stderr", step.stderr)] {
-                        if captured.original_size > 0 {
-                            diagnostics.push(RemovalDiagnostic {
-                                source: "hook",
-                                stream,
-                                content: captured.content,
-                                original_size: captured.original_size,
-                                truncated: captured.truncated,
-                            });
-                        }
+            for step in execution.output {
+                for (stream, captured) in [("stdout", step.stdout), ("stderr", step.stderr)] {
+                    if captured.original_size > 0 {
+                        diagnostics.push(RemovalDiagnostic {
+                            source: "hook",
+                            stream,
+                            content: captured.content,
+                            original_size: captured.original_size,
+                            truncated: captured.truncated,
+                        });
                     }
                 }
             }
@@ -1260,20 +1262,13 @@ pub(crate) fn execute_removal_with_policy(
 
         let remove_effect = hook_effect + 1;
         effects[remove_effect].attempted = true;
-        let removal_output = match output_policy {
-            hook::OutputPolicy::Captured => git::RemovalOutput::Captured,
-            hook::OutputPolicy::Streamed => git::RemovalOutput::Displayed,
-        };
         let removal_mode = if plan.force {
             git::RemovalMode::Force
         } else {
             git::RemovalMode::Safe
         };
-        let removal = git::WorktreeMutation::new(&plan.primary).remove(
-            &target.worktree.path,
-            removal_mode,
-            removal_output,
-        );
+        let removal =
+            git::WorktreeMutation::new(&plan.primary).remove(&target.worktree.path, removal_mode);
         let captured = match removal {
             Ok(captured) => captured,
             Err(error) => {
@@ -1283,29 +1278,23 @@ pub(crate) fn execute_removal_with_policy(
                     targets,
                     effects,
                     diagnostics,
-                    if matches!(output_policy, hook::OutputPolicy::Captured) {
-                        RemovalFailureKind::GitStart
-                    } else {
-                        RemovalFailureKind::Git
-                    },
+                    RemovalFailureKind::GitStart,
                     error,
                 );
             }
         };
-        if let Some(output) = captured {
-            push_removal_git_diagnostic(&mut diagnostics, "stdout", &output.stdout);
-            push_removal_git_diagnostic(&mut diagnostics, "stderr", &output.stderr);
-            if !output.status.success() {
-                targets[index].status = RemovalTargetStatus::Failed;
-                return removal_failure(
-                    plan,
-                    targets,
-                    effects,
-                    diagnostics,
-                    RemovalFailureKind::Git,
-                    format!("git worktree remove failed with {}", output.status),
-                );
-            }
+        push_removal_git_diagnostic(&mut diagnostics, "stdout", &captured.stdout);
+        push_removal_git_diagnostic(&mut diagnostics, "stderr", &captured.stderr);
+        if !captured.status.success() {
+            targets[index].status = RemovalTargetStatus::Failed;
+            return removal_failure(
+                plan,
+                targets,
+                effects,
+                diagnostics,
+                RemovalFailureKind::Git,
+                format!("git worktree remove failed with {}", captured.status),
+            );
         }
         effects[remove_effect].completed = true;
         targets[index].status = RemovalTargetStatus::Completed;
@@ -1334,7 +1323,6 @@ pub(crate) fn execute_removal_with_policy(
 pub(crate) fn execute_removal_request(
     input: &RemovalInput,
     force: bool,
-    output_policy: hook::OutputPolicy,
 ) -> std::result::Result<RemovalOutcome, PreflightFailure> {
     let plan = plan_remove(&input.branches, force)?;
     if input.dry_run {
@@ -1357,10 +1345,10 @@ pub(crate) fn execute_removal_request(
             recovery: Vec::new(),
         });
     }
-    Ok(removal_outcome(
-        execute_removal_with_policy(&plan, output_policy),
-        input,
-    ))
+    let mut observations = hook::Observations::captured();
+    let execution = execute_removal_with_observations(&plan, &mut observations);
+    drop(observations.finish());
+    Ok(removal_outcome(execution, input))
 }
 
 /// Returns the stable protocol code for a removal preflight failure.
@@ -1557,21 +1545,37 @@ pub fn remove(branches: &[String], force: bool) -> Result<()> {
         branches: branches.to_vec(),
         dry_run: false,
     };
+    let mut observations = hook::Observations::human();
     let outcome = removal_outcome(
-        execute_removal_with_policy(&plan, hook::OutputPolicy::Streamed),
+        execute_removal_with_observations(&plan, &mut observations),
         &input,
     );
-    if let Err(error) = outcome.result {
-        bail!(error.message);
+    drop(observations.finish());
+    render_removal_git_diagnostics(&outcome);
+    if let Err(error) = &outcome.result {
+        bail!(error.message.clone());
     }
     if plan.context.destination.is_some() {
         write_destination(&plan.primary)?;
     }
     let count = plan.targets.len();
-    ui::finish(ui::success_style().apply_to(format!(
+    let _ = ui::finish(ui::success_style().apply_to(format!(
         "Removed {count} worktree{}; branches retained.",
         plural(count)
-    )))
+    )));
+    Ok(())
+}
+
+fn render_removal_git_diagnostics(outcome: &RemovalOutcome) {
+    for diagnostic in outcome
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.source == "git")
+    {
+        if !diagnostic.content.trim().is_empty() {
+            let _ = ui::step(render::git_output(diagnostic.content.trim_end()));
+        }
+    }
 }
 
 /// Prints a human-readable removal plan without mutation or approval.
@@ -1665,6 +1669,41 @@ fn mark_effect(effects: &mut [Effect], action: &str, attempted: bool, completed:
     effect.completed = completed;
 }
 
+fn observe_merge_action<T>(
+    observations: &mut journaled_merge::Observations,
+    starting: &str,
+    completed: &str,
+    failed: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _ = observations.progress_started(starting, completed, failed);
+    let result = operation();
+    if result.is_ok() {
+        observations.progress_completed();
+    } else {
+        observations.progress_failed();
+    }
+    result
+}
+
+fn observe_merge_git(
+    observations: &mut journaled_merge::Observations,
+    starting: &str,
+    completed: &str,
+    failed: &str,
+    operation: impl FnOnce(LifecycleOutput) -> Result<String>,
+) -> Result<String> {
+    let output = observations.progress_started(starting, completed, failed);
+    let result = operation(output);
+    if let Ok(transcript) = &result {
+        observations.progress_completed();
+        observations.git_output(transcript, output);
+    } else {
+        observations.progress_failed();
+    }
+    result
+}
+
 fn push_merge_diagnostic(
     diagnostics: &mut Vec<MergeDiagnostic>,
     phase: &'static str,
@@ -1707,11 +1746,21 @@ fn execute_merge_hooks(
     diagnostic_phase: &'static str,
     steps: &[crate::config::HookStep],
     destination: &Path,
-    output: &journaled_merge::MergeExecutionOutput,
+    observations: &mut journaled_merge::Observations,
     diagnostics: &mut Vec<MergeDiagnostic>,
 ) -> Result<()> {
-    let execution = hook::execute(hook_phase, steps, destination, output.hook_policy())?;
-    output.record_hook_output(diagnostics, diagnostic_phase, execution.output);
+    let mut hook_observations = if observations.is_human() {
+        hook::Observations::human()
+    } else {
+        hook::Observations::captured()
+    };
+    let execution = hook::execute(hook_phase, steps, destination, &mut hook_observations);
+    drop(hook_observations.finish());
+    let execution = execution?;
+    for step in execution.output {
+        push_captured_merge_diagnostic(diagnostics, diagnostic_phase, "stdout", step.stdout);
+        push_captured_merge_diagnostic(diagnostics, diagnostic_phase, "stderr", step.stderr);
+    }
     match execution.outcome {
         HookOutcome::Success => Ok(()),
         HookOutcome::Failed(status) => Err(anyhow::anyhow!(
@@ -1759,7 +1808,7 @@ fn execution_failure(
 fn execute_merge(
     plan: &MergePlan,
     changes: journaled_merge::ChangePolicy,
-    output: &journaled_merge::MergeExecutionOutput,
+    observations: &mut journaled_merge::Observations,
 ) -> MergeExecutionOutcome {
     let mut effects = plan.effects.clone();
     let mut diagnostics = Vec::new();
@@ -1850,7 +1899,7 @@ fn execute_merge(
         }
     };
     if plan.context.cleanup_pending {
-        return execute_merge_cleanup(plan, &state, effects, diagnostics, output);
+        return execute_merge_cleanup(plan, &state, effects, diagnostics, observations);
     }
     if !plan.context.journaled {
         mark_effect(&mut effects, "journal", true, false);
@@ -1873,7 +1922,8 @@ fn execute_merge(
             .status()
             .is_ok_and(|status| status.is_dirty())
     {
-        if let Err(error) = output.run_action(
+        if let Err(error) = observe_merge_action(
+            observations,
             "Staging all changes...",
             "Staged all changes",
             "Failed to stage changes",
@@ -1893,35 +1943,42 @@ fn execute_merge(
     if plan.needs_rebase || plan.context.rebase_active {
         mark_effect(&mut effects, "rebase", true, false);
         let rebase_result = if plan.context.rebase_active {
-            output.run_git(
+            observe_merge_git(
+                observations,
                 "Continuing rebase...",
                 "Continued rebase",
                 "Failed to continue the rebase",
-                |policy| LifecycleMutation::new(&current.path).continue_rebase(policy),
+                |output| LifecycleMutation::new(&current.path).continue_rebase(output),
             )
         } else {
-            output.run_git(
+            observe_merge_git(
+                observations,
                 &format!("Rebasing onto {}...", state.target_branch),
                 &format!("Rebased onto {}", state.target_branch),
                 &format!("Failed to rebase onto {}", state.target_branch),
-                |policy| {
+                |output| {
                     if matches!(changes, journaled_merge::ChangePolicy::IncludeAll) {
                         LifecycleMutation::new(&current.path)
-                            .rebase_onto_autostash(&state.target_branch, policy)
+                            .rebase_onto_autostash(&state.target_branch, output)
                     } else {
                         LifecycleMutation::new(&current.path)
-                            .rebase_onto(&state.target_branch, policy)
+                            .rebase_onto(&state.target_branch, output)
                     }
                 },
             )
         };
         match rebase_result {
             Ok(transcript) => {
-                output.record_transcript(&mut diagnostics, "rebase", &transcript);
+                push_merge_diagnostic(&mut diagnostics, "rebase", "stderr", transcript.as_bytes());
                 mark_effect(&mut effects, "rebase", true, true);
             }
             Err(error) => {
-                output.record_error(&mut diagnostics, "rebase", &error);
+                push_merge_diagnostic(
+                    &mut diagnostics,
+                    "rebase",
+                    "stderr",
+                    error.to_string().as_bytes(),
+                );
                 return execution_failure(
                     plan,
                     effects,
@@ -1939,7 +1996,8 @@ fn execute_merge(
             .status()
             .is_ok_and(|status| status.is_dirty())
     {
-        if let Err(error) = output.run_action(
+        if let Err(error) = observe_merge_action(
+            observations,
             "Staging all changes...",
             "Staged all changes",
             "Failed to stage changes",
@@ -1983,18 +2041,16 @@ fn execute_merge(
                 );
             }
         };
-        if let Err(error) = output.present_commit_message(&mut diagnostics, prepared.message()) {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Squash,
-                MergeExecutionFailureKind::Squash,
-                error,
-            );
-        }
+        push_merge_diagnostic(
+            &mut diagnostics,
+            "squash",
+            "stderr",
+            prepared.message().as_bytes(),
+        );
+        observations.commit_message(prepared.message());
         let commit_count = prepared.commit_count();
-        let collapse = output.run_action(
+        let collapse = observe_merge_action(
+            observations,
             &format!("Resuming squash of {commit_count} commits..."),
             "Squashed the topic into a single commit",
             "Failed to resume the squash",
@@ -2099,7 +2155,8 @@ fn execute_merge(
                     );
                 }
             };
-            let preparation = output.run_action(
+            let preparation = observe_merge_action(
+                observations,
                 "Generating squash commit message...",
                 "Generated squash commit message:",
                 "Failed to generate the squash commit message",
@@ -2150,19 +2207,16 @@ fn execute_merge(
                     );
                 }
             };
-            if let Err(error) = output.present_commit_message(&mut diagnostics, prepared.message())
-            {
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Squash,
-                    MergeExecutionFailureKind::Squash,
-                    error,
-                );
-            }
+            push_merge_diagnostic(
+                &mut diagnostics,
+                "squash",
+                "stderr",
+                prepared.message().as_bytes(),
+            );
+            observations.commit_message(prepared.message());
             let commit_count = prepared.commit_count();
-            let collapse = output.run_action(
+            let collapse = observe_merge_action(
+                observations,
                 &format!("Squashing {commit_count} commits..."),
                 "Squashed the topic into a single commit",
                 "Failed to squash the topic",
@@ -2253,7 +2307,7 @@ fn execute_merge(
             "validation",
             &plan.config.pre_merge,
             &current.path,
-            output,
+            observations,
             &mut diagnostics,
         );
         if let Err(error) = hook_result {
@@ -2353,25 +2407,25 @@ fn execute_merge(
         );
     }
     if plan.context.in_place {
-        let switch_result = output
-            .run_git(
-                &format!("Switching to {}...", state.target_branch),
-                &format!("Switched to {}", state.target_branch),
-                &format!("Failed to switch to {}", state.target_branch),
-                |policy| {
-                    LifecycleMutation::new(primary).switch_branch(&state.target_branch, policy)
-                },
-            )
-            .map(|_| ());
-        if let Err(error) = switch_result {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Integration,
-                MergeExecutionFailureKind::Integration,
-                error,
-            );
+        let switch_result = observe_merge_git(
+            observations,
+            &format!("Switching to {}...", state.target_branch),
+            &format!("Switched to {}", state.target_branch),
+            &format!("Failed to switch to {}", state.target_branch),
+            |output| LifecycleMutation::new(primary).switch_branch(&state.target_branch, output),
+        );
+        match switch_result {
+            Ok(_) => {}
+            Err(error) => {
+                return execution_failure(
+                    plan,
+                    effects,
+                    diagnostics,
+                    MergePhase::Integration,
+                    MergeExecutionFailureKind::Integration,
+                    error,
+                );
+            }
         }
     }
     let refreshed_repository = match RepositoryObservation::new(primary).repository() {
@@ -2412,11 +2466,12 @@ fn execute_merge(
         );
     }
     mark_effect(&mut effects, "fast_forward_merge", true, false);
-    let merge_result = output.run_git(
+    let merge_result = observe_merge_git(
+        observations,
         &format!("Merging into {}...", state.target_branch),
         &format!("Merged into {}", state.target_branch),
         &format!("Failed to merge into {}", state.target_branch),
-        |policy| LifecycleMutation::new(primary).fast_forward(&state.source_branch, policy),
+        |output| LifecycleMutation::new(primary).fast_forward(&state.source_branch, output),
     );
     let transcript = match merge_result {
         Ok(transcript) => transcript,
@@ -2431,7 +2486,12 @@ fn execute_merge(
             );
         }
     };
-    output.record_transcript(&mut diagnostics, "integration", &transcript);
+    push_merge_diagnostic(
+        &mut diagnostics,
+        "integration",
+        "stderr",
+        transcript.as_bytes(),
+    );
     mark_effect(&mut effects, "fast_forward_merge", true, true);
     if plan.context.policy.removes_topic(plan.context.in_place) {
         state.cleanup_pending = true;
@@ -2445,7 +2505,7 @@ fn execute_merge(
                 error,
             );
         }
-        return execute_merge_cleanup(plan, &state, effects, diagnostics, output);
+        return execute_merge_cleanup(plan, &state, effects, diagnostics, observations);
     }
     mark_effect(&mut effects, "journal_cleanup", true, false);
     if let Err(error) = remove_journal(&plan.repository.common_dir, &state.topic_identity) {
@@ -2477,7 +2537,7 @@ fn execute_merge_cleanup(
     state: &MergeJournal,
     mut effects: Vec<Effect>,
     mut diagnostics: Vec<MergeDiagnostic>,
-    output: &journaled_merge::MergeExecutionOutput,
+    observations: &mut journaled_merge::Observations,
 ) -> MergeExecutionOutcome {
     let failure = |effects, diagnostics, kind, error: anyhow::Error| {
         execution_failure(plan, effects, diagnostics, MergePhase::Cleanup, kind, error)
@@ -2513,7 +2573,7 @@ fn execute_merge_cleanup(
         "cleanup",
         &plan.config.pre_remove,
         &state.topic_path,
-        output,
+        observations,
         &mut diagnostics,
     );
     if let Err(error) = hook_result {
@@ -2560,35 +2620,45 @@ fn execute_merge_cleanup(
         .expect("a merge plan always has a primary worktree");
     mark_effect(&mut effects, "remove_worktree", true, false);
     let mutation = git::WorktreeMutation::new(primary);
-    let removal = mutation
-        .remove(
-            &state.topic_path,
-            git::RemovalMode::Safe,
-            output.removal_output(),
-        )
-        .and_then(|removal| output.finish_removal(removal, &mut diagnostics));
-    if let Err(error) = removal {
-        output.record_removal_error(&mut diagnostics, &error);
+    let removal = mutation.remove(&state.topic_path, git::RemovalMode::Safe);
+    let removal = match removal {
+        Ok(removal) => removal,
+        Err(error) => {
+            push_merge_diagnostic(
+                &mut diagnostics,
+                "cleanup",
+                "stderr",
+                error.to_string().as_bytes(),
+            );
+            return failure(
+                effects,
+                diagnostics,
+                MergeExecutionFailureKind::Removal,
+                error,
+            );
+        }
+    };
+    push_merge_diagnostic(&mut diagnostics, "cleanup", "stdout", &removal.stdout);
+    push_merge_diagnostic(&mut diagnostics, "cleanup", "stderr", &removal.stderr);
+    observations.git_output(
+        &String::from_utf8_lossy(&removal.stdout),
+        LifecycleOutput::Captured,
+    );
+    observations.git_output(
+        &String::from_utf8_lossy(&removal.stderr),
+        LifecycleOutput::Captured,
+    );
+    if !removal.status.success() {
         return failure(
             effects,
             diagnostics,
             MergeExecutionFailureKind::Removal,
-            error,
+            anyhow::anyhow!("git worktree remove failed"),
         );
     }
     mark_effect(&mut effects, "remove_worktree", true, true);
     mark_effect(&mut effects, "destination", true, true);
-    let destination = Some(BytePath::path(primary));
-    if let Err(error) = output.write_destination(primary) {
-        let mut outcome = failure(
-            effects,
-            diagnostics,
-            MergeExecutionFailureKind::Cleanup,
-            error,
-        );
-        outcome.destination = destination;
-        return outcome;
-    }
+    let destination = Some(primary.clone());
 
     mark_effect(&mut effects, "journal_cleanup", true, false);
     if let Err(error) = remove_journal(&plan.repository.common_dir, &state.topic_identity) {
@@ -2635,9 +2705,10 @@ fn run_human_merge(request: journaled_merge::MergeRequest) -> Result<()> {
     loop {
         match preparation {
             journaled_merge::Preparation::Ready(prepared) => {
-                return finish_human_merge(
-                    &prepared.run(&journaled_merge::MergeExecutionOutput::Human),
-                );
+                let mut observations = journaled_merge::Observations::human();
+                let outcome = prepared.run(&mut observations);
+                drop(observations.finish());
+                return finish_human_merge(&outcome);
             }
             journaled_merge::Preparation::ApprovalRequired(pending) => {
                 if pending.requirement() == journaled_merge::ApprovalRequirement::SquashGenerator {
@@ -2654,6 +2725,10 @@ fn run_human_merge(request: journaled_merge::MergeRequest) -> Result<()> {
 }
 
 fn finish_human_merge(outcome: &MergeOutcome) -> Result<()> {
+    let destination_delivery = outcome
+        .destination
+        .as_deref()
+        .map_or(Ok(()), write_destination);
     let epilogue = match &outcome.result {
         Ok(MergeResult::InPlace { .. }) => "; primary worktree switched to target.",
         Ok(MergeResult::Retained { .. }) => "; worktree retained.",
@@ -2663,6 +2738,7 @@ fn finish_human_merge(outcome: &MergeOutcome) -> Result<()> {
         }
         Err(error) => bail!(error.message.clone()),
     };
+    destination_delivery?;
     let context = match &outcome.context {
         MergeOutcomeContext::Lifecycle(context)
         | MergeOutcomeContext::Approval {
@@ -2680,12 +2756,13 @@ fn finish_human_merge(outcome: &MergeOutcome) -> Result<()> {
         .iter()
         .find(|effect| effect.action == "squash")
         .is_some_and(|effect| effect.completed);
-    ui::finish(styled_merge_summary(
+    let _ = ui::finish(styled_merge_summary(
         &context.source_branch,
         &context.target_branch,
         squashed,
         epilogue,
-    ))
+    ));
+    Ok(())
 }
 
 /// Integrates local changes directly into one generated squash commit.
@@ -2700,17 +2777,6 @@ pub fn merge_yolo(no_rebase: bool, no_remove: bool) -> Result<()> {
         no_squash: false,
         dry_run: false,
     }))
-}
-
-/// Renders a captured Git transcript inside the terminal UI rail.
-///
-/// Nothing is written when the operation streamed its own output to stderr or
-/// had nothing to say, so a plain-stderr run never doubles up on Git's output.
-fn report(transcript: &str) -> Result<()> {
-    if transcript.trim().is_empty() {
-        return Ok(());
-    }
-    ui::step(render::git_output(transcript.trim_end()))
 }
 
 fn styled_merge_summary(source: &str, target: &str, squashed: bool, epilogue: &str) -> String {
@@ -3150,6 +3216,28 @@ mod journal_tests {
 
     const V1: &str = r#"{"version":1,"topic_path":"/tmp/topic","topic_identity":"/tmp/id","source_branch":"topic","target_branch":"main","no_rebase":false,"no_remove":false,"no_squash":false,"yolo_stage_all":false,"squashed":false,"cleanup_pending":false,"validated_source":null,"validated_target":null}"#;
     const V2: &str = r#"{"version":2,"topic_path":{"encoding":"base64","value":"L3RtcC90b3BpYw==","display":"/tmp/topic"},"topic_identity":{"encoding":"base64","value":"L3RtcC9pZA==","display":"/tmp/id"},"source_branch":"topic","target_branch":"main","no_rebase":false,"no_remove":false,"no_squash":false,"yolo_stage_all":false,"squashed":{"state":"not_started"},"cleanup_pending":false,"validated_source":null,"validated_target":null}"#;
+
+    #[test]
+    fn merge_action_result_is_independent_from_observation_delivery() {
+        let mut captured = journaled_merge::Observations::captured();
+        let captured_result =
+            observe_merge_action(&mut captured, "starting", "completed", "failed", || {
+                Ok::<_, anyhow::Error>(17)
+            })
+            .unwrap();
+        let captured_events = captured.finish();
+
+        let mut human = journaled_merge::Observations::human();
+        let human_result =
+            observe_merge_action(&mut human, "starting", "completed", "failed", || {
+                Ok::<_, anyhow::Error>(17)
+            })
+            .unwrap();
+        let human_events = human.finish();
+
+        assert_eq!(human_result, captured_result);
+        assert_eq!(human_events, captured_events);
+    }
 
     #[test]
     fn decodes_exact_v1_and_v2_fixtures() {

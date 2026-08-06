@@ -2055,6 +2055,114 @@ fn json_merge_reports_removal_failure_from_the_lifecycle_outcome() {
     assert!(repo.linked.exists());
 }
 
+#[test]
+fn human_remove_renders_captured_git_failure_diagnostics() {
+    let repo = Repository::new();
+    let (fake_bin, path, real_git) = failing_git("worktree", "remove");
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["remove", "feature"])
+        .current_dir(&repo.main)
+        .env("PATH", path)
+        .env("REAL_GIT", real_git)
+        .output()
+        .unwrap();
+    drop(fake_bin);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("injected git failure"), "{stderr}");
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn nonanimated_human_merge_streams_git_output_while_git_is_running() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("topic.txt"), "topic\n").unwrap();
+    git(&repo.linked, ["add", "topic.txt"]);
+    git(&repo.linked, ["commit", "-m", "advance topic"]);
+
+    let real_git = PathBuf::from(
+        String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
+            .unwrap()
+            .trim(),
+    );
+    let bin = tempfile::tempdir().unwrap();
+    let release = repo.temp.path().join("release-streamed-merge");
+    let wrapper = bin.path().join("git");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\nif [ \"$1\" = merge ] && [ \"$2\" = --ff-only ]; then\n  printf 'streamed-git-marker\\n' >&2\n  while [ ! -e \"$PANDO_RELEASE\" ]; do sleep 0.01; done\nfi\nexec \"$REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["merge", "--no-remove", "--no-squash"])
+        .current_dir(&repo.linked)
+        .env("PATH", path)
+        .env("REAL_GIT", real_git)
+        .env("PANDO_RELEASE", &release)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut all = Vec::new();
+        let mut buffer = [0; 1024];
+        loop {
+            match stderr.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => {
+                    let chunk = buffer[..count].to_vec();
+                    all.extend_from_slice(&chunk);
+                    let _ = sender.send(chunk);
+                }
+            }
+        }
+        all
+    });
+
+    let mut live = Vec::new();
+    for _ in 0..50 {
+        if live
+            .windows(b"streamed-git-marker".len())
+            .any(|window| window == b"streamed-git-marker")
+        {
+            break;
+        }
+        if let Ok(chunk) = receiver.recv_timeout(Duration::from_millis(100)) {
+            live.extend_from_slice(&chunk);
+        }
+    }
+    let streamed = live
+        .windows(b"streamed-git-marker".len())
+        .any(|window| window == b"streamed-git-marker");
+    assert!(child.try_wait().unwrap().is_none());
+    fs::write(&release, b"release\n").unwrap();
+    let status = child.wait().unwrap();
+    let stderr = String::from_utf8(reader.join().unwrap()).unwrap();
+
+    assert!(
+        streamed,
+        "Git output was buffered until completion: {stderr}"
+    );
+    assert!(status.success(), "{stderr}");
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "main"]),
+        git_output(&repo.main, ["rev-parse", "feature"])
+    );
+}
+
 fn failing_git(first: &str, second: &str) -> (TempDir, String, PathBuf) {
     let real_git = PathBuf::from(
         String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
@@ -4147,6 +4255,38 @@ fn install_guided_prompts_can_be_cancelled_after_shell_installation() {
     assert!(output.stdout.is_empty());
     assert!(
         output.stderr.contains("agent command entry cancelled"),
+        "{}",
+        output.stderr
+    );
+    assert!(xdg.path().join("pando/pando.zsh").is_file());
+    let config = fs::read_to_string(xdg.path().join("pando/config.yaml")).unwrap();
+    assert!(!config.contains("# >>> pando guided installer >>>"));
+}
+
+#[test]
+fn install_guidance_decline_is_a_successful_final_outcome() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+    let empty_path = tempfile::tempdir().unwrap();
+    let mut command = guided_install_command(home.path(), xdg.path(), Some(zdot.path()));
+    command.env("PATH", empty_path.path());
+
+    let output = run_pty_command(command, b"y\rtrue\rn\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(
+        output
+            .stderr
+            .contains("Guided configuration declined; the agent command was not saved."),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output
+            .stderr
+            .contains("Zsh integration installed without guided configuration."),
         "{}",
         output.stderr
     );

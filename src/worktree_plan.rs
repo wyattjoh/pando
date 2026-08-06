@@ -1,6 +1,9 @@
 //! Shared destination and source planning for worktree navigation and creation.
 
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
@@ -20,7 +23,7 @@ use crate::{
     },
     config::EffectiveConfig,
     git::{self, HistoryObservation, Repository, RepositoryObservation},
-    hook::{self, HookOutcome, HookOutput, OutputPolicy},
+    hook::{self, CapturedStep, HookOutcome},
     hook_approval, setup,
 };
 
@@ -243,7 +246,7 @@ pub(crate) struct Plan {
 pub(crate) struct ExecutionOutcome {
     pub(crate) destination: PathBuf,
     pub(crate) effects: Vec<Effect>,
-    pub(crate) hook_output: HookOutput,
+    pub(crate) hook_output: Vec<CapturedStep>,
 }
 
 /// A failed execution together with effects advanced only at real transitions.
@@ -255,7 +258,7 @@ pub(crate) struct ExecutionFailure {
     pub(crate) created: bool,
     pub(crate) setup_incomplete: bool,
     pub(crate) hook_outcome: Option<HookOutcome>,
-    pub(crate) hook_output: HookOutput,
+    pub(crate) hook_output: Vec<CapturedStep>,
     pub(crate) entry: setup::EntryDisposition,
 }
 
@@ -267,6 +270,22 @@ pub(crate) struct OperationOutcome {
     pub(crate) effects: Vec<Effect>,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) recovery: Vec<RecoveryAction<protocol::Request<RetryInput>>>,
+    destination: Option<PathBuf>,
+}
+
+impl OperationOutcome {
+    #[must_use]
+    pub(crate) fn destination(&self) -> Option<&Path> {
+        self.destination.as_deref()
+    }
+
+    #[must_use]
+    pub(crate) fn failure_message(&self) -> Option<&str> {
+        self.result
+            .as_ref()
+            .err()
+            .map(|failure| failure.message.as_str())
+    }
 }
 
 #[derive(Debug, JsonSchema, Serialize)]
@@ -408,7 +427,6 @@ pub(crate) enum Blocker {
 /// Runs the complete noninteractive worktree operation and returns typed protocol data.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutcome {
-    let command = intent.id();
     let failure = |code: &str, message: String| OperationOutcome {
         result: Err(OperationFailure {
             code: code.into(),
@@ -418,6 +436,7 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
         effects: Vec::new(),
         diagnostics: Vec::new(),
         recovery: Vec::new(),
+        destination: None,
     };
     let current_dir = match env::current_dir() {
         Ok(path) => path,
@@ -507,6 +526,7 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
             effects: Vec::new(),
             diagnostics,
             recovery: Vec::new(),
+            destination: None,
         };
     };
     let snapshot = match Snapshot::observe(&repository) {
@@ -540,6 +560,7 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
             effects: Vec::new(),
             diagnostics: Vec::new(),
             recovery: Vec::new(),
+            destination: (!input.dry_run).then(|| worktree.path.clone()),
         };
     }
     let destination = BytePath::path(&plan.destination);
@@ -561,6 +582,7 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
                 effects: Vec::new(),
                 diagnostics: Vec::new(),
                 recovery: Vec::new(),
+                destination: None,
             };
         }
         return OperationOutcome {
@@ -576,9 +598,34 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
             effects: planned_effects(&plan),
             diagnostics: Vec::new(),
             recovery: Vec::new(),
+            destination: None,
         };
     }
-    match execute(&repository, &plan, OutputPolicy::Captured, || Ok(())) {
+    let mut observations = setup::Observations::captured();
+    let outcome = execute_planned(&repository, &plan, input, &mut observations);
+    drop(observations.finish());
+    outcome
+}
+
+/// Executes one already-authorized plan and returns the final command outcome
+/// consumed by both presentation adapters.
+#[must_use]
+pub(crate) fn execute_planned(
+    repository: &Repository,
+    plan: &Plan,
+    input: &OperationInput,
+    observations: &mut setup::Observations,
+) -> OperationOutcome {
+    let command = plan.intent.id();
+    let branch = plan.branch.clone();
+    let working_directory = BytePath::path(&repository.current().path);
+    let destination_path = plan.destination.clone();
+    let destination = BytePath::path(&destination_path);
+    let new_base = match &plan.source {
+        Source::New { base } => Some(base.clone()),
+        _ => None,
+    };
+    match execute(repository, plan, observations) {
         Ok(execution) => {
             let (kind, start_point, base_ref) = new_base.map_or((None, None, None), |base| {
                 (
@@ -612,6 +659,7 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
                 effects: execution.effects,
                 diagnostics: hook_diagnostics(execution.hook_output),
                 recovery: Vec::new(),
+                destination: (!input.dry_run).then_some(execution.destination),
             }
         }
         Err(execution) => execution_failure_outcome(
@@ -619,7 +667,7 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
             branch,
             input,
             working_directory,
-            destination,
+            destination_path,
             execution,
         ),
     }
@@ -647,6 +695,7 @@ fn blocker_outcome(
         effects: Vec::new(),
         diagnostics: Vec::new(),
         recovery: Vec::new(),
+        destination: None,
     };
     match blocker {
         Blocker::InvalidBranch { message } => simple(format!("{command}.invalid_branch"), message),
@@ -661,9 +710,9 @@ fn blocker_outcome(
         Blocker::DestinationNotIgnored { first, gitignore } => simple(format!("{command}.destination_invalid"), format!("the configured destination is inside the primary worktree but is not ignored; add '/{first}/' to {}", gitignore.display())),
         Blocker::IrrelevantRemote => simple(format!("{command}.irrelevant_remote"), "remote does not apply to the resolved branch".into()),
         Blocker::UnknownRemote => simple(format!("{command}.unknown_remote"), "remote does not match an available fetched branch".into()),
-        Blocker::RegisteredForCreate { worktree } => OperationOutcome { result: Err(OperationFailure { code: "create.branch_registered".into(), message: "the branch already has a registered worktree; create will not adopt or replace it".into() }), context: OperationContext::Branch(BranchContext { branch: branch.into(), destination: Some(BytePath::path(&worktree.path)), created: None, setup: None, hook_outcome: None, remotes: None }), effects: Vec::new(), diagnostics: Vec::new(), recovery: vec![RecoveryAction { action: "switch".into(), description: "Enter the registered worktree instead of creating one".into(), mutation: MutationClass::None, requires_human_approval: false, invocation: RecoveryInvocation { argv: vec!["pando".into(), "--input-output".into(), "json".into(), "switch".into()], stdin: Some(protocol::Request { schema_version: protocol::SCHEMA_VERSION, request_id: None, input: RetryInput { branch: Some(branch.into()), remote: None, fetch: None, dry_run: None } }), working_directory: Some(working_directory) } }] },
-        Blocker::RemoteSelectionRequired { remotes, .. } => { let recovery = remotes.iter().map(|remote| RecoveryAction { action: "retry_with_remote".into(), description: format!("Retry with {remote} as the selected source"), mutation: MutationClass::None, requires_human_approval: false, invocation: RecoveryInvocation { argv: vec!["pando".into(), "--input-output".into(), "json".into(), command.into()], stdin: Some(protocol::Request { schema_version: protocol::SCHEMA_VERSION, request_id: None, input: RetryInput { branch: Some(branch.into()), remote: Some(remote.clone()), fetch: Some(input.fetch), dry_run: Some(input.dry_run) } }), working_directory: Some(working_directory.clone()) } }).collect(); OperationOutcome { result: Err(OperationFailure { code: format!("{command}.remote_selection_required"), message: "multiple fetched remotes match this branch".into() }), context: OperationContext::Branch(BranchContext { branch: branch.into(), destination: None, created: None, setup: None, hook_outcome: None, remotes: Some(remotes) }), effects: Vec::new(), diagnostics: Vec::new(), recovery } }
-        Blocker::ApprovalRequired { candidate, destination } => OperationOutcome { result: Err(OperationFailure { code: "trust.approval_required".into(), message: "post-create hooks require manual review and approval before mutation".into() }), context: OperationContext::Approval(ApprovalContext { approval: HookApprovalContext { phase: candidate.phase().key().into(), commands: candidate.commands().iter().map(|step| HookApprovalCommand { name: step.name.clone(), command: step.command.clone() }).collect(), repository: candidate.repository().into(), identity: candidate.identity().into() }, branch: branch.into(), destination: BytePath::path(&destination) }), effects: Vec::new(), diagnostics: Vec::new(), recovery: vec![RecoveryAction { action: "trust.approve_hooks".into(), description: "Review and approve post-create hooks interactively".into(), mutation: MutationClass::Trust, requires_human_approval: true, invocation: RecoveryInvocation { argv: vec!["pando".into(), command.into(), branch.into()], stdin: None, working_directory: Some(working_directory) } }] },
+        Blocker::RegisteredForCreate { worktree } => OperationOutcome { result: Err(OperationFailure { code: "create.branch_registered".into(), message: "the branch already has a registered worktree; create will not adopt or replace it".into() }), context: OperationContext::Branch(BranchContext { branch: branch.into(), destination: Some(BytePath::path(&worktree.path)), created: None, setup: None, hook_outcome: None, remotes: None }), effects: Vec::new(), diagnostics: Vec::new(), recovery: vec![RecoveryAction { action: "switch".into(), description: "Enter the registered worktree instead of creating one".into(), mutation: MutationClass::None, requires_human_approval: false, invocation: RecoveryInvocation { argv: vec!["pando".into(), "--input-output".into(), "json".into(), "switch".into()], stdin: Some(protocol::Request { schema_version: protocol::SCHEMA_VERSION, request_id: None, input: RetryInput { branch: Some(branch.into()), remote: None, fetch: None, dry_run: None } }), working_directory: Some(working_directory) } }], destination: None },
+        Blocker::RemoteSelectionRequired { remotes, .. } => { let recovery = remotes.iter().map(|remote| RecoveryAction { action: "retry_with_remote".into(), description: format!("Retry with {remote} as the selected source"), mutation: MutationClass::None, requires_human_approval: false, invocation: RecoveryInvocation { argv: vec!["pando".into(), "--input-output".into(), "json".into(), command.into()], stdin: Some(protocol::Request { schema_version: protocol::SCHEMA_VERSION, request_id: None, input: RetryInput { branch: Some(branch.into()), remote: Some(remote.clone()), fetch: Some(input.fetch), dry_run: Some(input.dry_run) } }), working_directory: Some(working_directory.clone()) } }).collect(); OperationOutcome { result: Err(OperationFailure { code: format!("{command}.remote_selection_required"), message: "multiple fetched remotes match this branch".into() }), context: OperationContext::Branch(BranchContext { branch: branch.into(), destination: None, created: None, setup: None, hook_outcome: None, remotes: Some(remotes) }), effects: Vec::new(), diagnostics: Vec::new(), recovery, destination: None } }
+        Blocker::ApprovalRequired { candidate, destination } => OperationOutcome { result: Err(OperationFailure { code: "trust.approval_required".into(), message: "post-create hooks require manual review and approval before mutation".into() }), context: OperationContext::Approval(ApprovalContext { approval: HookApprovalContext { phase: candidate.phase().key().into(), commands: candidate.commands().iter().map(|step| HookApprovalCommand { name: step.name.clone(), command: step.command.clone() }).collect(), repository: candidate.repository().into(), identity: candidate.identity().into() }, branch: branch.into(), destination: BytePath::path(&destination) }), effects: Vec::new(), diagnostics: Vec::new(), recovery: vec![RecoveryAction { action: "trust.approve_hooks".into(), description: "Review and approve post-create hooks interactively".into(), mutation: MutationClass::Trust, requires_human_approval: true, invocation: RecoveryInvocation { argv: vec!["pando".into(), command.into(), branch.into()], stdin: None, working_directory: Some(working_directory) } }], destination: None },
     }
 }
 
@@ -672,7 +721,7 @@ fn execution_failure_outcome(
     branch: String,
     input: &OperationInput,
     working_directory: BytePath,
-    destination: BytePath,
+    destination: PathBuf,
     failure: ExecutionFailure,
 ) -> OperationOutcome {
     let code = match failure.code {
@@ -719,6 +768,7 @@ fn execution_failure_outcome(
             },
         });
     }
+    let enters_destination = failure.entry == setup::EntryDisposition::Enter;
     OperationOutcome {
         result: Err(OperationFailure {
             code,
@@ -726,7 +776,7 @@ fn execution_failure_outcome(
         }),
         context: OperationContext::Branch(BranchContext {
             branch,
-            destination: Some(destination),
+            destination: Some(BytePath::path(&destination)),
             created: Some(failure.created),
             setup: failure.setup_incomplete.then_some("incomplete"),
             hook_outcome: failure.hook_outcome.map(|outcome| format!("{outcome:?}")),
@@ -735,25 +785,23 @@ fn execution_failure_outcome(
         effects: failure.effects,
         diagnostics: hook_diagnostics(failure.hook_output),
         recovery,
+        destination: enters_destination.then_some(destination),
     }
 }
 
-fn hook_diagnostics(output: HookOutput) -> Vec<Diagnostic> {
-    match output {
-        HookOutput::Streamed => Vec::new(),
-        HookOutput::Captured(steps) => steps
-            .into_iter()
-            .flat_map(|step| [("stdout", step.stdout), ("stderr", step.stderr)])
-            .filter(|(_, captured)| captured.original_size > 0)
-            .map(|(stream, captured)| Diagnostic {
-                source: "hook".into(),
-                stream: stream.into(),
-                content: String::from_utf8_lossy(&captured.content).into_owned(),
-                original_size: captured.original_size,
-                truncated: captured.truncated,
-            })
-            .collect(),
-    }
+fn hook_diagnostics(output: Vec<CapturedStep>) -> Vec<Diagnostic> {
+    output
+        .into_iter()
+        .flat_map(|step| [("stdout", step.stdout), ("stderr", step.stderr)])
+        .filter(|(_, captured)| captured.original_size > 0)
+        .map(|(stream, captured)| Diagnostic {
+            source: "hook".into(),
+            stream: stream.into(),
+            content: String::from_utf8_lossy(&captured.content).into_owned(),
+            original_size: captured.original_size,
+            truncated: captured.truncated,
+        })
+        .collect()
 }
 
 fn bounded_diagnostic(source: &str, stream: &str, bytes: &[u8]) -> Diagnostic {
@@ -1056,20 +1104,15 @@ fn plan_source(
 
 /// Executes a navigation or creation plan without reclassifying its branch.
 ///
-/// The output policy is the sole adapter-specific input: human callers stream
-/// hooks, while structured callers capture bounded diagnostics.
+/// Setup and hook observations may be presented live or retained for replay,
+/// but the returned execution state is identical in both cases.
 #[allow(clippy::too_many_lines)] // This is the single explicit worktree execution boundary.
 pub(crate) fn execute(
     repository: &Repository,
     plan: &Plan,
-    output_policy: OutputPolicy,
-    on_created: impl FnOnce() -> Result<()>,
+    observations: &mut setup::Observations,
 ) -> std::result::Result<ExecutionOutcome, ExecutionFailure> {
     let mut effects = planned_effects(plan);
-    let empty_output = || match output_policy {
-        OutputPolicy::Streamed => HookOutput::Streamed,
-        OutputPolicy::Captured => HookOutput::Captured(Vec::new()),
-    };
     let failure = |code, error, effects, created, setup_incomplete| ExecutionFailure {
         code,
         error,
@@ -1077,7 +1120,7 @@ pub(crate) fn execute(
         created,
         setup_incomplete,
         hook_outcome: None,
-        hook_output: empty_output(),
+        hook_output: Vec::new(),
         entry: if created && setup_incomplete {
             setup::EntryDisposition::Enter
         } else {
@@ -1088,7 +1131,7 @@ pub(crate) fn execute(
         return Ok(ExecutionOutcome {
             destination: worktree.path.clone(),
             effects,
-            hook_output: empty_output(),
+            hook_output: Vec::new(),
         });
     }
     let config = plan.config.as_ref().expect("creation plan has config");
@@ -1096,7 +1139,7 @@ pub(crate) fn execute(
         return Ok(ExecutionOutcome {
             destination: plan.destination.clone(),
             effects,
-            hook_output: empty_output(),
+            hook_output: Vec::new(),
         });
     }
     revalidate(repository, plan)
@@ -1165,15 +1208,7 @@ pub(crate) fn execute(
         } else {
             None
         };
-    if let Err(error) = on_created() {
-        if let Some(incomplete) = incomplete {
-            let value = incomplete
-                .advance(setup::Event::PostCreationFailed(error))
-                .expect_err("post-creation failure cannot complete setup");
-            return Err(failure("setup_failed", value.error, effects, true, true));
-        }
-        return Err(failure("setup_failed", error, effects, true, false));
-    }
+    observations.emit(setup::Observation::WorktreeCreated);
     if let Some(description) = plan.description.as_deref() {
         let index = effects
             .iter()
@@ -1182,9 +1217,7 @@ pub(crate) fn execute(
         effects[index].attempted = true;
         if let Err(error) = mutation.describe(&plan.branch, description) {
             if let Some(incomplete) = incomplete {
-                let value = incomplete
-                    .advance(setup::Event::PostCreationFailed(error))
-                    .expect_err("description failure cannot complete setup");
+                let value = incomplete.post_creation_failed(error);
                 return Err(failure(
                     "description_failed",
                     value.error,
@@ -1198,21 +1231,27 @@ pub(crate) fn execute(
         effects[index].completed = true;
     }
     if let Some(incomplete) = incomplete {
+        let mut hook_observations = if observations.is_human() {
+            hook::Observations::human()
+        } else {
+            hook::Observations::captured()
+        };
         let execution = hook::execute(
             crate::config::HookPhase::PostCreate,
             &config.post_create,
             &plan.destination,
-            output_policy,
+            &mut hook_observations,
         );
+        drop(hook_observations.finish());
         let (attempt, outcome, hook_output) = match execution {
             Ok(execution) => (
-                setup::Attempt::Finished(execution.outcome),
+                Ok(execution.outcome),
                 Some(execution.outcome),
                 execution.output,
             ),
-            Err(error) => (setup::Attempt::ExecutionFailed(error), None, empty_output()),
+            Err(error) => (Err(error), None, Vec::new()),
         };
-        if let Err(value) = incomplete.advance(setup::Event::InitialAttempt(attempt)) {
+        if let Err(value) = incomplete.initial_attempt(attempt) {
             let error = outcome.map_or(value.error, |outcome| {
                 anyhow::anyhow!("post-create hook outcome: {outcome:?}; setup remains incomplete")
             });
@@ -1236,7 +1275,7 @@ pub(crate) fn execute(
     Ok(ExecutionOutcome {
         destination: plan.destination.clone(),
         effects,
-        hook_output: empty_output(),
+        hook_output: Vec::new(),
     })
 }
 

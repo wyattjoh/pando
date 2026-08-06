@@ -1,17 +1,11 @@
-use std::path::Path;
-
 use anyhow::{Result, bail};
 
-use crate::{
-    config::HookPhase,
-    git::{self, LifecycleOutput},
-    hook, hook_approval, render, ui,
-};
+use crate::{config::HookPhase, git::LifecycleOutput, hook_approval, render, ui};
 
 use super::{
-    MergeDiagnostic, MergeError, MergeInput, MergeOutcome, MergeOutcomeContext, MergePlan,
-    MergeResult, merge_approval_context, merge_preflight_outcome, merge_trust_recovery, plan_merge,
-    push_captured_merge_diagnostic, push_merge_diagnostic, run_prepared_merge, write_destination,
+    MergeError, MergeInput, MergeOutcome, MergeOutcomeContext, MergePlan, MergeResult,
+    merge_approval_context, merge_preflight_outcome, merge_trust_recovery, plan_merge,
+    run_prepared_merge,
 };
 
 /// Policy for local changes at the journaled merge boundary.
@@ -119,163 +113,182 @@ pub(crate) struct PreparedMerge {
 
 impl PreparedMerge {
     #[must_use]
-    pub(crate) fn run(self, output: &MergeExecutionOutput) -> MergeOutcome {
+    pub(crate) fn run(self, observations: &mut Observations) -> MergeOutcome {
         run_prepared_merge(
             &self.plan,
             &self.request.input,
             self.request.changes,
-            output,
+            observations,
         )
     }
 }
 
-/// Closed presentation choices for the two ordinary merge adapters.
-pub(crate) enum MergeExecutionOutput {
+/// Non-authoritative observations produced while a merge command is in flight.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Observation {
+    ProgressStarted {
+        starting: String,
+        completed: String,
+        failed: String,
+    },
+    ProgressCompleted,
+    ProgressFailed,
+    GitOutput {
+        content: String,
+    },
+    CommitMessage {
+        message: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Delivery {
     Human,
     Captured,
 }
 
-impl MergeExecutionOutput {
-    pub(super) fn run_git(
-        &self,
-        start: &str,
-        success: &str,
-        failure: &str,
-        operation: impl FnOnce(LifecycleOutput) -> Result<String>,
-    ) -> Result<String> {
-        match self {
-            Self::Human => ui::run_timed(true, start, success, failure, |animated| {
-                operation(super::output_for(animated))
-            })
-            .and_then(|transcript| {
-                super::report(&transcript)?;
-                Ok(transcript)
-            }),
-            Self::Captured => operation(LifecycleOutput::Captured),
+struct ActiveProgress {
+    progress: ui::TimedProgress,
+    completed: String,
+    failed: String,
+}
+
+/// Concrete delivery for merge observations. It never returns data that the
+/// executor can use to authorize or classify a command transition.
+pub(crate) struct Observations {
+    delivery: Delivery,
+    events: Vec<Observation>,
+    active: Option<ActiveProgress>,
+}
+
+impl Observations {
+    #[must_use]
+    pub(crate) const fn human() -> Self {
+        Self {
+            delivery: Delivery::Human,
+            events: Vec::new(),
+            active: None,
         }
     }
 
-    pub(super) fn run_action<T>(
-        &self,
-        start: &str,
-        success: &str,
-        failure: &str,
-        operation: impl FnOnce() -> Result<T>,
-    ) -> Result<T> {
-        match self {
-            Self::Human => ui::run_timed(true, start, success, failure, |_| operation()),
-            Self::Captured => operation(),
+    #[must_use]
+    pub(crate) const fn captured() -> Self {
+        Self {
+            delivery: Delivery::Captured,
+            events: Vec::new(),
+            active: None,
         }
     }
 
-    pub(super) fn present_commit_message(
-        &self,
-        diagnostics: &mut Vec<MergeDiagnostic>,
-        message: &str,
-    ) -> Result<()> {
-        match self {
-            Self::Human => ui::step(render::commit_message(message)),
-            Self::Captured => {
-                push_merge_diagnostic(diagnostics, "squash", "stderr", message.as_bytes());
-                Ok(())
-            }
+    #[must_use]
+    pub(super) const fn is_human(&self) -> bool {
+        matches!(self.delivery, Delivery::Human)
+    }
+
+    pub(super) fn progress_started(
+        &mut self,
+        starting: &str,
+        completed: &str,
+        failed: &str,
+    ) -> LifecycleOutput {
+        self.emit(Observation::ProgressStarted {
+            starting: starting.into(),
+            completed: completed.into(),
+            failed: failed.into(),
+        });
+        if !self.is_human()
+            || self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.progress.animated())
+        {
+            LifecycleOutput::Captured
+        } else {
+            LifecycleOutput::Displayed
         }
     }
 
-    pub(super) fn record_transcript(
-        &self,
-        diagnostics: &mut Vec<MergeDiagnostic>,
-        phase: &'static str,
-        transcript: &str,
-    ) {
-        if matches!(self, Self::Captured) {
-            push_merge_diagnostic(diagnostics, phase, "stderr", transcript.as_bytes());
-        }
+    pub(super) fn progress_completed(&mut self) {
+        self.emit(Observation::ProgressCompleted);
     }
 
-    pub(super) fn record_error(
-        &self,
-        diagnostics: &mut Vec<MergeDiagnostic>,
-        phase: &'static str,
-        error: &impl std::fmt::Display,
-    ) {
-        if matches!(self, Self::Captured) {
-            push_merge_diagnostic(diagnostics, phase, "stderr", error.to_string().as_bytes());
-        }
+    pub(super) fn progress_failed(&mut self) {
+        self.emit(Observation::ProgressFailed);
     }
 
-    pub(super) const fn hook_policy(&self) -> hook::OutputPolicy {
-        match self {
-            Self::Human => hook::OutputPolicy::Streamed,
-            Self::Captured => hook::OutputPolicy::Captured,
-        }
-    }
-
-    pub(super) fn record_hook_output(
-        &self,
-        diagnostics: &mut Vec<MergeDiagnostic>,
-        phase: &'static str,
-        output: hook::HookOutput,
-    ) {
-        if !matches!(self, Self::Captured) {
-            return;
-        }
-        let hook::HookOutput::Captured(output) = output else {
-            return;
-        };
-        for step in output {
-            push_captured_merge_diagnostic(diagnostics, phase, "stdout", step.stdout);
-            push_captured_merge_diagnostic(diagnostics, phase, "stderr", step.stderr);
-        }
-    }
-
-    pub(super) const fn removal_output(&self) -> git::RemovalOutput {
-        match self {
-            Self::Human => git::RemovalOutput::Displayed,
-            Self::Captured => git::RemovalOutput::Captured,
-        }
-    }
-
-    pub(super) fn finish_removal(
-        &self,
-        output: Option<git::RemovalDiagnostics>,
-        diagnostics: &mut Vec<MergeDiagnostic>,
-    ) -> Result<()> {
-        match self {
-            Self::Human => Ok(()),
-            Self::Captured => {
-                let output = output.expect("captured removal returns diagnostics");
-                push_merge_diagnostic(diagnostics, "cleanup", "stdout", &output.stdout);
-                push_merge_diagnostic(diagnostics, "cleanup", "stderr", &output.stderr);
-                if output.status.success() {
-                    Ok(())
-                } else {
-                    bail!("git worktree remove failed")
-                }
-            }
-        }
-    }
-
-    pub(super) fn record_removal_error(
-        &self,
-        diagnostics: &mut Vec<MergeDiagnostic>,
-        error: &impl std::fmt::Display,
-    ) {
-        if matches!(self, Self::Human) {
-            push_merge_diagnostic(
-                diagnostics,
-                "cleanup",
-                "stderr",
-                error.to_string().as_bytes(),
+    pub(super) fn git_output(&mut self, content: &str, output: LifecycleOutput) {
+        if !content.trim().is_empty() {
+            self.record(
+                Observation::GitOutput {
+                    content: content.into(),
+                },
+                output == LifecycleOutput::Captured,
             );
         }
     }
 
-    pub(super) fn write_destination(&self, destination: &Path) -> Result<()> {
-        if matches!(self, Self::Human) {
-            write_destination(destination)?;
+    pub(super) fn commit_message(&mut self, message: &str) {
+        self.emit(Observation::CommitMessage {
+            message: message.into(),
+        });
+    }
+
+    fn emit(&mut self, observation: Observation) {
+        self.record(observation, true);
+    }
+
+    fn record(&mut self, observation: Observation, render: bool) {
+        if self.is_human() && render {
+            self.render(&observation);
         }
-        Ok(())
+        self.events.push(observation);
+    }
+
+    fn render(&mut self, observation: &Observation) {
+        match observation {
+            Observation::ProgressStarted {
+                starting,
+                completed,
+                failed,
+            } => {
+                if self.active.is_none()
+                    && let Ok(progress) = ui::TimedProgress::start(true, starting)
+                {
+                    self.active = Some(ActiveProgress {
+                        progress,
+                        completed: completed.clone(),
+                        failed: failed.clone(),
+                    });
+                }
+            }
+            Observation::ProgressCompleted => {
+                if let Some(active) = self.active.take() {
+                    let _ = active
+                        .progress
+                        .complete(&active.completed, ui::Completion::Step);
+                }
+            }
+            Observation::ProgressFailed => {
+                if let Some(active) = self.active.take() {
+                    let _ = active.progress.fail(&active.failed);
+                }
+            }
+            Observation::GitOutput { content } => {
+                let _ = ui::step(render::git_output(content.trim_end()));
+            }
+            Observation::CommitMessage { message } => {
+                let _ = ui::step(render::commit_message(message));
+            }
+        }
+    }
+
+    /// Completes infallible, presentation-only observation delivery.
+    #[must_use]
+    pub(crate) fn finish(mut self) -> Vec<Observation> {
+        if let Some(active) = self.active.take() {
+            let _ = active.progress.fail(&active.failed);
+        }
+        self.events
     }
 }
 
@@ -298,6 +311,7 @@ pub(crate) fn prepare(request: MergeRequest) -> Preparation {
                 effects: plan.effects.clone(),
                 diagnostics: Vec::new(),
                 recovery: Vec::new(),
+                destination: None,
             });
         }
     };
@@ -383,6 +397,7 @@ fn dry_run_outcome(
                 matches!(requirement, PendingRequirement::SquashGenerator),
             )]
         }),
+        destination: None,
     }
 }
 
@@ -407,5 +422,27 @@ fn approval_outcome(plan: &MergePlan, requirement: &PendingRequirement) -> Merge
         effects: plan.effects.clone(),
         diagnostics: Vec::new(),
         recovery: vec![merge_trust_recovery(plan, squash_blocked)],
+        destination: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn captured_observations_replay_without_command_authority() {
+        let mut delivered = Observations::captured();
+        delivered.progress_started("starting", "completed", "failed");
+        delivered.progress_completed();
+        delivered.git_output("git output", LifecycleOutput::Captured);
+        delivered.commit_message("subject");
+        let events = delivered.finish();
+
+        let mut replayed = Observations::captured();
+        for event in &events {
+            replayed.emit(event.clone());
+        }
+        assert_eq!(replayed.finish(), events);
     }
 }

@@ -2,10 +2,11 @@ use std::{
     collections::{BTreeSet, HashMap},
     ffi::{OsStr, OsString},
     fs,
-    io::Write,
+    io::{self, Read, Write},
     os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Output, Stdio},
+    sync::mpsc::{self, SyncSender},
     thread,
 };
 
@@ -60,13 +61,40 @@ impl GitProcess {
         self.command.stdin(Stdio::inherit()).output()
     }
 
-    fn displayed(mut self) -> Result<ExitStatus> {
-        self.command
+    fn streamed(mut self) -> Result<Output> {
+        let mut child = self
+            .command
             .stdin(Stdio::inherit())
-            .stdout(Stdio::from(open_stderr()?))
-            .stderr(Stdio::inherit())
-            .status()
-            .map_err(Into::into)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdout = child.stdout.take().context("streamed Git has no stdout")?;
+        let stderr = child.stderr.take().context("streamed Git has no stderr")?;
+        let (stdout_relay, stderr_relay, relay_writer) = open_stderr().ok().map_or_else(
+            || (None, None, None),
+            |output| {
+                let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(8);
+                let writer = thread::spawn(move || relay_git_output(output, &receiver));
+                (Some(sender.clone()), Some(sender), Some(writer))
+            },
+        );
+        let stdout_reader = thread::spawn(move || capture_git_stream(stdout, stdout_relay));
+        let stderr_reader = thread::spawn(move || capture_git_stream(stderr, stderr_relay));
+        let status = child.wait()?;
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| anyhow!("streamed Git stdout reader panicked"))??;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| anyhow!("streamed Git stderr reader panicked"))??;
+        if let Some(writer) = relay_writer {
+            let _ = writer.join();
+        }
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 
     fn piped(mut self, input: Vec<u8>, contexts: &PipedContexts) -> Result<Output> {
@@ -109,13 +137,6 @@ pub(crate) enum WorktreeSource<'source> {
 pub(crate) enum RemovalMode {
     Safe,
     Force,
-}
-
-/// Whether removal diagnostics are rendered by Git or returned to the owner.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RemovalOutput {
-    Captured,
-    Displayed,
 }
 
 /// Captured diagnostics from a worktree removal.
@@ -220,40 +241,21 @@ impl<'cwd> WorktreeMutation<'cwd> {
     ///
     /// # Errors
     ///
-    /// Returns an error when displayed removal fails or Git cannot start.
-    pub(crate) fn remove(
-        self,
-        path: &Path,
-        mode: RemovalMode,
-        output: RemovalOutput,
-    ) -> Result<Option<RemovalDiagnostics>> {
+    /// Returns an error when Git cannot start.
+    pub(crate) fn remove(self, path: &Path, mode: RemovalMode) -> Result<RemovalDiagnostics> {
         let mut args = vec![OsStr::new("worktree"), OsStr::new("remove")];
         if mode == RemovalMode::Force {
             args.push(OsStr::new("--force"));
         }
         args.push(path.as_os_str());
-        match output {
-            RemovalOutput::Displayed => {
-                let status = GitProcess::new(self.cwd, args)
-                    .displayed()
-                    .context("failed to start git worktree remove")?;
-                if status.success() {
-                    Ok(None)
-                } else {
-                    bail!("git worktree remove failed with {status}")
-                }
-            }
-            RemovalOutput::Captured => {
-                let output = GitProcess::new(self.cwd, args)
-                    .captured()
-                    .context("failed to start git worktree remove")?;
-                Ok(Some(RemovalDiagnostics {
-                    status: output.status,
-                    stdout: output.stdout,
-                    stderr: output.stderr,
-                }))
-            }
-        }
+        let output = GitProcess::new(self.cwd, args)
+            .captured()
+            .context("failed to start git worktree remove")?;
+        Ok(RemovalDiagnostics {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
     }
 }
 
@@ -1244,13 +1246,13 @@ fn remote_url(cwd: &Path, remote: &str) -> Result<String> {
 fn push(cwd: &Path, plan: &PushPlan, inherit: bool) -> Result<()> {
     let refspec = format!("{}:{}", plan.branch, plan.branch);
     if inherit {
-        let status = GitProcess::new(cwd, ["push", "-u", &plan.remote, &refspec])
-            .displayed()
+        let output = GitProcess::new(cwd, ["push", "-u", &plan.remote, &refspec])
+            .streamed()
             .context("failed to start git push")?;
-        if status.success() {
+        if output.status.success() {
             Ok(())
         } else {
-            bail!("git push failed with {status}")
+            bail!("git push failed with {}", output.status)
         }
     } else {
         let output = run_git(cwd, ["push", "-u", &plan.remote, &refspec])
@@ -1283,51 +1285,51 @@ fn branch_commit_observed(cwd: &Path, branch: &str) -> Result<String> {
     .with_context(|| format!("failed to resolve branch {branch:?}"))
 }
 
-/// Runs a lifecycle Git operation, capturing its output unless `inherit` is set.
+/// Runs a lifecycle Git operation with one stdin and editor policy.
 ///
-/// Captured output is returned on success and folded into the error on failure,
-/// so a caller rendering progress owns every line Git produced. A captured run
-/// has no terminal to hand an editor, so `GIT_EDITOR` is neutralized — it
-/// outranks `core.editor`, and an inherited `EDITOR=nvim` would otherwise leave
-/// `rebase --continue` drawing a full-screen editor into a pipe. Continuation
-/// therefore reuses the commit message Git already recorded.
+/// Output is always captured for the final diagnostic outcome. Displayed runs
+/// additionally relay it to stderr while the child is active. Both modes inherit
+/// stdin and neutralize `GIT_EDITOR`, so presentation cannot change whether Git
+/// reads input or opens an editor. Continuation therefore reuses the commit
+/// message Git already recorded.
 fn run_lifecycle_git(
     cwd: &Path,
     args: &[&str],
     operation: &str,
     output: LifecycleOutput,
 ) -> Result<String> {
-    if output == LifecycleOutput::Displayed {
-        return run_git_inherit(cwd, args, operation).map(|()| String::new());
+    let process = GitProcess::new(cwd, args).suppress_editor();
+    let execution = match output {
+        LifecycleOutput::Captured => process
+            .captured_inheriting_stdin()
+            .map_err(anyhow::Error::from),
+        LifecycleOutput::Displayed => process.streamed(),
     }
-    let output = GitProcess::new(cwd, args)
-        .suppress_editor()
-        .captured()
-        .with_context(|| {
-            format!(
-                "failed to start git {operation} in repository {}",
-                cwd.display()
-            )
-        })?;
-    let transcript = combined_output(&output);
-    if output.status.success() {
+    .with_context(|| {
+        format!(
+            "failed to start git {operation} in repository {}",
+            cwd.display()
+        )
+    })?;
+    let transcript = combined_output(&execution);
+    if execution.status.success() {
         return Ok(transcript);
     }
-    if transcript.is_empty() {
+    if transcript.is_empty() || output == LifecycleOutput::Displayed {
         bail!(
             "git {operation} failed with {} in repository {}",
-            output.status,
+            execution.status,
             cwd.display()
         );
     }
     bail!(
         "git {operation} failed with {} in repository {}\n{transcript}",
-        output.status,
+        execution.status,
         cwd.display()
     );
 }
 
-/// Joins a captured command's streams in the order Git presents them.
+/// Joins a captured command's streams into one stable transcript.
 ///
 /// Git redraws counters such as `Rebasing (1/3)` with carriage returns, which a
 /// pipe preserves verbatim. Only each line's final revision survives, so the
@@ -1659,21 +1661,40 @@ fn open_stderr() -> Result<fs::File> {
         .map_err(Into::into)
 }
 
-fn run_git_inherit(cwd: &Path, args: &[&str], operation: &str) -> Result<()> {
-    let status = GitProcess::new(cwd, args).displayed().with_context(|| {
-        format!(
-            "failed to start git {operation} in repository {}",
-            cwd.display()
-        )
-    })?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!(
-            "git {operation} failed with {status} in repository {}",
-            cwd.display()
-        )
+fn relay_git_output(mut output: fs::File, receiver: &mpsc::Receiver<Vec<u8>>) {
+    let mut writable = true;
+    while let Ok(bytes) = receiver.recv() {
+        if writable
+            && output
+                .write_all(&bytes)
+                .and_then(|()| output.flush())
+                .is_err()
+        {
+            writable = false;
+        }
     }
+}
+
+fn capture_git_stream(
+    mut stream: impl Read,
+    mut relay: Option<SyncSender<Vec<u8>>>,
+) -> io::Result<Vec<u8>> {
+    let mut captured = Vec::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let count = stream.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        if relay
+            .as_ref()
+            .is_some_and(|output| output.send(buffer[..count].to_vec()).is_err())
+        {
+            relay = None;
+        }
+        captured.extend_from_slice(&buffer[..count]);
+    }
+    Ok(captured)
 }
 
 fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String> {

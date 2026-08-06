@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use cliclack::{Theme, ThemeState, log, outro, outro_cancel, set_theme, spinner};
+use cliclack::{ProgressBar, Theme, ThemeState, log, outro, outro_cancel, set_theme, spinner};
 use console::{
     Style, colors_enabled_stderr, set_colors_enabled, set_true_colors_enabled,
     true_colors_enabled_stderr,
@@ -250,6 +250,86 @@ pub enum Completion {
     Outro,
 }
 
+/// An active timed observation whose terminal state is selected after the
+/// command transition has produced its typed result.
+pub(crate) struct TimedProgress {
+    started: Instant,
+    progress: Option<ProgressBar>,
+}
+
+impl TimedProgress {
+    /// Starts one timed observation without taking ownership of the operation.
+    ///
+    /// # Errors
+    /// Returns an error when a non-animated starting line cannot be rendered.
+    pub(crate) fn start(enabled: bool, starting: &str) -> Result<Self> {
+        if !enabled {
+            return Ok(Self {
+                started: Instant::now(),
+                progress: None,
+            });
+        }
+        open_sequence();
+        let progress = io::stderr().is_terminal().then(|| {
+            let elapsed = muted_style().apply_to("{elapsed}");
+            let template = format!("{{msg}} {elapsed}");
+            let progress = spinner().with_template(&template);
+            progress.start(heading_style().apply_to(starting));
+            progress
+        });
+        if progress.is_none() {
+            info(heading_style().apply_to(starting))?;
+        }
+        Ok(Self {
+            started: Instant::now(),
+            progress,
+        })
+    }
+
+    #[must_use]
+    pub(crate) const fn animated(&self) -> bool {
+        self.progress.is_some()
+    }
+
+    /// Renders the one successful terminal state for this observation.
+    ///
+    /// # Errors
+    /// Returns an error when the completed state cannot be rendered.
+    pub(crate) fn complete(self, completed: &str, completion: Completion) -> Result<()> {
+        let elapsed = muted_style().apply_to(format!("{}s", self.started.elapsed().as_secs()));
+        match completion {
+            Completion::Step => {
+                let message = format!("{} {elapsed}", heading_style().apply_to(completed));
+                if let Some(progress) = &self.progress {
+                    progress.stop(message);
+                    Ok(())
+                } else {
+                    step(message)
+                }
+            }
+            Completion::Outro => {
+                if let Some(progress) = &self.progress {
+                    progress.clear();
+                }
+                finish(format!("{completed} {elapsed}"))
+            }
+        }
+    }
+
+    /// Renders the one failed terminal state for this observation.
+    ///
+    /// # Errors
+    /// Returns an error when the failed state cannot be rendered.
+    pub(crate) fn fail(self, failed: &str) -> Result<()> {
+        if let Some(progress) = &self.progress {
+            progress.error(failed);
+            Ok(())
+        } else {
+            warning(failed)
+        }
+    }
+}
+
 /// Runs a potentially slow operation with a timed human-mode progress indicator.
 ///
 /// The operation receives whether an animated spinner owns stderr. Callers that
@@ -298,49 +378,15 @@ pub fn run_timed_completing<T>(
         return operation(false);
     }
 
-    open_sequence();
-    let started = Instant::now();
-    let progress = io::stderr().is_terminal().then(|| {
-        let elapsed = muted_style().apply_to("{elapsed}");
-        let template = format!("{{msg}} {elapsed}");
-        let progress = spinner().with_template(&template);
-        progress.start(heading_style().apply_to(starting));
-        progress
-    });
-    if progress.is_none() {
-        info(heading_style().apply_to(starting))?;
-    }
-
-    let result = operation(progress.is_some());
-    let elapsed = muted_style().apply_to(format!("{}s", started.elapsed().as_secs()));
+    let progress = TimedProgress::start(true, starting)?;
+    let result = operation(progress.animated());
     match result {
         Ok(value) => {
-            match completion {
-                Completion::Step => {
-                    let message = format!("{} {elapsed}", heading_style().apply_to(completed));
-                    if let Some(progress) = &progress {
-                        progress.stop(message);
-                    } else {
-                        step(message)?;
-                    }
-                }
-                Completion::Outro => {
-                    // The outro is the terminal state, so retire the spinner
-                    // without letting it print a step of its own first.
-                    if let Some(progress) = &progress {
-                        progress.clear();
-                    }
-                    finish(format!("{completed} {elapsed}"))?;
-                }
-            }
+            progress.complete(completed, completion)?;
             Ok(value)
         }
         Err(error) => {
-            if let Some(progress) = &progress {
-                progress.error(failed);
-            } else {
-                warning(failed)?;
-            }
+            progress.fail(failed)?;
             Err(error)
         }
     }

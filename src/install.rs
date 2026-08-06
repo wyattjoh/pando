@@ -221,6 +221,88 @@ struct InstallProposal {
 
 struct InstallApproval(());
 
+/// Non-authoritative observations emitted during deterministic installation and guidance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Observation {
+    FileWritten { role: &'static str },
+    ShellInstalled { startup_path: PathBuf },
+    ShellCurrent,
+    GuidanceCommandSaved { config_path: PathBuf },
+    GuidanceLaunching { command: String },
+    GuidanceDeclined,
+    GuidanceCompleted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Delivery {
+    Human,
+    #[cfg(test)]
+    Captured,
+}
+
+pub(crate) struct Observations {
+    delivery: Delivery,
+    events: Vec<Observation>,
+}
+
+impl Observations {
+    #[must_use]
+    pub(crate) const fn human() -> Self {
+        Self {
+            delivery: Delivery::Human,
+            events: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    const fn captured() -> Self {
+        Self {
+            delivery: Delivery::Captured,
+            events: Vec::new(),
+        }
+    }
+
+    pub(crate) fn emit(&mut self, observation: Observation) {
+        if matches!(self.delivery, Delivery::Human) {
+            let _ = render_observation(&observation);
+        }
+        self.events.push(observation);
+    }
+
+    /// Completes infallible, presentation-only observation delivery.
+    #[must_use]
+    pub(crate) fn finish(self) -> Vec<Observation> {
+        self.events
+    }
+}
+
+fn render_observation(observation: &Observation) -> Result<()> {
+    match observation {
+        Observation::FileWritten { .. } => Ok(()),
+        Observation::ShellInstalled { startup_path } => {
+            ui::success("Installed zsh integration.")?;
+            ui::info(format!(
+                "Restart zsh or run: source {}",
+                ui::worktree_data_style().apply_to(startup_path.display())
+            ))
+        }
+        Observation::ShellCurrent => ui::info("The Pando shell integration is already current."),
+        Observation::GuidanceCommandSaved { config_path } => ui::step(format!(
+            "saved guided installer command in {}",
+            ui::worktree_data_style().apply_to(config_path.display())
+        )),
+        Observation::GuidanceLaunching { command } => ui::info(format!(
+            "Launching {} for guided configuration...",
+            ui::worktree_data_style().apply_to(command)
+        )),
+        Observation::GuidanceDeclined => {
+            ui::warning("Guided configuration declined; the agent command was not saved.")
+        }
+        Observation::GuidanceCompleted => ui::success("Guided configuration session completed."),
+    }
+}
+
 struct InstallAssessment {
     plan: InstallPlan,
     proposal: InstallProposal,
@@ -247,6 +329,15 @@ pub struct InstallOutcome {
     pub result: std::result::Result<InstallResult, InstallFailure>,
     pub effects: Vec<Effect>,
     pub recovery: Vec<RecoveryAction<protocol::EmptyInput>>,
+    completion: Option<InstallCompletion>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InstallCompletion {
+    ShellInstalled,
+    AlreadyCurrent,
+    Guided,
+    GuidanceDeclined,
 }
 
 /// Builds one deterministic installation assessment and its opaque proposal.
@@ -461,20 +552,20 @@ pub fn plan() -> Result<InstallPlan> {
     Ok(assess()?.plan)
 }
 
+fn write_effect(write: &ProposedWrite) -> Effect {
+    Effect {
+        action: "file.write".into(),
+        attempted: false,
+        completed: false,
+        details: Some(serde_json::json!({
+            "target": BytePath::path(&write.path),
+            "role": write.role,
+        })),
+    }
+}
+
 fn effects(proposal: &InstallProposal) -> Vec<Effect> {
-    proposal
-        .writes
-        .iter()
-        .map(|write| Effect {
-            action: "file.write".into(),
-            attempted: false,
-            completed: false,
-            details: Some(serde_json::json!({
-                "target": BytePath::path(&write.path),
-                "role": write.role,
-            })),
-        })
-        .collect()
+    proposal.writes.iter().map(write_effect).collect()
 }
 
 /// Returns the typed non-mutating outcome for structured installation.
@@ -488,6 +579,7 @@ pub fn inspect(input: &InstallInput) -> Result<InstallOutcome> {
             result: Ok(InstallResult::AlreadyCurrent { plan }),
             effects: Vec::new(),
             recovery: Vec::new(),
+            completion: None,
         });
     }
     let planned_effects = effects(&proposal);
@@ -496,6 +588,7 @@ pub fn inspect(input: &InstallInput) -> Result<InstallOutcome> {
             result: Ok(InstallResult::DryRun { plan }),
             effects: planned_effects,
             recovery: Vec::new(),
+            completion: None,
         });
     }
     Ok(InstallOutcome {
@@ -515,6 +608,7 @@ pub fn inspect(input: &InstallInput) -> Result<InstallOutcome> {
                 working_directory: None,
             },
         }],
+        completion: None,
     })
 }
 
@@ -554,9 +648,7 @@ pub fn preview() -> Result<()> {
 /// the selected agent cannot complete its session.
 pub fn run(guided: bool) -> Result<()> {
     let InstallAssessment { plan, proposal } = assess()?;
-    let shell_changed = plan.changed;
-
-    if shell_changed {
+    if plan.changed {
         ui::ensure_interactive("Pando installation requires confirmation")?;
         ui::info(ui::heading_style().apply_to("Planned Pando installation changes:"))?;
         for (verb, path, changed) in [
@@ -589,49 +681,54 @@ pub fn run(guided: bool) -> Result<()> {
                 "Zsh integration was not installed.",
             ));
         }
-
-        let approval = InstallApproval(());
-        let outcome = execute(proposal, approval, plan.clone());
-        if let Err(failure) = outcome.result {
-            bail!(failure.message);
-        }
-        ui::success("Installed zsh integration.")?;
-        ui::info(format!(
-            "Restart zsh or run: source {}",
-            ui::worktree_data_style().apply_to(plan.startup_path.display())
-        ))?;
-    } else {
-        ui::info("The Pando shell integration is already current.")?;
     }
 
-    if guided {
-        let outcome = run_guided_configuration(&plan.config_path)?;
-        return match outcome.completion {
-            AgentCompletion::Completed => {
-                debug_assert!(outcome.command_persistence.persisted);
-                ui::success("Guided configuration session completed.")?;
-                ui::finish(
-                    ui::success_style().apply_to("Pando installation and configuration complete."),
-                )
-            }
-            AgentCompletion::Interrupted => bail!("guided configuration agent was interrupted"),
-            AgentCompletion::Failed(message) => bail!(message),
-        };
-    }
+    let mut observations = Observations::human();
+    let outcome = execute(
+        proposal,
+        InstallApproval(()),
+        plan,
+        guided,
+        &mut observations,
+    );
+    drop(observations.finish());
+    finish_human_install(outcome)
+}
 
-    let completion = if shell_changed {
-        "Zsh integration installed."
-    } else {
-        "Pando installation is already current."
+fn finish_human_install(outcome: InstallOutcome) -> Result<()> {
+    if let Err(failure) = outcome.result {
+        bail!(failure.message);
+    }
+    let (completion, style) = match outcome
+        .completion
+        .expect("human installation records its presentation completion")
+    {
+        InstallCompletion::ShellInstalled => ("Zsh integration installed.", ui::success_style()),
+        InstallCompletion::AlreadyCurrent => (
+            "Pando installation is already current.",
+            ui::success_style(),
+        ),
+        InstallCompletion::Guided => (
+            "Pando installation and configuration complete.",
+            ui::success_style(),
+        ),
+        InstallCompletion::GuidanceDeclined => (
+            "Zsh integration installed without guided configuration.",
+            ui::warning_style(),
+        ),
     };
-    ui::finish(ui::success_style().apply_to(completion))
+    let _ = ui::finish(style.apply_to(completion));
+    Ok(())
 }
 
 fn execute(
     proposal: InstallProposal,
     _approval: InstallApproval,
     plan: InstallPlan,
+    guided: bool,
+    observations: &mut Observations,
 ) -> InstallOutcome {
+    let shell_changed = plan.changed;
     let mut effects = effects(&proposal);
     for (index, write) in proposal.writes.into_iter().enumerate() {
         match observation_matches(&write.path, &write.observed) {
@@ -669,11 +766,35 @@ fn execute(
             );
         }
         effects[index].completed = true;
+        observations.emit(Observation::FileWritten { role: write.role });
     }
+    if shell_changed {
+        observations.emit(Observation::ShellInstalled {
+            startup_path: plan.startup_path.clone(),
+        });
+    } else {
+        observations.emit(Observation::ShellCurrent);
+    }
+    let completion = if guided {
+        match run_guided_configuration(&plan.config_path, observations, &mut effects) {
+            Ok(GuidanceCompletion::Completed) => InstallCompletion::Guided,
+            Ok(GuidanceCompletion::Declined) => InstallCompletion::GuidanceDeclined,
+            Err(error) => return install_failure(effects, format!("{error:#}")),
+        }
+    } else if shell_changed {
+        InstallCompletion::ShellInstalled
+    } else {
+        InstallCompletion::AlreadyCurrent
+    };
     InstallOutcome {
-        result: Ok(InstallResult::Installed { plan }),
+        result: Ok(if shell_changed {
+            InstallResult::Installed { plan }
+        } else {
+            InstallResult::AlreadyCurrent { plan }
+        }),
         effects,
         recovery: Vec::new(),
+        completion: Some(completion),
     }
 }
 
@@ -685,6 +806,7 @@ fn install_failure(effects: Vec<Effect>, message: String) -> InstallOutcome {
         }),
         effects,
         recovery: Vec::new(),
+        completion: None,
     }
 }
 
@@ -731,25 +853,23 @@ struct GuidanceSelection {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct CommandPersistence {
-    changed: bool,
-    persisted: bool,
-}
-
-#[derive(Debug, Eq, PartialEq)]
 enum AgentCompletion {
     Completed,
     Interrupted,
     Failed(String),
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct GuidanceOutcome {
-    command_persistence: CommandPersistence,
-    completion: AgentCompletion,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GuidanceCompletion {
+    Completed,
+    Declined,
 }
 
-fn run_guided_configuration(config_path: &Path) -> Result<GuidanceOutcome> {
+fn run_guided_configuration(
+    config_path: &Path,
+    observations: &mut Observations,
+    effects: &mut Vec<Effect>,
+) -> Result<GuidanceCompletion> {
     let selection = select_guidance(config_path)?;
     let command_write = propose_install_command(config_path, selection)?;
 
@@ -761,30 +881,36 @@ fn run_guided_configuration(config_path: &Path) -> Result<GuidanceOutcome> {
         "failed to read guided configuration confirmation",
     )?;
     if !confirmed {
-        return Err(ui::declined_noop(
-            "Guided configuration declined; the agent command was not saved.",
-            "Zsh integration installed without guided configuration.",
-        ));
+        observations.emit(Observation::GuidanceDeclined);
+        return Ok(GuidanceCompletion::Declined);
     }
 
     let command = command_write.command.clone();
-    let command_persistence = persist_proposed_command(command_write)?;
-    ui::step(format!(
-        "saved guided installer command in {}",
-        ui::worktree_data_style().apply_to(config_path.display())
-    ))?;
+    let effect_index = command_write.write.as_ref().map(|write| {
+        effects.push(write_effect(write));
+        effects.len() - 1
+    });
+    persist_proposed_command(
+        &command_write,
+        effect_index.and_then(|index| effects.get_mut(index)),
+    )?;
+    observations.emit(Observation::GuidanceCommandSaved {
+        config_path: config_path.to_path_buf(),
+    });
 
     let cwd = env::current_dir().context("failed to resolve the guided session directory")?;
     let prompt = guided_prompt(config_path, &cwd, &command);
-    ui::info(format!(
-        "Launching {} for guided configuration...",
-        ui::worktree_data_style().apply_to(&command)
-    ))?;
-    let completion = run_agent(&command, &prompt, &cwd);
-    Ok(GuidanceOutcome {
-        command_persistence,
-        completion,
-    })
+    observations.emit(Observation::GuidanceLaunching {
+        command: command.clone(),
+    });
+    match run_agent(&command, &prompt, &cwd) {
+        AgentCompletion::Completed => {
+            observations.emit(Observation::GuidanceCompleted);
+            Ok(GuidanceCompletion::Completed)
+        }
+        AgentCompletion::Interrupted => bail!("guided configuration agent was interrupted"),
+        AgentCompletion::Failed(message) => bail!(message),
+    }
 }
 
 fn select_guidance(config_path: &Path) -> Result<GuidanceSelection> {
@@ -852,25 +978,23 @@ fn propose_install_command(
     })
 }
 
-fn persist_proposed_command(proposal: CommandWrite) -> Result<CommandPersistence> {
-    let Some(write) = proposal.write else {
-        return Ok(CommandPersistence {
-            changed: false,
-            persisted: true,
-        });
+fn persist_proposed_command(proposal: &CommandWrite, effect: Option<&mut Effect>) -> Result<()> {
+    let Some(write) = proposal.write.as_ref() else {
+        debug_assert!(effect.is_none());
+        return Ok(());
     };
+    let effect = effect.expect("a proposed guided command write has an effect");
     if !observation_matches(&write.path, &write.observed)? {
         bail!(
             "refusing to update {} because it changed after confirmation",
             write.path.display()
         );
     }
+    effect.attempted = true;
     write_observed_target(&write.path, &write.observed, &write.desired)
         .with_context(|| format!("failed to update {}", write.path.display()))?;
-    Ok(CommandPersistence {
-        changed: true,
-        persisted: true,
-    })
+    effect.completed = true;
+    Ok(())
 }
 
 fn agent_choices(saved_command: Option<&str>) -> Vec<AgentChoice> {
@@ -939,10 +1063,10 @@ and finish by summarizing what you changed and any commands the user still needs
 
 fn run_agent(command: &str, prompt: &str, cwd: &Path) -> AgentCompletion {
     let agent_stdout = match OpenOptions::new().write(true).open("/dev/stderr") {
-        Ok(stream) => stream,
+        Ok(stderr) => Stdio::from(stderr),
         Err(error) => {
             return AgentCompletion::Failed(format!(
-                "failed to open stderr for the guided agent: {error}"
+                "failed to open stderr for the guided configuration agent: {error}"
             ));
         }
     };
@@ -954,7 +1078,7 @@ fn run_agent(command: &str, prompt: &str, cwd: &Path) -> AgentCompletion {
         .args(["-c", &invocation])
         .current_dir(cwd)
         .stdin(Stdio::inherit())
-        .stdout(Stdio::from(agent_stdout))
+        .stdout(agent_stdout)
         .stderr(Stdio::inherit())
         .status();
     let status = match status {
@@ -1279,12 +1403,27 @@ mod tests {
 
     use super::{
         CONFIG_END_MARKER, CONFIG_START_MARKER, CommandWrite, END_MARKER, INSTALL_END_MARKER,
-        INSTALL_START_MARKER, InstallApproval, InstallPlan, InstallProposal, InstallTarget,
-        ProposedWrite, START_MARKER, agent_invocation, execute, observe_target,
-        persist_install_command, persist_proposed_command, update_config_scaffold,
-        update_install_command, update_source_block,
+        INSTALL_START_MARKER, InstallApproval, InstallOutcome, InstallPlan, InstallProposal,
+        InstallTarget, Observations, ProposedWrite, START_MARKER, agent_invocation,
+        execute as execute_install, observe_target, persist_install_command,
+        persist_proposed_command, update_config_scaffold, update_install_command,
+        update_source_block, write_effect,
     };
     use crate::protocol::BytePath;
+
+    fn execute(
+        proposal: InstallProposal,
+        approval: InstallApproval,
+        plan: InstallPlan,
+    ) -> InstallOutcome {
+        execute_install(
+            proposal,
+            approval,
+            plan,
+            false,
+            &mut Observations::captured(),
+        )
+    }
 
     #[test]
     fn config_scaffold_is_added_and_idempotent() {
@@ -1349,23 +1488,24 @@ mod tests {
             }),
         };
         fs::write(&path, b"worktrees:\n  root: concurrent\n").unwrap();
+        let mut effect = write_effect(proposal.write.as_ref().unwrap());
 
-        let error = persist_proposed_command(proposal).unwrap_err();
+        let error = persist_proposed_command(&proposal, Some(&mut effect)).unwrap_err();
 
         assert!(error.to_string().contains("changed after confirmation"));
+        assert!(!effect.attempted);
+        assert!(!effect.completed);
         assert_eq!(fs::read(path).unwrap(), b"worktrees:\n  root: concurrent\n");
     }
 
     #[test]
-    fn command_persistence_records_an_internal_outcome_for_a_noop() {
-        let outcome = persist_proposed_command(CommandWrite {
+    fn command_persistence_noop_needs_no_effect() {
+        let proposal = CommandWrite {
             command: "pi".into(),
             write: None,
-        })
-        .unwrap();
+        };
 
-        assert!(!outcome.changed);
-        assert!(outcome.persisted);
+        persist_proposed_command(&proposal, None).unwrap();
     }
 
     #[test]
@@ -1411,6 +1551,62 @@ mod tests {
                 .windows(b"# old scaffold".len())
                 .any(|window| window == b"# old scaffold")
         );
+    }
+
+    #[test]
+    fn observation_delivery_and_replay_preserve_the_install_outcome() {
+        let directory = tempfile::tempdir().unwrap();
+        let captured_path = directory.path().join("captured");
+        let human_path = directory.path().join("human");
+        let startup_path = directory.path().join("startup");
+        let mut captured_plan = test_plan(&captured_path);
+        captured_plan.startup_path.clone_from(&startup_path);
+        let mut human_plan = test_plan(&human_path);
+        human_plan.startup_path.clone_from(&startup_path);
+
+        let mut captured = Observations::captured();
+        let captured_outcome = execute_install(
+            proposal(
+                &captured_path,
+                observe_target(&captured_path).unwrap(),
+                b"desired",
+            ),
+            InstallApproval(()),
+            captured_plan,
+            false,
+            &mut captured,
+        );
+        let captured_events = captured.finish();
+
+        let mut human = Observations::human();
+        let human_outcome = execute_install(
+            proposal(
+                &human_path,
+                observe_target(&human_path).unwrap(),
+                b"desired",
+            ),
+            InstallApproval(()),
+            human_plan,
+            false,
+            &mut human,
+        );
+        let human_events = human.finish();
+
+        assert!(captured_outcome.result.is_ok());
+        assert!(human_outcome.result.is_ok());
+        assert_eq!(captured_outcome.effects.len(), human_outcome.effects.len());
+        for (captured, human) in captured_outcome.effects.iter().zip(&human_outcome.effects) {
+            assert_eq!(captured.action, human.action);
+            assert_eq!(captured.attempted, human.attempted);
+            assert_eq!(captured.completed, human.completed);
+        }
+        assert_eq!(human_events, captured_events);
+
+        let mut replayed = Observations::captured();
+        for event in &captured_events {
+            replayed.emit(event.clone());
+        }
+        assert_eq!(replayed.finish(), captured_events);
     }
 
     #[test]

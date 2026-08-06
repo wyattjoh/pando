@@ -18,11 +18,11 @@ use crate::{
     branch::{self, Snapshot},
     config::{EffectiveConfig, HookPhase},
     git::{self, HistoryObservation, Repository, RepositoryObservation},
-    hook::{self, HookOutcome, HookOutput, OutputPolicy},
+    hook::{self, HookOutcome},
     hook_approval,
     read_only::{self, PropertyValue},
     render, setup, sorted_row_indices, trust, ui,
-    worktree_plan::{self, Blocker as PlanBlocker, FetchIntent, Intent, Source},
+    worktree_plan::{self, Blocker as PlanBlocker, FetchIntent, Intent, OperationInput, Source},
 };
 
 pub use crate::read_only::GetProperty;
@@ -1336,34 +1336,46 @@ fn resolve_and_switch(
             .config
             .as_ref()
             .is_some_and(|config| !config.post_create.is_empty());
-        if !has_hooks {
-            let outcome = ui::run_timed_completing(
-                true,
-                "Creating worktree...",
-                "Created worktree",
-                "Failed to create worktree",
-                ui::Completion::Outro,
-                |_| {
-                    worktree_plan::execute(repository, &plan, OutputPolicy::Streamed, || Ok(()))
-                        .map_err(|failure| failure.error)
-                },
-            )?;
-            return write_destination(&outcome.destination);
-        }
-        let execution = worktree_plan::execute(repository, &plan, OutputPolicy::Streamed, || {
-            ui::step("Created worktree")
-        });
-        let outcome = match execution {
-            Ok(outcome) => outcome,
-            Err(failure) => {
-                if failure.entry == setup::EntryDisposition::Enter {
-                    write_destination(&plan.destination)?;
-                }
-                return Err(failure.error);
-            }
+        let input = OperationInput {
+            branch: Some(branch.into()),
+            remote: remote.clone(),
+            fetch: fetch.requested(),
+            dry_run: false,
+            description: plan.description.clone(),
         };
-        ui::finish("Post-create setup complete")?;
-        return write_destination(&outcome.destination);
+        if !has_hooks {
+            let progress = ui::TimedProgress::start(true, "Creating worktree...").ok();
+            let mut observations = setup::Observations::captured();
+            let outcome =
+                worktree_plan::execute_planned(repository, &plan, &input, &mut observations);
+            drop(observations.finish());
+            let failure = outcome.failure_message().map(str::to_owned);
+            if let Some(progress) = progress {
+                if failure.is_some() {
+                    let _ = progress.fail("Failed to create worktree");
+                } else {
+                    let _ = progress.complete("Created worktree", ui::Completion::Outro);
+                }
+            }
+            if let Some(destination) = outcome.destination() {
+                write_destination(destination)?;
+            }
+            return failure.map_or(Ok(()), |message| Err(anyhow::anyhow!(message)));
+        }
+        let mut observations = setup::Observations::human();
+        let outcome = worktree_plan::execute_planned(repository, &plan, &input, &mut observations);
+        drop(observations.finish());
+        if let Some(message) = outcome.failure_message() {
+            if let Some(destination) = outcome.destination() {
+                write_destination(destination)?;
+            }
+            return Err(anyhow::anyhow!(message.to_owned()));
+        }
+        let _ = ui::finish("Post-create setup complete");
+        if let Some(destination) = outcome.destination() {
+            return write_destination(destination);
+        }
+        return Ok(());
     }
     let Source::Registered(worktree) = &plan.source else {
         unreachable!("creation plans execute before existing-worktree navigation")
@@ -1526,7 +1538,7 @@ fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&s
     let config = EffectiveConfig::load(repository)?;
     if config.post_create.is_empty() {
         incomplete
-            .advance(setup::Event::NoHooksConfigured)
+            .no_hooks_configured()
             .map_err(|failure| failure.error)?;
         return write_destination(&destination);
     }
@@ -1552,16 +1564,14 @@ fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&s
         }
         1 => {
             ui::warning("Entering once while setup remains incomplete.")?;
-            let transition = incomplete
-                .advance(setup::Event::EnterOnce)
-                .map_err(|failure| failure.error)?;
+            let transition = incomplete.enter_once();
             debug_assert_eq!(transition.entry, setup::EntryDisposition::Enter);
             write_destination(&destination)?;
             bail!("setup remains incomplete for {}", destination.display())
         }
         2 => {
             incomplete
-                .advance(setup::Event::MarkComplete)
+                .mark_complete()
                 .map_err(|failure| failure.error)?;
             ui::finish("Marked setup complete")?;
             write_destination(&destination)
@@ -1575,27 +1585,24 @@ fn finish_setup(
     incomplete: setup::IncompleteSetup<'_>,
     destination: &Path,
 ) -> Result<()> {
+    let mut observations = hook::Observations::human();
     let execution = hook::execute(
         HookPhase::PostCreate,
         &config.post_create,
         destination,
-        OutputPolicy::Streamed,
+        &mut observations,
     );
+    drop(observations.finish());
     let (attempt, outcome) = match execution {
-        Ok(execution) => {
-            debug_assert_eq!(execution.output, HookOutput::Streamed);
-            (
-                setup::Attempt::Finished(execution.outcome),
-                Some(execution.outcome),
-            )
-        }
-        Err(error) => (setup::Attempt::ExecutionFailed(error), None),
+        Ok(execution) => (Ok(execution.outcome), Some(execution.outcome)),
+        Err(error) => (Err(error), None),
     };
-    match incomplete.advance(setup::Event::RecoveryAttempt(attempt)) {
+    match incomplete.recovery_attempt(attempt) {
         Ok(_) => {
             // Creation was a mid-rail step so hook output could follow it; this
-            // is the sequence's single closing beat.
-            ui::finish("Post-create setup complete")?;
+            // is the sequence's single closing beat. Presentation cannot
+            // supersede the completed setup transition.
+            let _ = ui::finish("Post-create setup complete");
             write_destination(destination)
         }
         Err(failure) => {

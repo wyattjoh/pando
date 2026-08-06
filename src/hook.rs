@@ -1,9 +1,10 @@
 use std::{
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     os::unix::process::ExitStatusExt,
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
+    sync::mpsc::{self, SyncSender},
     thread,
 };
 
@@ -23,10 +24,77 @@ pub enum HookOutcome {
 
 pub(crate) const CAPTURE_LIMIT: usize = 16 * 1024;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Observation {
+    StepStarted {
+        phase: HookPhase,
+        label: String,
+        command: String,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum OutputPolicy {
-    Streamed,
+enum Delivery {
+    Human,
     Captured,
+}
+
+#[derive(Debug)]
+pub(crate) struct Observations {
+    delivery: Delivery,
+    events: Vec<Observation>,
+}
+
+impl Observations {
+    #[must_use]
+    pub(crate) const fn human() -> Self {
+        Self {
+            delivery: Delivery::Human,
+            events: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn captured() -> Self {
+        Self {
+            delivery: Delivery::Captured,
+            events: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_human(&self) -> bool {
+        matches!(self.delivery, Delivery::Human)
+    }
+
+    pub(crate) fn emit(&mut self, observation: Observation) {
+        if self.is_human() {
+            let _ = render_observation(&observation);
+        }
+        self.events.push(observation);
+    }
+
+    fn relay(&self) -> Option<fs::File> {
+        self.is_human()
+            .then(|| fs::OpenOptions::new().write(true).open("/dev/stderr").ok())
+            .flatten()
+    }
+
+    /// Completes infallible, presentation-only observation delivery.
+    #[must_use]
+    pub(crate) fn finish(self) -> Vec<Observation> {
+        self.events
+    }
+}
+
+fn render_observation(observation: &Observation) -> Result<()> {
+    match observation {
+        Observation::StepStarted {
+            phase,
+            label,
+            command,
+        } => ui::step(format!("Running {} {label}:\n{command}", phase.key())),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,86 +111,70 @@ pub(crate) struct CapturedStep {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum HookOutput {
-    Streamed,
-    Captured(Vec<CapturedStep>),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HookExecution {
     pub(crate) outcome: HookOutcome,
-    pub(crate) output: HookOutput,
+    pub(crate) output: Vec<CapturedStep>,
 }
 
-/// Runs an ordered hook phase from the destination under one closed output policy.
+/// Runs an ordered hook phase and records bounded output independently from
+/// how its in-flight observations are delivered.
 ///
 /// # Errors
-/// Returns an error when a command cannot start, stream output, or be awaited.
+/// Returns an error when a command cannot start, read output, or be awaited.
 pub(crate) fn execute(
     phase: HookPhase,
     steps: &[HookStep],
     destination: &Path,
-    policy: OutputPolicy,
+    observations: &mut Observations,
 ) -> Result<HookExecution> {
     let mut captured = Vec::new();
     for (index, step) in steps.iter().enumerate() {
         let label = step.label(index);
+        observations.emit(Observation::StepStarted {
+            phase,
+            label: label.clone(),
+            command: step.command.clone(),
+        });
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", &step.command]).current_dir(destination);
-
-        let (status, output) = match policy {
-            OutputPolicy::Streamed => {
-                ui::step(format!(
-                    "Running {} {label}:\n{}",
-                    phase.key(),
-                    step.command
-                ))?;
-                let hook_stdout = fs::OpenOptions::new()
-                    .write(true)
-                    .open("/dev/stderr")
-                    .with_context(|| format!("failed to open stderr for {} output", phase.key()))?;
-                let status = command
-                    .stdin(Stdio::inherit())
-                    .stdout(Stdio::from(hook_stdout))
-                    .stderr(Stdio::inherit())
-                    .status()
-                    .with_context(|| format!("failed to run {} {label}", phase.key()))?;
-                (status, None)
-            }
-            OutputPolicy::Captured => {
-                let mut child = command
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .with_context(|| format!("failed to run {} {label}", phase.key()))?;
-                let (status, output) = capture_child(&mut child)
-                    .with_context(|| format!("failed to capture {} {label}", phase.key()))?;
-                (status, Some(output))
-            }
-        };
-        if let Some(output) = output {
-            captured.push(output);
-        }
+        command
+            .args(["-c", &step.command])
+            .current_dir(destination)
+            .stdin(Stdio::inherit());
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to run {} {label}", phase.key()))?;
+        let (status, output) = capture_child(&mut child, observations.relay())
+            .with_context(|| format!("failed to capture {} {label}", phase.key()))?;
+        captured.push(output);
         let outcome = classify(status);
         if outcome != HookOutcome::Success {
             return Ok(HookExecution {
                 outcome,
-                output: output_for(policy, captured),
+                output: captured,
             });
         }
     }
     Ok(HookExecution {
         outcome: HookOutcome::Success,
-        output: output_for(policy, captured),
+        output: captured,
     })
 }
 
-fn capture_child(child: &mut Child) -> Result<(ExitStatus, CapturedStep)> {
+fn capture_child(child: &mut Child, relay: Option<fs::File>) -> Result<(ExitStatus, CapturedStep)> {
     let stdout = child.stdout.take().context("captured hook has no stdout")?;
     let stderr = child.stderr.take().context("captured hook has no stderr")?;
-    let stdout_reader = thread::spawn(move || capture_stream(stdout));
-    let stderr_reader = thread::spawn(move || capture_stream(stderr));
+    let (stdout_relay, stderr_relay, relay_writer) = relay.map_or_else(
+        || (None, None, None),
+        |output| {
+            let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(8);
+            let writer = thread::spawn(move || relay_output(output, &receiver));
+            (Some(sender.clone()), Some(sender), Some(writer))
+        },
+    );
+    let stdout_reader = thread::spawn(move || capture_stream(stdout, stdout_relay));
+    let stderr_reader = thread::spawn(move || capture_stream(stderr, stderr_relay));
     let status = child.wait().context("failed to await captured hook")?;
     let stdout = stdout_reader
         .join()
@@ -130,10 +182,30 @@ fn capture_child(child: &mut Child) -> Result<(ExitStatus, CapturedStep)> {
     let stderr = stderr_reader
         .join()
         .map_err(|_| anyhow::anyhow!("captured hook stderr reader panicked"))??;
+    if let Some(writer) = relay_writer {
+        let _ = writer.join();
+    }
     Ok((status, CapturedStep { stdout, stderr }))
 }
 
-fn capture_stream(mut stream: impl Read) -> io::Result<CapturedStream> {
+fn relay_output(mut output: fs::File, receiver: &mpsc::Receiver<Vec<u8>>) {
+    let mut writable = true;
+    while let Ok(bytes) = receiver.recv() {
+        if writable
+            && output
+                .write_all(&bytes)
+                .and_then(|()| output.flush())
+                .is_err()
+        {
+            writable = false;
+        }
+    }
+}
+
+fn capture_stream(
+    mut stream: impl Read,
+    mut relay: Option<SyncSender<Vec<u8>>>,
+) -> io::Result<CapturedStream> {
     let mut content = Vec::with_capacity(CAPTURE_LIMIT);
     let mut original_size = 0usize;
     let mut buffer = [0; 8192];
@@ -141,6 +213,12 @@ fn capture_stream(mut stream: impl Read) -> io::Result<CapturedStream> {
         let count = stream.read(&mut buffer)?;
         if count == 0 {
             break;
+        }
+        if relay
+            .as_ref()
+            .is_some_and(|output| output.send(buffer[..count].to_vec()).is_err())
+        {
+            relay = None;
         }
         original_size = original_size.saturating_add(count);
         let remaining = CAPTURE_LIMIT.saturating_sub(content.len());
@@ -166,13 +244,6 @@ fn classify(status: ExitStatus) -> HookOutcome {
     }
 }
 
-fn output_for(policy: OutputPolicy, captured: Vec<CapturedStep>) -> HookOutput {
-    match policy {
-        OutputPolicy::Streamed => HookOutput::Streamed,
-        OutputPolicy::Captured => HookOutput::Captured(captured),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,18 +258,17 @@ mod tests {
     #[test]
     fn captured_execution_bounds_and_attributes_each_stream() {
         let directory = tempfile::tempdir().unwrap();
+        let mut observations = Observations::captured();
         let execution = execute(
             HookPhase::PostCreate,
             &[step("printf %020000d 0; printf %020001d 0 >&2")],
             directory.path(),
-            OutputPolicy::Captured,
+            &mut observations,
         )
         .unwrap();
 
         assert_eq!(execution.outcome, HookOutcome::Success);
-        let HookOutput::Captured(steps) = execution.output else {
-            panic!("expected captured output");
-        };
+        let steps = execution.output;
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].stdout.content.len(), CAPTURE_LIMIT);
         assert_eq!(steps[0].stdout.original_size, 20_000);
@@ -212,6 +282,7 @@ mod tests {
     fn captured_execution_stops_after_first_failure() {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("later");
+        let mut observations = Observations::captured();
         let execution = execute(
             HookPhase::PreRemove,
             &[
@@ -219,35 +290,35 @@ mod tests {
                 step(&format!("touch {}", marker.display())),
             ],
             directory.path(),
-            OutputPolicy::Captured,
+            &mut observations,
         )
         .unwrap();
 
         assert_eq!(execution.outcome, HookOutcome::Failed(23));
         assert!(!marker.exists());
-        let HookOutput::Captured(steps) = execution.output else {
-            panic!("expected captured output");
-        };
+        let steps = execution.output;
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].stdout.content, b"out");
         assert_eq!(steps[0].stderr.content, b"err");
     }
 
     #[test]
-    fn captured_execution_disconnects_stdin_and_classifies_interruption() {
+    fn execution_classifies_eof_and_interruption() {
         let directory = tempfile::tempdir().unwrap();
+        let mut eof_observations = Observations::captured();
         let eof = execute(
             HookPhase::PostCreate,
-            &[step("if read value; then exit 9; fi")],
+            &[step("if read value </dev/null; then exit 9; fi")],
             directory.path(),
-            OutputPolicy::Captured,
+            &mut eof_observations,
         )
         .unwrap();
+        let mut interrupted_observations = Observations::captured();
         let interrupted = execute(
             HookPhase::PostCreate,
             &[step("kill -TERM $$")],
             directory.path(),
-            OutputPolicy::Captured,
+            &mut interrupted_observations,
         )
         .unwrap();
 
@@ -256,16 +327,46 @@ mod tests {
     }
 
     #[test]
+    fn human_delivery_and_captured_replay_preserve_the_execution_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let steps = [step("printf event-output; printf event-error >&2")];
+        let mut captured = Observations::captured();
+        let captured_execution = execute(
+            HookPhase::PostCreate,
+            &steps,
+            directory.path(),
+            &mut captured,
+        )
+        .unwrap();
+        let captured_events = captured.finish();
+
+        let mut human = Observations::human();
+        let human_execution =
+            execute(HookPhase::PostCreate, &steps, directory.path(), &mut human).unwrap();
+        let human_events = human.finish();
+
+        assert_eq!(human_execution, captured_execution);
+        assert_eq!(human_events, captured_events);
+
+        let mut replay = Observations::captured();
+        for event in &captured_events {
+            replay.emit(event.clone());
+        }
+        assert_eq!(replay.finish(), captured_events);
+    }
+
+    #[test]
     fn empty_phase_succeeds_without_requiring_a_valid_destination() {
+        let mut observations = Observations::captured();
         let execution = execute(
             HookPhase::PreMerge,
             &[],
             Path::new("/path/that/does/not/exist"),
-            OutputPolicy::Captured,
+            &mut observations,
         )
         .unwrap();
 
         assert_eq!(execution.outcome, HookOutcome::Success);
-        assert_eq!(execution.output, HookOutput::Captured(Vec::new()));
+        assert!(execution.output.is_empty());
     }
 }

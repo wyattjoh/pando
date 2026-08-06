@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{hash, hook::HookOutcome, trust};
+use crate::{hash, hook::HookOutcome, trust, ui};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -32,6 +32,61 @@ pub(crate) struct SetupTarget<'a> {
     pub(crate) branch: Option<&'a str>,
 }
 
+/// Non-authoritative setup observations available to terminal and captured adapters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Observation {
+    WorktreeCreated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Delivery {
+    Human,
+    Captured,
+}
+
+pub(crate) struct Observations {
+    delivery: Delivery,
+    events: Vec<Observation>,
+}
+
+impl Observations {
+    #[must_use]
+    pub(crate) const fn human() -> Self {
+        Self {
+            delivery: Delivery::Human,
+            events: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn captured() -> Self {
+        Self {
+            delivery: Delivery::Captured,
+            events: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_human(&self) -> bool {
+        matches!(self.delivery, Delivery::Human)
+    }
+
+    pub(crate) fn emit(&mut self, observation: Observation) {
+        if self.is_human() {
+            let _ = match observation {
+                Observation::WorktreeCreated => ui::step("Created worktree"),
+            };
+        }
+        self.events.push(observation);
+    }
+
+    /// Completes infallible, presentation-only observation delivery.
+    #[must_use]
+    pub(crate) fn finish(self) -> Vec<Observation> {
+        self.events
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PendingSetup<'a> {
     common_dir: &'a Path,
@@ -48,20 +103,6 @@ pub(crate) struct IncompleteSetup<'a> {
 pub(crate) enum Inspection<'a> {
     Complete(Transition),
     Incomplete(IncompleteSetup<'a>),
-}
-
-pub(crate) enum Attempt {
-    Finished(HookOutcome),
-    ExecutionFailed(anyhow::Error),
-}
-
-pub(crate) enum Event {
-    PostCreationFailed(anyhow::Error),
-    InitialAttempt(Attempt),
-    RecoveryAttempt(Attempt),
-    EnterOnce,
-    MarkComplete,
-    NoHooksConfigured,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -200,30 +241,46 @@ impl IncompleteSetup<'_> {
         }
     }
 
-    pub(crate) fn advance(
+    pub(crate) fn post_creation_failed(self, error: anyhow::Error) -> TransitionFailure {
+        drop(self.stable_path);
+        TransitionFailure::new(error, SetupState::Incomplete, EntryDisposition::Enter)
+    }
+
+    #[must_use]
+    pub(crate) fn enter_once(self) -> Transition {
+        drop(self.stable_path);
+        Transition::incomplete(EntryDisposition::Enter)
+    }
+
+    pub(crate) fn initial_attempt(
         self,
-        event: Event,
+        attempt: Result<HookOutcome>,
     ) -> std::result::Result<Transition, TransitionFailure> {
-        match event {
-            Event::PostCreationFailed(error) => Err(TransitionFailure::new(
-                error,
-                SetupState::Incomplete,
-                EntryDisposition::Enter,
-            )),
-            Event::EnterOnce => Ok(Transition::incomplete(EntryDisposition::Enter)),
-            Event::InitialAttempt(attempt) => self.attempt(attempt, true),
-            Event::RecoveryAttempt(attempt) => self.attempt(attempt, false),
-            Event::MarkComplete | Event::NoHooksConfigured => self.clear(EntryDisposition::Stay),
-        }
+        self.attempt(attempt, true)
+    }
+
+    pub(crate) fn recovery_attempt(
+        self,
+        attempt: Result<HookOutcome>,
+    ) -> std::result::Result<Transition, TransitionFailure> {
+        self.attempt(attempt, false)
+    }
+
+    pub(crate) fn mark_complete(self) -> std::result::Result<Transition, TransitionFailure> {
+        self.clear(EntryDisposition::Stay)
+    }
+
+    pub(crate) fn no_hooks_configured(self) -> std::result::Result<Transition, TransitionFailure> {
+        self.clear(EntryDisposition::Stay)
     }
 
     fn attempt(
         self,
-        attempt: Attempt,
+        attempt: Result<HookOutcome>,
         initial: bool,
     ) -> std::result::Result<Transition, TransitionFailure> {
         match attempt {
-            Attempt::ExecutionFailed(error) => Err(TransitionFailure::new(
+            Err(error) => Err(TransitionFailure::new(
                 error,
                 SetupState::Incomplete,
                 if initial {
@@ -232,19 +289,19 @@ impl IncompleteSetup<'_> {
                     EntryDisposition::Stay
                 },
             )),
-            Attempt::Finished(HookOutcome::Failed(status)) => Err(TransitionFailure::new(
+            Ok(HookOutcome::Failed(status)) => Err(TransitionFailure::new(
                 anyhow::anyhow!(
                     "post-create setup failed with status {status}; setup remains incomplete"
                 ),
                 SetupState::Incomplete,
                 EntryDisposition::Enter,
             )),
-            Attempt::Finished(HookOutcome::Interrupted) => Err(TransitionFailure::new(
+            Ok(HookOutcome::Interrupted) => Err(TransitionFailure::new(
                 anyhow::anyhow!("post-create setup was interrupted; setup remains incomplete"),
                 SetupState::Incomplete,
                 EntryDisposition::Stay,
             )),
-            Attempt::Finished(HookOutcome::Success) => self.clear(if initial {
+            Ok(HookOutcome::Success) => self.clear(if initial {
                 EntryDisposition::Enter
             } else {
                 EntryDisposition::Stay
@@ -494,6 +551,27 @@ mod tests {
     }
 
     #[test]
+    fn observation_delivery_and_replay_cannot_advance_setup_state() -> Result<()> {
+        let (_temp, lifecycle) = lifecycle()?;
+        drop(promote(&lifecycle)?);
+
+        let mut delivered = Observations::captured();
+        delivered.emit(Observation::WorktreeCreated);
+        let events = delivered.finish();
+        let mut replayed = Observations::captured();
+        for event in &events {
+            replayed.emit(*event);
+        }
+        assert_eq!(replayed.finish(), events);
+        drop(inspect_incomplete(&lifecycle)?);
+
+        inspect_incomplete(&lifecycle)?
+            .mark_complete()
+            .map_err(|failure| failure.error)?;
+        assert_complete(&lifecycle)
+    }
+
+    #[test]
     fn dropped_handles_retain_pending_and_stable_state() -> Result<()> {
         let (_temp, lifecycle) = lifecycle()?;
         drop(prepare(&lifecycle)?);
@@ -510,51 +588,33 @@ mod tests {
     #[test]
     fn post_creation_and_attempt_failures_preserve_state_with_expected_entry() -> Result<()> {
         let (_temp, lifecycle) = lifecycle()?;
-        let failure = promote(&lifecycle)?
-            .advance(Event::PostCreationFailed(anyhow::anyhow!("announce")))
-            .unwrap_err();
+        let failure = promote(&lifecycle)?.post_creation_failed(anyhow::anyhow!("announce"));
         assert_failure(&failure, SetupState::Incomplete, EntryDisposition::Enter);
 
         let cases = [
             (
                 true,
-                Attempt::ExecutionFailed(anyhow::anyhow!("initial io")),
+                Err(anyhow::anyhow!("initial io")),
                 EntryDisposition::Enter,
             ),
             (
                 false,
-                Attempt::ExecutionFailed(anyhow::anyhow!("recovery io")),
+                Err(anyhow::anyhow!("recovery io")),
                 EntryDisposition::Stay,
             ),
-            (
-                true,
-                Attempt::Finished(HookOutcome::Failed(7)),
-                EntryDisposition::Enter,
-            ),
-            (
-                false,
-                Attempt::Finished(HookOutcome::Failed(8)),
-                EntryDisposition::Enter,
-            ),
-            (
-                true,
-                Attempt::Finished(HookOutcome::Interrupted),
-                EntryDisposition::Stay,
-            ),
-            (
-                false,
-                Attempt::Finished(HookOutcome::Interrupted),
-                EntryDisposition::Stay,
-            ),
+            (true, Ok(HookOutcome::Failed(7)), EntryDisposition::Enter),
+            (false, Ok(HookOutcome::Failed(8)), EntryDisposition::Enter),
+            (true, Ok(HookOutcome::Interrupted), EntryDisposition::Stay),
+            (false, Ok(HookOutcome::Interrupted), EntryDisposition::Stay),
         ];
         for (initial, attempt, entry) in cases {
             let incomplete = inspect_incomplete(&lifecycle)?;
-            let event = if initial {
-                Event::InitialAttempt(attempt)
+            let failure = if initial {
+                incomplete.initial_attempt(attempt)
             } else {
-                Event::RecoveryAttempt(attempt)
-            };
-            let failure = incomplete.advance(event).unwrap_err();
+                incomplete.recovery_attempt(attempt)
+            }
+            .unwrap_err();
             assert_failure(&failure, SetupState::Incomplete, entry);
         }
         drop(inspect_incomplete(&lifecycle)?);
@@ -567,19 +627,16 @@ mod tests {
             let (_temp, lifecycle) = lifecycle()?;
             let incomplete = promote(&lifecycle)?;
             assert_eq!(
-                incomplete.advance(Event::EnterOnce).map_err(|f| f.error)?,
+                incomplete.enter_once(),
                 Transition::incomplete(EntryDisposition::Enter)
             );
             let incomplete = inspect_incomplete(&lifecycle)?;
-            let event = if initial {
-                Event::InitialAttempt(Attempt::Finished(HookOutcome::Success))
+            let transition = if initial {
+                incomplete.initial_attempt(Ok(HookOutcome::Success))
             } else {
-                Event::RecoveryAttempt(Attempt::Finished(HookOutcome::Success))
+                incomplete.recovery_attempt(Ok(HookOutcome::Success))
             };
-            assert_eq!(
-                incomplete.advance(event).map_err(|f| f.error)?,
-                Transition::complete()
-            );
+            assert_eq!(transition.map_err(|f| f.error)?, Transition::complete());
             assert_complete(&lifecycle)?;
             assert_complete(&lifecycle)?;
         }
@@ -596,33 +653,41 @@ mod tests {
             let incomplete = promote(&lifecycle)?;
             fs::remove_file(&incomplete.stable_path)?;
             fs::create_dir(&incomplete.stable_path)?;
-            let event = if initial {
-                Event::InitialAttempt(Attempt::Finished(HookOutcome::Success))
+            let failure = if initial {
+                incomplete.initial_attempt(Ok(HookOutcome::Success))
             } else {
-                Event::RecoveryAttempt(Attempt::Finished(HookOutcome::Success))
-            };
-            let failure = incomplete.advance(event).unwrap_err();
+                incomplete.recovery_attempt(Ok(HookOutcome::Success))
+            }
+            .unwrap_err();
             assert_failure(&failure, SetupState::Incomplete, entry);
         }
         Ok(())
     }
 
     #[test]
-    fn administrative_completion_events_clear_or_stay_on_failure() -> Result<()> {
-        for event in [Event::MarkComplete, Event::NoHooksConfigured] {
+    fn administrative_completion_commands_clear_or_stay_on_failure() -> Result<()> {
+        for mark_complete in [true, false] {
             let (_temp, lifecycle) = lifecycle()?;
-            assert_eq!(
-                promote(&lifecycle)?.advance(event).map_err(|f| f.error)?,
-                Transition::complete()
-            );
+            let incomplete = promote(&lifecycle)?;
+            let transition = if mark_complete {
+                incomplete.mark_complete()
+            } else {
+                incomplete.no_hooks_configured()
+            };
+            assert_eq!(transition.map_err(|f| f.error)?, Transition::complete());
             assert_complete(&lifecycle)?;
         }
-        for event in [Event::MarkComplete, Event::NoHooksConfigured] {
+        for mark_complete in [true, false] {
             let (_temp, lifecycle) = lifecycle()?;
             let incomplete = promote(&lifecycle)?;
             fs::remove_file(&incomplete.stable_path)?;
             fs::create_dir(&incomplete.stable_path)?;
-            let failure = incomplete.advance(event).unwrap_err();
+            let failure = if mark_complete {
+                incomplete.mark_complete()
+            } else {
+                incomplete.no_hooks_configured()
+            }
+            .unwrap_err();
             assert_failure(&failure, SetupState::Incomplete, EntryDisposition::Stay);
         }
         Ok(())
@@ -634,7 +699,7 @@ mod tests {
         let incomplete = promote(&lifecycle)?;
         let pending = incomplete.pending_path.clone().expect("pending path");
         fs::create_dir_all(&pending)?;
-        let failure = incomplete.advance(Event::MarkComplete).unwrap_err();
+        let failure = incomplete.mark_complete().unwrap_err();
         assert_failure(&failure, SetupState::Incomplete, EntryDisposition::Stay);
         assert!(!marker_path(lifecycle.common_dir, Path::new(IDENTITY)).exists());
 
@@ -648,7 +713,7 @@ mod tests {
         )?;
         let retry = inspect_incomplete(&lifecycle)?;
         assert_eq!(
-            retry.advance(Event::MarkComplete).map_err(|f| f.error)?,
+            retry.mark_complete().map_err(|f| f.error)?,
             Transition::complete()
         );
         assert_complete(&lifecycle)
