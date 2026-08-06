@@ -264,7 +264,7 @@ fn run_human(invocation: &Invocation, source: &MessageSource) -> Result<()> {
     ensure_staged(&repository)?;
     preview_staged(&repository.current().path)?;
     let message = resolve_message_human(&repository, source, config.as_ref())?;
-    ui::step("Creating commit")?;
+    ui::step_before_stream("Creating commit")?;
     LifecycleMutation::new(&repository.current().path).commit(&message.value)?;
     ui::step(ui::success_style().apply_to("Created commit"))?;
     let hash = git::HistoryObservation::new(&repository.current().path).head_commit()?;

@@ -7068,6 +7068,8 @@ fn commit_streams_pre_commit_hook_output_on_stderr() {
     let hook = plain_stderr.find("pre-commit stdout").unwrap();
     let created = plain_stderr.find("Created commit").unwrap();
     assert!(creating < hook && hook < created, "{}", output.stderr);
+    let separator = plain_stderr[creating + "Creating commit".len()..hook].replace("\r\n", "\n");
+    assert_eq!(separator, "\n", "{}", output.stderr);
 }
 
 #[test]

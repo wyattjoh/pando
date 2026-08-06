@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     fmt::{self, Display},
-    io::{self, IsTerminal},
+    io::{self, IsTerminal, Write},
     sync::atomic::{AtomicBool, Ordering},
     time::Instant,
 };
@@ -440,6 +440,25 @@ pub fn error(message: impl Display) -> Result<()> {
 pub fn step(message: impl Display) -> Result<()> {
     open_sequence();
     log::step(message).context("failed to write terminal message")
+}
+
+/// Writes a completed step immediately before inherited subprocess output.
+///
+/// Unlike a regular Cliclack log, this omits the trailing rail spacer so the
+/// subprocess output starts on the next line without an empty framed line.
+///
+/// # Errors
+///
+/// Returns an error when the terminal cannot be written.
+pub fn step_before_stream(message: impl Display) -> Result<()> {
+    open_sequence();
+    let theme = PandoTheme;
+    let rendered =
+        theme.format_log_with_spacing(&message.to_string(), &theme.submit_symbol(), false);
+    io::stderr()
+        .lock()
+        .write_all(rendered.as_bytes())
+        .context("failed to write terminal message")
 }
 
 /// Writes a terminal UI outro.
