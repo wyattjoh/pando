@@ -4201,6 +4201,31 @@ fn install_guides_configuration_with_a_detected_agent_and_persists_its_command()
 }
 
 #[test]
+fn install_keeps_the_persisted_command_when_the_agent_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let zdot = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let agent = bin.path().join("pi");
+    fs::write(&agent, "#!/bin/sh\nexit 7\n").unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut command = guided_install_command(home.path(), xdg.path(), Some(zdot.path()));
+    command.env("PATH", bin.path());
+    let output = run_pty_command(command, b"y\r\r\r\r");
+
+    assert!(!output.status.success());
+    assert!(
+        output.stderr.contains("guided configuration agent failed"),
+        "{}",
+        output.stderr
+    );
+    assert!(xdg.path().join("pando/pando.zsh").is_file());
+    let config = fs::read_to_string(xdg.path().join("pando/config.yaml")).unwrap();
+    assert!(config.contains("install:\n  command: pi"), "{config}");
+}
+
+#[test]
 fn install_preserves_an_existing_unmarked_agent_command_without_duplicate_yaml() {
     let home = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();

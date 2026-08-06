@@ -605,7 +605,18 @@ pub fn run(guided: bool) -> Result<()> {
     }
 
     if guided {
-        return run_guided_configuration(&plan.config_path);
+        let outcome = run_guided_configuration(&plan.config_path)?;
+        return match outcome.completion {
+            AgentCompletion::Completed => {
+                debug_assert!(outcome.command_persistence.persisted);
+                ui::success("Guided configuration session completed.")?;
+                ui::finish(
+                    ui::success_style().apply_to("Pando installation and configuration complete."),
+                )
+            }
+            AgentCompletion::Interrupted => bail!("guided configuration agent was interrupted"),
+            AgentCompletion::Failed(message) => bail!(message),
+        };
     }
 
     let completion = if shell_changed {
@@ -713,9 +724,76 @@ struct AgentChoice {
     command: String,
 }
 
-fn run_guided_configuration(config_path: &Path) -> Result<()> {
+struct GuidanceSelection {
+    command: String,
+    config_observation: TargetObservation,
+    saved_command: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct CommandPersistence {
+    changed: bool,
+    persisted: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum AgentCompletion {
+    Completed,
+    Interrupted,
+    Failed(String),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct GuidanceOutcome {
+    command_persistence: CommandPersistence,
+    completion: AgentCompletion,
+}
+
+fn run_guided_configuration(config_path: &Path) -> Result<GuidanceOutcome> {
+    let selection = select_guidance(config_path)?;
+    let command_write = propose_install_command(config_path, selection)?;
+
+    let confirmed = ui::prompt_result(
+        confirm("Save this command and start guided configuration?")
+            .initial_value(true)
+            .interact(),
+        "guided configuration cancelled",
+        "failed to read guided configuration confirmation",
+    )?;
+    if !confirmed {
+        return Err(ui::declined_noop(
+            "Guided configuration declined; the agent command was not saved.",
+            "Zsh integration installed without guided configuration.",
+        ));
+    }
+
+    let command = command_write.command.clone();
+    let command_persistence = persist_proposed_command(command_write)?;
+    ui::step(format!(
+        "saved guided installer command in {}",
+        ui::worktree_data_style().apply_to(config_path.display())
+    ))?;
+
+    let cwd = env::current_dir().context("failed to resolve the guided session directory")?;
+    let prompt = guided_prompt(config_path, &cwd, &command);
+    ui::info(format!(
+        "Launching {} for guided configuration...",
+        ui::worktree_data_style().apply_to(&command)
+    ))?;
+    let completion = run_agent(&command, &prompt, &cwd);
+    Ok(GuidanceOutcome {
+        command_persistence,
+        completion,
+    })
+}
+
+fn select_guidance(config_path: &Path) -> Result<GuidanceSelection> {
     ui::ensure_interactive("guided Pando configuration requires an interactive terminal")?;
+    let config_observation = observe_target(config_path)?;
     let saved_command = config::load_install_command(config_path)?;
+    if !observation_matches(config_path, &config_observation)? {
+        bail!("global configuration changed while preparing guided configuration");
+    }
     let choices = agent_choices(saved_command.as_deref());
     let mut selector = select("Choose your connected LLM agent")
         .initial_value(0)
@@ -740,42 +818,59 @@ fn run_guided_configuration(config_path: &Path) -> Result<()> {
         "agent command entry cancelled",
         "failed to read the agent command",
     )?;
-    let command = command.trim().to_owned();
+    Ok(GuidanceSelection {
+        command: command.trim().to_owned(),
+        config_observation,
+        saved_command,
+    })
+}
 
-    let confirmed = ui::prompt_result(
-        confirm("Save this command and start guided configuration?")
-            .initial_value(true)
-            .interact(),
-        "guided configuration cancelled",
-        "failed to read guided configuration confirmation",
+struct CommandWrite {
+    command: String,
+    write: Option<ProposedWrite>,
+}
+
+fn propose_install_command(
+    config_path: &Path,
+    selection: GuidanceSelection,
+) -> Result<CommandWrite> {
+    let desired = persist_install_command(
+        selection.config_observation.content(),
+        selection.saved_command.as_deref(),
+        &selection.command,
     )?;
-    if !confirmed {
-        return Err(ui::declined_noop(
-            "Guided configuration declined; the agent command was not saved.",
-            "Zsh integration installed without guided configuration.",
-        ));
-    }
+    let write = (selection.config_observation.content() != desired).then(|| ProposedWrite {
+        role: "guided command",
+        path: config_path.to_path_buf(),
+        desired,
+        observed: selection.config_observation,
+        verb: "update",
+    });
+    Ok(CommandWrite {
+        command: selection.command,
+        write,
+    })
+}
 
-    let existing = read_optional(config_path)?;
-    let desired = persist_install_command(&existing, saved_command.as_deref(), &command)?;
-    if existing != desired {
-        write_atomic(config_path, &desired)
-            .with_context(|| format!("failed to update {}", config_path.display()))?;
+fn persist_proposed_command(proposal: CommandWrite) -> Result<CommandPersistence> {
+    let Some(write) = proposal.write else {
+        return Ok(CommandPersistence {
+            changed: false,
+            persisted: true,
+        });
+    };
+    if !observation_matches(&write.path, &write.observed)? {
+        bail!(
+            "refusing to update {} because it changed after confirmation",
+            write.path.display()
+        );
     }
-    ui::step(format!(
-        "saved guided installer command in {}",
-        ui::worktree_data_style().apply_to(config_path.display())
-    ))?;
-
-    let cwd = env::current_dir().context("failed to resolve the guided session directory")?;
-    let prompt = guided_prompt(config_path, &cwd, &command);
-    ui::info(format!(
-        "Launching {} for guided configuration...",
-        ui::worktree_data_style().apply_to(&command)
-    ))?;
-    run_agent(&command, &prompt, &cwd)?;
-    ui::success("Guided configuration session completed.")?;
-    ui::finish(ui::success_style().apply_to("Pando installation and configuration complete."))
+    write_observed_target(&write.path, &write.observed, &write.desired)
+        .with_context(|| format!("failed to update {}", write.path.display()))?;
+    Ok(CommandPersistence {
+        changed: true,
+        persisted: true,
+    })
 }
 
 fn agent_choices(saved_command: Option<&str>) -> Vec<AgentChoice> {
@@ -842,30 +937,44 @@ and finish by summarizing what you changed and any commands the user still needs
     )
 }
 
-fn run_agent(command: &str, prompt: &str, cwd: &Path) -> Result<()> {
-    let agent_stdout = OpenOptions::new()
-        .write(true)
-        .open("/dev/stderr")
-        .context("failed to open stderr for the guided agent")?;
-    let invocation = agent_invocation(command, prompt)?;
+fn run_agent(command: &str, prompt: &str, cwd: &Path) -> AgentCompletion {
+    let agent_stdout = match OpenOptions::new().write(true).open("/dev/stderr") {
+        Ok(stream) => stream,
+        Err(error) => {
+            return AgentCompletion::Failed(format!(
+                "failed to open stderr for the guided agent: {error}"
+            ));
+        }
+    };
+    let invocation = match agent_invocation(command, prompt) {
+        Ok(invocation) => invocation,
+        Err(error) => return AgentCompletion::Failed(error.to_string()),
+    };
     let status = Command::new("/bin/sh")
         .args(["-c", &invocation])
         .current_dir(cwd)
         .stdin(Stdio::inherit())
         .stdout(Stdio::from(agent_stdout))
         .stderr(Stdio::inherit())
-        .status()
-        .context("failed to start the guided configuration agent")?;
+        .status();
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            return AgentCompletion::Failed(format!(
+                "failed to start the guided configuration agent: {error}"
+            ));
+        }
+    };
     if status.success() {
-        return Ok(());
+        return AgentCompletion::Completed;
     }
     if status
         .signal()
         .is_some_and(|signal| matches!(signal, 2 | 3 | 15))
     {
-        bail!("guided configuration agent was interrupted");
+        return AgentCompletion::Interrupted;
     }
-    bail!("guided configuration agent failed with {status}")
+    AgentCompletion::Failed(format!("guided configuration agent failed with {status}"))
 }
 
 fn validate_agent_command(command: &str) -> Result<()> {
@@ -1014,16 +1123,6 @@ fn nonempty_var(name: &str) -> Option<std::ffi::OsString> {
     env::var_os(name).filter(|value| !value.is_empty())
 }
 
-fn read_optional(path: &Path) -> Result<Vec<u8>> {
-    match fs::read(path) {
-        Ok(content) => Ok(content),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => {
-            Err(error).with_context(|| format!("failed to read existing file {}", path.display()))
-        }
-    }
-}
-
 fn update_config_scaffold(existing: &[u8]) -> Result<Vec<u8>> {
     let mut output = Vec::with_capacity(existing.len() + CONFIG_SCAFFOLD.len() + 1);
     let mut remaining = existing;
@@ -1132,20 +1231,6 @@ fn write_observed_target(path: &Path, observed: &TargetObservation, content: &[u
     write_atomic_file(destination, content)
 }
 
-fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
-    let destination = match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(path)
-            .with_context(|| format!("refusing to replace broken symlink {}", path.display()))?,
-        Ok(_) => path.to_path_buf(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to inspect destination {}", path.display()));
-        }
-    };
-    write_atomic_file(&destination, content)
-}
-
 fn write_atomic_file(path: &Path, content: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -1193,11 +1278,11 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
     use super::{
-        CONFIG_END_MARKER, CONFIG_START_MARKER, END_MARKER, INSTALL_END_MARKER,
+        CONFIG_END_MARKER, CONFIG_START_MARKER, CommandWrite, END_MARKER, INSTALL_END_MARKER,
         INSTALL_START_MARKER, InstallApproval, InstallPlan, InstallProposal, InstallTarget,
         ProposedWrite, START_MARKER, agent_invocation, execute, observe_target,
-        persist_install_command, update_config_scaffold, update_install_command,
-        update_source_block,
+        persist_install_command, persist_proposed_command, update_config_scaffold,
+        update_install_command, update_source_block,
     };
     use crate::protocol::BytePath;
 
@@ -1246,6 +1331,41 @@ mod tests {
                 .to_string()
                 .contains("outside Pando's managed block")
         );
+    }
+
+    #[test]
+    fn command_persistence_rejects_a_concurrently_changed_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.yaml");
+        fs::write(&path, b"worktrees:\n  root: old\n").unwrap();
+        let proposal = CommandWrite {
+            command: "pi".into(),
+            write: Some(ProposedWrite {
+                role: "guided command",
+                path: path.clone(),
+                desired: b"desired".to_vec(),
+                observed: observe_target(&path).unwrap(),
+                verb: "update",
+            }),
+        };
+        fs::write(&path, b"worktrees:\n  root: concurrent\n").unwrap();
+
+        let error = persist_proposed_command(proposal).unwrap_err();
+
+        assert!(error.to_string().contains("changed after confirmation"));
+        assert_eq!(fs::read(path).unwrap(), b"worktrees:\n  root: concurrent\n");
+    }
+
+    #[test]
+    fn command_persistence_records_an_internal_outcome_for_a_noop() {
+        let outcome = persist_proposed_command(CommandWrite {
+            command: "pi".into(),
+            write: None,
+        })
+        .unwrap();
+
+        assert!(!outcome.changed);
+        assert!(outcome.persisted);
     }
 
     #[test]
