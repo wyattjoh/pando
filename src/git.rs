@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     ffi::{OsStr, OsString},
     fs,
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Output, Stdio},
@@ -31,6 +31,50 @@ struct PipedContexts {
     write_input: &'static str,
     writer_panicked: &'static str,
     await_output: &'static str,
+}
+
+struct RelayResult {
+    rows: usize,
+    ends_with_newline: bool,
+    writable: bool,
+}
+
+struct TerminalLayout {
+    width: usize,
+    rows: usize,
+    line: Vec<u8>,
+    ends_with_newline: bool,
+}
+
+impl TerminalLayout {
+    fn new(width: usize) -> Self {
+        Self {
+            width: width.max(1),
+            rows: 0,
+            line: Vec::new(),
+            ends_with_newline: false,
+        }
+    }
+
+    fn observe(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if byte == b'\n' {
+                self.rows += terminal_rows_for_line(&self.line, self.width);
+                self.line.clear();
+                self.ends_with_newline = true;
+            } else {
+                self.line.push(byte);
+                self.ends_with_newline = false;
+            }
+        }
+    }
+
+    fn finish(mut self) -> (usize, bool) {
+        if !self.line.is_empty() {
+            self.rows += terminal_rows_for_line(&self.line, self.width);
+        }
+        (self.rows, self.ends_with_newline)
+    }
 }
 
 impl GitProcess {
@@ -79,7 +123,17 @@ impl GitProcess {
         self.command.stdin(Stdio::inherit()).output()
     }
 
-    fn streamed(mut self) -> Result<Output> {
+    fn streamed(self) -> Result<Output> {
+        self.streamed_with_cleanup(false)
+    }
+
+    /// Streams Git and hook output while the command runs, then clears the
+    /// transcript from an interactive terminal only after success.
+    fn streamed_ephemeral(self) -> Result<Output> {
+        self.streamed_with_cleanup(io::stderr().is_terminal())
+    }
+
+    fn streamed_with_cleanup(mut self, clear_on_success: bool) -> Result<Output> {
         let _span = debug::Span::new(self.diagnostic_label);
         let mut child = self
             .command
@@ -89,11 +143,14 @@ impl GitProcess {
             .spawn()?;
         let stdout = child.stdout.take().context("streamed Git has no stdout")?;
         let stderr = child.stderr.take().context("streamed Git has no stderr")?;
+        let terminal_width =
+            clear_on_success.then(|| usize::from(console::Term::stderr().size().1).max(1));
         let (stdout_relay, stderr_relay, relay_writer) = open_stderr().ok().map_or_else(
             || (None, None, None),
             |output| {
                 let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(8);
-                let writer = thread::spawn(move || relay_git_output(output, &receiver));
+                let writer =
+                    thread::spawn(move || relay_git_output(output, &receiver, terminal_width));
                 (Some(sender.clone()), Some(sender), Some(writer))
             },
         );
@@ -106,14 +163,19 @@ impl GitProcess {
         let stderr = stderr_reader
             .join()
             .map_err(|_| anyhow!("streamed Git stderr reader panicked"))??;
-        if let Some(writer) = relay_writer {
-            let _ = writer.join();
-        }
-        Ok(Output {
+        let relay = relay_writer.and_then(|writer| writer.join().ok());
+        let output = Output {
             status,
             stdout,
             stderr,
-        })
+        };
+        if clear_on_success
+            && output.status.success()
+            && let Some(relay) = relay
+        {
+            clear_relayed_output(&relay);
+        }
+        Ok(output)
     }
 
     fn piped(mut self, input: Vec<u8>, contexts: &PipedContexts) -> Result<Output> {
@@ -1633,7 +1695,7 @@ fn recent_subjects_observed(cwd: &Path) -> Result<Vec<String>> {
 /// Returns an error when Git cannot create the commit.
 fn commit_impl(cwd: &Path, message: &str) -> Result<()> {
     let output = GitProcess::new(cwd, ["commit", "-m", message])
-        .streamed()
+        .streamed_ephemeral()
         .context("failed to start git commit")?;
     if output.status.success() {
         Ok(())
@@ -1747,9 +1809,17 @@ fn open_stderr() -> Result<fs::File> {
         .map_err(Into::into)
 }
 
-fn relay_git_output(mut output: fs::File, receiver: &mpsc::Receiver<Vec<u8>>) {
+fn relay_git_output(
+    mut output: fs::File,
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    terminal_width: Option<usize>,
+) -> RelayResult {
     let mut writable = true;
+    let mut layout = terminal_width.map(TerminalLayout::new);
     while let Ok(bytes) = receiver.recv() {
+        if let Some(layout) = layout.as_mut() {
+            layout.observe(&bytes);
+        }
         if writable
             && output
                 .write_all(&bytes)
@@ -1759,6 +1829,43 @@ fn relay_git_output(mut output: fs::File, receiver: &mpsc::Receiver<Vec<u8>>) {
             writable = false;
         }
     }
+    let (rows, ends_with_newline) = layout.map_or((0, false), TerminalLayout::finish);
+    RelayResult {
+        rows,
+        ends_with_newline,
+        writable,
+    }
+}
+
+fn clear_relayed_output(relay: &RelayResult) {
+    if !relay.writable || relay.rows == 0 {
+        return;
+    }
+    let terminal = console::Term::stderr();
+    if relay.ends_with_newline {
+        let _ = terminal.clear_last_lines(relay.rows);
+    } else if terminal.clear_line().is_ok() {
+        let _ = terminal.clear_last_lines(relay.rows.saturating_sub(1));
+    }
+}
+
+fn terminal_rows_for_line(line: &[u8], width: usize) -> usize {
+    if line.is_empty() {
+        return 1;
+    }
+    let mut rows = 1usize;
+    let mut column = 0usize;
+    for segment in line.split(|byte| *byte == b'\r') {
+        let text = String::from_utf8_lossy(segment);
+        let segment_width = console::measure_text_width(&text);
+        if segment_width == 0 {
+            continue;
+        }
+        let occupied = column.saturating_add(segment_width);
+        rows = rows.max(occupied.saturating_add(width - 1) / width);
+        column = occupied % width;
+    }
+    rows
 }
 
 fn capture_git_stream(
@@ -1991,11 +2098,22 @@ mod tests {
     use std::{collections::BTreeSet, os::unix::ffi::OsStrExt};
 
     use super::{
-        parse_branch_refs, parse_commit_batch, parse_committer_timestamp,
+        TerminalLayout, parse_branch_refs, parse_commit_batch, parse_committer_timestamp,
         parse_completion_branch_names, parse_porcelain, parse_remote_branch_refs,
-        parse_status_porcelain,
+        parse_status_porcelain, terminal_rows_for_line,
     };
     use crate::WorktreeKind;
+
+    #[test]
+    fn terminal_layout_counts_wrapping_and_carriage_returns() {
+        assert_eq!(terminal_rows_for_line(b"1234", 4), 1);
+        assert_eq!(terminal_rows_for_line(b"12345", 4), 2);
+        assert_eq!(terminal_rows_for_line(b"1234\r1", 4), 1);
+
+        let mut layout = TerminalLayout::new(4);
+        layout.observe(b"12345\n12\r34");
+        assert_eq!(layout.finish(), (3, false));
+    }
 
     #[test]
     fn parses_nul_delimited_branch_refs() {

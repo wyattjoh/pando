@@ -7166,7 +7166,7 @@ fn commit_with_explicit_message_stages_all_change_kinds() {
 }
 
 #[test]
-fn commit_streams_pre_commit_hook_output_on_stderr() {
+fn commit_streams_and_clears_successful_pre_commit_hook_output() {
     let repo = Repository::new();
     let hook = repo.main.join(".git/hooks/pre-commit");
     fs::write(
@@ -7180,7 +7180,8 @@ fn commit_streams_pre_commit_hook_output_on_stderr() {
     let mut command = Command::cargo_bin("pando").unwrap();
     command
         .args(["commit", "--stage-all", "-m", "test: stream hook output"])
-        .current_dir(&repo.main);
+        .current_dir(&repo.main)
+        .env("CLICOLOR_FORCE", "1");
     let window = Winsize {
         ws_row: 24,
         ws_col: 600,
@@ -7246,6 +7247,50 @@ fn commit_streams_pre_commit_hook_output_on_stderr() {
     assert!(creating < hook && hook < created, "{}", output.stderr);
     let separator = plain_stderr[creating + "Creating commit".len()..hook].replace("\r\n", "\n");
     assert_eq!(separator, "\n", "{}", output.stderr);
+    assert!(
+        output
+            .stderr
+            .contains(&forced_style(pando::ui::heading_style(), "Creating commit")),
+        "Creating commit should use the shared heading color: {}",
+        output.stderr
+    );
+    let finished = output.stderr.find("pre-commit finished").unwrap();
+    let created_raw = output.stderr.find("Created commit").unwrap();
+    assert!(
+        output.stderr[finished..created_raw].contains("\x1b[2K"),
+        "successful hook output should be cleared before commit completion: {}",
+        output.stderr
+    );
+}
+
+#[test]
+fn commit_keeps_pre_commit_hook_output_when_hook_fails() {
+    let repo = Repository::new();
+    let hook = repo.main.join(".git/hooks/pre-commit");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nprintf 'pre-commit failed stdout\\n'\nprintf 'pre-commit failed stderr\\n' >&2\nexit 23\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(repo.main.join("README.md"), "updated\n").unwrap();
+
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["commit", "--stage-all", "-m", "test: failed hook output"])
+        .current_dir(&repo.main)
+        .env("CLICOLOR_FORCE", "1");
+    let output = run_terminal_command(command);
+
+    assert!(!output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    let failed = output.stderr.find("pre-commit failed stdout").unwrap();
+    assert!(output.stderr.contains("pre-commit failed stderr"));
+    assert!(
+        !output.stderr[failed..].contains("\x1b[2K"),
+        "failed hook output should remain visible: {}",
+        output.stderr
+    );
 }
 
 #[test]
