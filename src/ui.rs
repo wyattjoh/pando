@@ -286,6 +286,21 @@ impl TimedProgress {
         })
     }
 
+    /// Starts a timed observation immediately before inherited subprocess output.
+    ///
+    /// This uses a static step instead of a spinner so streamed output cannot
+    /// corrupt an animated indicator.
+    ///
+    /// # Errors
+    /// Returns an error when the starting line cannot be rendered.
+    pub(crate) fn start_before_stream(starting: &str) -> Result<Self> {
+        step_before_stream(heading_style().apply_to(starting))?;
+        Ok(Self {
+            started: Instant::now(),
+            progress: None,
+        })
+    }
+
     #[must_use]
     pub(crate) const fn animated(&self) -> bool {
         self.progress.is_some()

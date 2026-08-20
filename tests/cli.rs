@@ -6896,6 +6896,19 @@ fn forced_style(style: console::Style, value: impl std::fmt::Display) -> String 
     style.force_styling(true).apply_to(value).to_string()
 }
 
+fn elapsed_seconds_after(stderr: &str, label: &str) -> Option<u64> {
+    let plain = console::strip_ansi_codes(stderr);
+    plain.lines().find_map(|line| {
+        let start = line.find(label)?;
+        line[start + label.len()..]
+            .split_whitespace()
+            .next()?
+            .strip_suffix('s')?
+            .parse()
+            .ok()
+    })
+}
+
 fn contains_sgr(value: &str) -> bool {
     let bytes = value.as_bytes();
     (0..bytes.len().saturating_sub(2)).any(|start| {
@@ -7133,7 +7146,11 @@ fn commit_with_explicit_message_stages_all_change_kinds() {
     );
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Created commit"), "{stderr}");
+    assert!(stderr.contains("Running pre-commit hooks"), "{stderr}");
+    assert!(
+        elapsed_seconds_after(&stderr, "Created commit").is_some(),
+        "commit completion omitted its duration: {stderr}"
+    );
     assert!(stderr.contains("feat: commit every change"), "{stderr}");
     assert!(stderr.contains("Staged changes:"), "{stderr}");
     assert!(stderr.contains("README.md"), "{stderr}");
@@ -7241,17 +7258,24 @@ fn commit_streams_and_clears_successful_pre_commit_hook_output() {
         output.stderr
     );
     let plain_stderr = console::strip_ansi_codes(&output.stderr);
-    let creating = plain_stderr.find("Creating commit").unwrap();
+    let running = plain_stderr.find("Running pre-commit hooks").unwrap();
     let hook = plain_stderr.find("pre-commit stdout").unwrap();
     let created = plain_stderr.find("Created commit").unwrap();
-    assert!(creating < hook && hook < created, "{}", output.stderr);
-    let separator = plain_stderr[creating + "Creating commit".len()..hook].replace("\r\n", "\n");
+    assert!(running < hook && hook < created, "{}", output.stderr);
+    let separator =
+        plain_stderr[running + "Running pre-commit hooks".len()..hook].replace("\r\n", "\n");
     assert_eq!(separator, "\n", "{}", output.stderr);
     assert!(
-        output
-            .stderr
-            .contains(&forced_style(pando::ui::heading_style(), "Creating commit")),
-        "Creating commit should use the shared heading color: {}",
+        output.stderr.contains(&forced_style(
+            pando::ui::heading_style(),
+            "Running pre-commit hooks"
+        )),
+        "Running pre-commit hooks should use the shared heading color: {}",
+        output.stderr
+    );
+    assert!(
+        elapsed_seconds_after(&output.stderr, "Created commit").is_some_and(|seconds| seconds >= 2),
+        "commit completion did not report hook duration: {}",
         output.stderr
     );
     let finished = output.stderr.find("pre-commit finished").unwrap();
