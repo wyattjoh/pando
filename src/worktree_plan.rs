@@ -32,14 +32,24 @@ pub(crate) const SWITCH_ERRORS: &[&str] = &[
     "json.invalid_request",
     "json.unsupported_schema_version",
     "repository.invalid",
+    "repository.primary_unavailable",
+    "repository.root_unavailable",
     "switch.selection_required",
     "switch.invalid_branch",
-    "switch.destination_unavailable",
-    "switch.destination_collision",
-    "switch.remote_selection_required",
+    "switch.config_invalid",
     "switch.fetch_not_applicable",
     "switch.base_unavailable",
+    "switch.destination_unavailable",
+    "switch.destination_invalid",
+    "switch.destination_collision",
+    "switch.irrelevant_remote",
+    "switch.unknown_remote",
+    "switch.remote_selection_required",
     "switch.approval_required",
+    "switch.plan_stale",
+    "switch.creation_failed",
+    "switch.setup_failed",
+    "switch.setup_incomplete",
     "trust.approval_required",
 ];
 
@@ -48,14 +58,21 @@ pub(crate) const CREATE_ERRORS: &[&str] = &[
     "json.invalid_request",
     "json.unsupported_schema_version",
     "repository.invalid",
+    "repository.primary_unavailable",
+    "repository.root_unavailable",
     "create.branch_required",
     "create.invalid_branch",
     "create.branch_registered",
-    "create.destination_unavailable",
-    "create.destination_collision",
-    "create.remote_selection_required",
+    "create.config_invalid",
     "create.fetch_not_applicable",
     "create.base_unavailable",
+    "create.destination_unavailable",
+    "create.destination_invalid",
+    "create.destination_collision",
+    "create.irrelevant_remote",
+    "create.unknown_remote",
+    "create.remote_selection_required",
+    "create.plan_stale",
     "create.creation_failed",
     "create.description_failed",
     "create.setup_failed",
@@ -565,6 +582,63 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
         Err(error) => return failure("repository.invalid", format!("{error:#}")),
     };
     if let Source::Registered(worktree) = &plan.source {
+        if !input.dry_run {
+            let identity = match RepositoryObservation::new(&worktree.path).worktree_identity() {
+                Ok(identity) => identity,
+                Err(error) => return failure("repository.invalid", format!("{error:#}")),
+            };
+            let setup_lifecycle = setup::Lifecycle::new(&repository.common_dir);
+            let incomplete = match setup_lifecycle.inspect(setup::SetupTarget {
+                worktree_identity: &identity,
+                branch: Some(&branch),
+            }) {
+                Ok(setup::Inspection::Complete(_)) => None,
+                Ok(setup::Inspection::Incomplete(incomplete)) => Some(incomplete),
+                Err(failed) => {
+                    return failure("repository.invalid", format!("{:#}", failed.error));
+                }
+            };
+            if let Some(incomplete) = incomplete {
+                let config = match EffectiveConfig::load(&repository) {
+                    Ok(config) => config,
+                    Err(error) => return failure("repository.invalid", format!("{error:#}")),
+                };
+                if config.post_create.is_empty() {
+                    if let Err(failed) = incomplete.no_hooks_configured() {
+                        return failure("switch.setup_failed", format!("{:#}", failed.error));
+                    }
+                } else {
+                    return OperationOutcome {
+                        result: Err(OperationFailure {
+                            code: "switch.setup_incomplete".into(),
+                            message: "post-create setup remains incomplete; recover it interactively before structured navigation".into(),
+                        }),
+                        context: OperationContext::Branch(BranchContext {
+                            branch: branch.clone(),
+                            destination: None,
+                            created: Some(false),
+                            setup: Some("incomplete"),
+                            hook_outcome: None,
+                            remotes: None,
+                        }),
+                        effects: Vec::new(),
+                        diagnostics: Vec::new(),
+                        recovery: vec![RecoveryAction {
+                            action: "switch.recover_setup".into(),
+                            description: "Open the existing topic worktree and finish its pinned post-create setup interactively".into(),
+                            mutation: MutationClass::Setup,
+                            requires_human_approval: true,
+                            invocation: RecoveryInvocation {
+                                argv: vec!["pando".into(), "switch".into(), branch.clone()],
+                                stdin: None,
+                                working_directory: Some(working_directory),
+                            },
+                        }],
+                        destination: None,
+                    };
+                }
+            }
+        }
         return OperationOutcome {
             result: Ok(OperationResult::Existing {
                 branch,
@@ -583,9 +657,7 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
         Source::New { base } => Some(base.clone()),
         _ => None,
     };
-    if intent == Intent::Switch
-        && let Some(base) = new_base.clone()
-    {
+    if let Some(base) = new_base.clone().filter(|_| intent == Intent::Switch) {
         if !input.dry_run {
             return OperationOutcome {
                 result: Err(OperationFailure {
@@ -746,8 +818,10 @@ fn execution_failure_outcome(
         _ => format!("{command}.creation_failed"),
     };
     let mut recovery = Vec::new();
-    if code == "create.description_failed"
-        && let Some(description) = input.description.as_deref()
+    if let Some(description) = input
+        .description
+        .as_deref()
+        .filter(|_| code == "create.description_failed")
     {
         recovery.push(RecoveryAction {
             action: "git.set_branch_description".into(),
@@ -955,14 +1029,13 @@ pub(crate) fn plan(
     // A requested fresh-base fetch is itself a repository mutation, so gate it
     // before source planning. Other source planning is read-only and remains
     // ahead of approval to preserve remote-choice and validation behavior.
-    if !dry_run
-        && fetch.refreshes()
-        && let Some(candidate) = approval_candidate(repository, &config)?
-    {
-        return Ok(Err(Blocker::ApprovalRequired {
-            candidate,
-            destination,
-        }));
+    if !dry_run && fetch.refreshes() {
+        if let Some(candidate) = approval_candidate(repository, &config)? {
+            return Ok(Err(Blocker::ApprovalRequired {
+                candidate,
+                destination,
+            }));
+        }
     }
 
     let source = match plan_source(
@@ -1007,14 +1080,13 @@ pub(crate) fn plan(
         }
         Err(blocker) => return Ok(Err(*blocker)),
     };
-    if !dry_run
-        && !fetch.refreshes()
-        && let Some(candidate) = approval_candidate(repository, &config)?
-    {
-        return Ok(Err(Blocker::ApprovalRequired {
-            candidate,
-            destination,
-        }));
+    if !dry_run && !fetch.refreshes() {
+        if let Some(candidate) = approval_candidate(repository, &config)? {
+            return Ok(Err(Blocker::ApprovalRequired {
+                candidate,
+                destination,
+            }));
+        }
     }
 
     let plan = Plan {

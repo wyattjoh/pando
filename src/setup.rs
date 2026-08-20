@@ -178,13 +178,13 @@ impl<'a> Lifecycle<'a> {
                 pending_path,
             )));
         }
-        if let Some(path) = pending_path.as_ref()
-            && inspect_record(path).map_err(failed)?
-        {
-            return Ok(Inspection::Incomplete(IncompleteSetup::new(
-                stable_path,
-                pending_path,
-            )));
+        if let Some(path) = pending_path.as_ref() {
+            if inspect_record(path).map_err(failed)? {
+                return Ok(Inspection::Incomplete(IncompleteSetup::new(
+                    stable_path,
+                    pending_path,
+                )));
+            }
         }
         Ok(Inspection::Complete(Transition::complete()))
     }
@@ -217,7 +217,7 @@ impl PendingSetup<'_> {
                     .with_context(|| format!("failed to create {}", parent.display()))
             })
             .and_then(|()| {
-                fs::rename(&self.pending_path, &stable_path).with_context(|| {
+                trust::rename_durable(&self.pending_path, &stable_path).with_context(|| {
                     format!(
                         "failed to promote incomplete setup state from {} to {}",
                         self.pending_path.display(),

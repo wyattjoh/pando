@@ -814,14 +814,24 @@
         "json.invalid_request",
         "json.unsupported_schema_version",
         "repository.invalid",
+        "repository.primary_unavailable",
+        "repository.root_unavailable",
         "switch.selection_required",
         "switch.invalid_branch",
-        "switch.destination_unavailable",
-        "switch.destination_collision",
-        "switch.remote_selection_required",
+        "switch.config_invalid",
         "switch.fetch_not_applicable",
         "switch.base_unavailable",
+        "switch.destination_unavailable",
+        "switch.destination_invalid",
+        "switch.destination_collision",
+        "switch.irrelevant_remote",
+        "switch.unknown_remote",
+        "switch.remote_selection_required",
         "switch.approval_required",
+        "switch.plan_stale",
+        "switch.creation_failed",
+        "switch.setup_failed",
+        "switch.setup_incomplete",
         "trust.approval_required"
       ],
       "outcome": "help",
@@ -1602,14 +1612,21 @@
         "json.invalid_request",
         "json.unsupported_schema_version",
         "repository.invalid",
+        "repository.primary_unavailable",
+        "repository.root_unavailable",
         "create.branch_required",
         "create.invalid_branch",
         "create.branch_registered",
-        "create.destination_unavailable",
-        "create.destination_collision",
-        "create.remote_selection_required",
+        "create.config_invalid",
         "create.fetch_not_applicable",
         "create.base_unavailable",
+        "create.destination_unavailable",
+        "create.destination_invalid",
+        "create.destination_collision",
+        "create.irrelevant_remote",
+        "create.unknown_remote",
+        "create.remote_selection_required",
+        "create.plan_stale",
         "create.creation_failed",
         "create.description_failed",
         "create.setup_failed",
@@ -2292,7 +2309,149 @@
         "title": "Response",
         "type": "object"
       },
-      "result_schema": null,
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "RemovalTargetContext": {
+            "description": "Stable facts about one ordered removal target.",
+            "properties": {
+              "branch": {
+                "type": "string"
+              },
+              "branch_retained": {
+                "type": "boolean"
+              },
+              "current": {
+                "type": "boolean"
+              },
+              "force": {
+                "type": "boolean"
+              },
+              "path": {
+                "$ref": "#/definitions/BytePath"
+              },
+              "pre_remove_hooks": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "branch",
+              "branch_retained",
+              "current",
+              "force",
+              "path",
+              "pre_remove_hooks"
+            ],
+            "type": "object"
+          }
+        },
+        "description": "Public result shared by human and JSON removal adapters.",
+        "oneOf": [
+          {
+            "properties": {
+              "force": {
+                "type": "boolean"
+              },
+              "outcome": {
+                "enum": [
+                  "dry_run"
+                ],
+                "type": "string"
+              },
+              "targets": {
+                "items": {
+                  "$ref": "#/definitions/RemovalTargetContext"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "force",
+              "outcome",
+              "targets"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "destination": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/BytePath"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "removed"
+                ],
+                "type": "string"
+              },
+              "targets": {
+                "items": {
+                  "$ref": "#/definitions/RemovalTargetContext"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "outcome",
+              "targets"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "RemovalResult"
+      },
       "selection_required_context_schema": null
     },
     "error": null,
@@ -2341,6 +2500,7 @@
         "merge.remove_failed",
         "merge.journal_failed",
         "merge.execution_failed",
+        "merge.busy",
         "merge.blocked",
         "trust.read_failed"
       ],
@@ -3035,49 +3195,46 @@
   },
   "pr.create": {
     "schema_version": 1,
-    "command": "create",
+    "command": "pr.create",
     "status": "success",
     "result": {
       "actions": [
-        "fetch_base_ref",
-        "create_branch",
-        "create_worktree",
-        "set_branch_description"
+        "retry"
       ],
       "error_codes": [
+        "cli.invalid_arguments",
         "json.invalid_request",
         "json.unsupported_schema_version",
-        "repository.invalid",
-        "create.branch_required",
-        "create.invalid_branch",
-        "create.branch_registered",
-        "create.destination_unavailable",
-        "create.destination_collision",
-        "create.remote_selection_required",
-        "create.fetch_not_applicable",
-        "create.base_unavailable",
-        "create.creation_failed",
-        "create.description_failed",
-        "create.setup_failed",
-        "trust.approval_required"
+        "command.execution_failed",
+        "pr.generator_unavailable",
+        "trust.approval_required",
+        "pr.remote_selection",
+        "provider.unsupported",
+        "pr.invalid_source",
+        "provider.unauthenticated",
+        "provider.preflight_failed",
+        "pr.already_exists",
+        "repository.dirty",
+        "pr.generator_failed",
+        "git.push_failed",
+        "provider.creation_failed"
       ],
       "outcome": "help",
       "request_schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "additionalProperties": false,
         "definitions": {
-          "CreateInput": {
+          "Request": {
             "additionalProperties": false,
-            "description": "Strict machine request for creating worktrees.",
             "properties": {
-              "branch": {
+              "description": {
                 "default": null,
                 "type": [
                   "string",
                   "null"
                 ]
               },
-              "description": {
+              "description_file": {
                 "default": null,
                 "type": [
                   "string",
@@ -3088,11 +3245,22 @@
                 "default": false,
                 "type": "boolean"
               },
-              "fetch": {
-                "default": false,
-                "type": "boolean"
-              },
               "remote": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "allOf": [
+                  {
+                    "$ref": "#/definitions/Status"
+                  }
+                ],
+                "default": "draft"
+              },
+              "title": {
                 "default": null,
                 "type": [
                   "string",
@@ -3101,11 +3269,18 @@
               }
             },
             "type": "object"
+          },
+          "Status": {
+            "enum": [
+              "draft",
+              "ready"
+            ],
+            "type": "string"
           }
         },
         "properties": {
           "input": {
-            "$ref": "#/definitions/CreateInput"
+            "$ref": "#/definitions/Request"
           },
           "request_id": {
             "type": [
@@ -3124,7 +3299,7 @@
           "input",
           "schema_version"
         ],
-        "title": "Request_for_CreateInput",
+        "title": "Request_for_Request",
         "type": "object"
       },
       "response_schema": {
@@ -3288,138 +3463,67 @@
       },
       "result_schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "anyOf": [
+        "oneOf": [
           {
             "properties": {
-              "branch": {
+              "base_branch": {
                 "type": "string"
               },
-              "destination": {
-                "$ref": "#/definitions/BytePath"
+              "base_repository": {
+                "type": "string"
               },
-              "dry_run": {
+              "draft": {
                 "type": "boolean"
               },
-              "outcome": {
-                "enum": [
-                  "existing"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "branch",
-              "destination",
-              "dry_run",
-              "outcome"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "approval_required": {
-                "type": "boolean"
-              },
-              "base_ref": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "branch": {
+              "head_branch": {
                 "type": "string"
               },
-              "destination": {
-                "$ref": "#/definitions/BytePath"
-              },
-              "kind": {
+              "head_repository": {
                 "type": "string"
               },
               "outcome": {
                 "enum": [
-                  "creation_plan"
+                  "dry_run"
                 ],
                 "type": "string"
               },
-              "start_point": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "approval_required",
-              "branch",
-              "destination",
-              "kind",
-              "outcome",
-              "start_point"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "base_ref": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "branch": {
+              "provider": {
                 "type": "string"
               },
-              "destination": {
-                "$ref": "#/definitions/BytePath"
-              },
-              "kind": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "outcome": {
-                "enum": [
-                  "creation_plan"
-                ],
-                "type": "string"
-              },
+              "push": true,
               "remote": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "start_point": {
-                "type": [
-                  "string",
-                  "null"
-                ]
+                "type": "string"
               }
             },
             "required": [
-              "branch",
-              "destination",
-              "outcome"
+              "base_branch",
+              "base_repository",
+              "draft",
+              "head_branch",
+              "head_repository",
+              "outcome",
+              "provider",
+              "push",
+              "remote"
             ],
             "type": "object"
           },
           {
             "properties": {
-              "base_ref": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "branch": {
+              "base_branch": {
                 "type": "string"
               },
-              "destination": {
-                "$ref": "#/definitions/BytePath"
+              "base_repository": {
+                "type": "string"
               },
-              "kind": {
-                "type": [
-                  "string",
-                  "null"
-                ]
+              "draft": {
+                "type": "boolean"
+              },
+              "head_branch": {
+                "type": "string"
+              },
+              "head_repository": {
+                "type": "string"
               },
               "outcome": {
                 "enum": [
@@ -3427,75 +3531,31 @@
                 ],
                 "type": "string"
               },
-              "remote": {
-                "type": [
-                  "string",
-                  "null"
-                ]
+              "provider": {
+                "type": "string"
               },
-              "start_point": {
-                "type": [
-                  "string",
-                  "null"
-                ]
+              "remote": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
               }
             },
             "required": [
-              "branch",
-              "destination",
-              "outcome"
+              "base_branch",
+              "base_repository",
+              "draft",
+              "head_branch",
+              "head_repository",
+              "outcome",
+              "provider",
+              "remote",
+              "url"
             ],
             "type": "object"
           }
         ],
-        "definitions": {
-          "BytePath": {
-            "oneOf": [
-              {
-                "properties": {
-                  "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
-                    "type": "string"
-                  },
-                  "value": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "encoding",
-                  "value"
-                ],
-                "type": "object"
-              },
-              {
-                "properties": {
-                  "display": {
-                    "type": "string"
-                  },
-                  "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
-                    "type": "string"
-                  },
-                  "value": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "display",
-                  "encoding",
-                  "value"
-                ],
-                "type": "object"
-              }
-            ]
-          }
-        },
-        "description": "Version 1 success variants shared by switch and create adapters.",
-        "title": "OperationResult"
+        "title": "PrResult"
       },
       "selection_required_context_schema": null
     },
@@ -3718,7 +3778,234 @@
         "title": "Response",
         "type": "object"
       },
-      "result_schema": null,
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Candidate": {
+            "properties": {
+              "command": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "template": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "HookSource": {
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "repository": {
+                "$ref": "#/definitions/BytePath"
+              }
+            },
+            "required": [
+              "kind",
+              "repository"
+            ],
+            "type": "object"
+          },
+          "HookStatus": {
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "phase": {
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/definitions/HookSource"
+              },
+              "step_count": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "trusted": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "configured",
+              "phase",
+              "source",
+              "step_count",
+              "trusted"
+            ],
+            "type": "object"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "status"
+                ],
+                "type": "string"
+              },
+              "phases": {
+                "items": {
+                  "$ref": "#/definitions/HookStatus"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "outcome",
+              "phases"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "generator_status"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "already_reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/Candidate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "dry_run"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "Success"
+      },
       "selection_required_context_schema": null
     },
     "error": null,
@@ -3741,7 +4028,8 @@
       "error_codes": [
         "json.invalid_request",
         "json.unsupported_schema_version",
-        "repository.invalid"
+        "repository.invalid",
+        "trust.busy"
       ],
       "outcome": "help",
       "request_schema": {
@@ -3942,7 +4230,234 @@
         "title": "Response",
         "type": "object"
       },
-      "result_schema": null,
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Candidate": {
+            "properties": {
+              "command": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "template": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "HookSource": {
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "repository": {
+                "$ref": "#/definitions/BytePath"
+              }
+            },
+            "required": [
+              "kind",
+              "repository"
+            ],
+            "type": "object"
+          },
+          "HookStatus": {
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "phase": {
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/definitions/HookSource"
+              },
+              "step_count": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "trusted": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "configured",
+              "phase",
+              "source",
+              "step_count",
+              "trusted"
+            ],
+            "type": "object"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "status"
+                ],
+                "type": "string"
+              },
+              "phases": {
+                "items": {
+                  "$ref": "#/definitions/HookStatus"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "outcome",
+              "phases"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "generator_status"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "already_reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/Candidate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "dry_run"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "Success"
+      },
       "selection_required_context_schema": null
     },
     "error": null,
@@ -4164,7 +4679,234 @@
         "title": "Response",
         "type": "object"
       },
-      "result_schema": null,
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Candidate": {
+            "properties": {
+              "command": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "template": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "HookSource": {
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "repository": {
+                "$ref": "#/definitions/BytePath"
+              }
+            },
+            "required": [
+              "kind",
+              "repository"
+            ],
+            "type": "object"
+          },
+          "HookStatus": {
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "phase": {
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/definitions/HookSource"
+              },
+              "step_count": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "trusted": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "configured",
+              "phase",
+              "source",
+              "step_count",
+              "trusted"
+            ],
+            "type": "object"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "status"
+                ],
+                "type": "string"
+              },
+              "phases": {
+                "items": {
+                  "$ref": "#/definitions/HookStatus"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "outcome",
+              "phases"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "generator_status"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "already_reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/Candidate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "dry_run"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "Success"
+      },
       "selection_required_context_schema": null
     },
     "error": null,
@@ -4187,7 +4929,8 @@
       "error_codes": [
         "json.invalid_request",
         "json.unsupported_schema_version",
-        "repository.invalid"
+        "repository.invalid",
+        "trust.busy"
       ],
       "outcome": "help",
       "request_schema": {
@@ -4388,7 +5131,234 @@
         "title": "Response",
         "type": "object"
       },
-      "result_schema": null,
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Candidate": {
+            "properties": {
+              "command": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "template": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "HookSource": {
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "repository": {
+                "$ref": "#/definitions/BytePath"
+              }
+            },
+            "required": [
+              "kind",
+              "repository"
+            ],
+            "type": "object"
+          },
+          "HookStatus": {
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "phase": {
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/definitions/HookSource"
+              },
+              "step_count": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "trusted": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "configured",
+              "phase",
+              "source",
+              "step_count",
+              "trusted"
+            ],
+            "type": "object"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "status"
+                ],
+                "type": "string"
+              },
+              "phases": {
+                "items": {
+                  "$ref": "#/definitions/HookStatus"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "outcome",
+              "phases"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "generator_status"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "already_reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/Candidate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "dry_run"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "Success"
+      },
       "selection_required_context_schema": null
     },
     "error": null,
@@ -4613,7 +5583,234 @@
         "title": "Response",
         "type": "object"
       },
-      "result_schema": null,
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Candidate": {
+            "properties": {
+              "command": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "template": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "HookSource": {
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "repository": {
+                "$ref": "#/definitions/BytePath"
+              }
+            },
+            "required": [
+              "kind",
+              "repository"
+            ],
+            "type": "object"
+          },
+          "HookStatus": {
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "phase": {
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/definitions/HookSource"
+              },
+              "step_count": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "trusted": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "configured",
+              "phase",
+              "source",
+              "step_count",
+              "trusted"
+            ],
+            "type": "object"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "status"
+                ],
+                "type": "string"
+              },
+              "phases": {
+                "items": {
+                  "$ref": "#/definitions/HookStatus"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "outcome",
+              "phases"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "generator_status"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "already_reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/Candidate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "dry_run"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "Success"
+      },
       "selection_required_context_schema": null
     },
     "error": null,
@@ -4634,10 +5831,49 @@
       "error_codes": [
         "json.invalid_request",
         "json.unsupported_schema_version",
-        "repository.invalid"
+        "repository.invalid",
+        "trust.json_unsupported"
       ],
       "outcome": "help",
-      "request_schema": null,
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "EmptyInput": {
+            "additionalProperties": false,
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/EmptyInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "enum": [
+              1
+            ],
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "title": "OptionalInputRequest_for_EmptyInput",
+        "type": "object"
+      },
       "response_schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "definitions": {
@@ -4818,10 +6054,49 @@
       "error_codes": [
         "json.invalid_request",
         "json.unsupported_schema_version",
-        "repository.invalid"
+        "repository.invalid",
+        "trust.json_unsupported"
       ],
       "outcome": "help",
-      "request_schema": null,
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "DryRunInput": {
+            "additionalProperties": false,
+            "properties": {
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/DryRunInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "enum": [
+              1
+            ],
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_DryRunInput",
+        "type": "object"
+      },
       "response_schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "definitions": {
@@ -5002,10 +6277,49 @@
       "error_codes": [
         "json.invalid_request",
         "json.unsupported_schema_version",
-        "repository.invalid"
+        "repository.invalid",
+        "trust.json_unsupported"
       ],
       "outcome": "help",
-      "request_schema": null,
+      "request_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
+        "definitions": {
+          "DryRunInput": {
+            "additionalProperties": false,
+            "properties": {
+              "dry_run": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "properties": {
+          "input": {
+            "$ref": "#/definitions/DryRunInput"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema_version": {
+            "enum": [
+              1
+            ],
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input",
+          "schema_version"
+        ],
+        "title": "Request_for_DryRunInput",
+        "type": "object"
+      },
       "response_schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "definitions": {
@@ -5387,7 +6701,234 @@
         "title": "Response",
         "type": "object"
       },
-      "result_schema": null,
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Candidate": {
+            "properties": {
+              "command": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "template": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "HookSource": {
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "repository": {
+                "$ref": "#/definitions/BytePath"
+              }
+            },
+            "required": [
+              "kind",
+              "repository"
+            ],
+            "type": "object"
+          },
+          "HookStatus": {
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "phase": {
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/definitions/HookSource"
+              },
+              "step_count": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "trusted": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "configured",
+              "phase",
+              "source",
+              "step_count",
+              "trusted"
+            ],
+            "type": "object"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "status"
+                ],
+                "type": "string"
+              },
+              "phases": {
+                "items": {
+                  "$ref": "#/definitions/HookStatus"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "outcome",
+              "phases"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "generator_status"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "already_reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/Candidate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "dry_run"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "Success"
+      },
       "selection_required_context_schema": null
     },
     "error": null,
@@ -5410,7 +6951,8 @@
       "error_codes": [
         "json.invalid_request",
         "json.unsupported_schema_version",
-        "repository.invalid"
+        "repository.invalid",
+        "trust.busy"
       ],
       "outcome": "help",
       "request_schema": {
@@ -5611,7 +7153,234 @@
         "title": "Response",
         "type": "object"
       },
-      "result_schema": null,
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Candidate": {
+            "properties": {
+              "command": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "template": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "HookSource": {
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "repository": {
+                "$ref": "#/definitions/BytePath"
+              }
+            },
+            "required": [
+              "kind",
+              "repository"
+            ],
+            "type": "object"
+          },
+          "HookStatus": {
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "phase": {
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/definitions/HookSource"
+              },
+              "step_count": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "trusted": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "configured",
+              "phase",
+              "source",
+              "step_count",
+              "trusted"
+            ],
+            "type": "object"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "status"
+                ],
+                "type": "string"
+              },
+              "phases": {
+                "items": {
+                  "$ref": "#/definitions/HookStatus"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "outcome",
+              "phases"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "generator_status"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "already_reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/Candidate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "dry_run"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "Success"
+      },
       "selection_required_context_schema": null
     },
     "error": null,
@@ -5836,7 +7605,234 @@
         "title": "Response",
         "type": "object"
       },
-      "result_schema": null,
+      "result_schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+          "BytePath": {
+            "oneOf": [
+              {
+                "properties": {
+                  "encoding": {
+                    "enum": [
+                      "utf8"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "display": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "enum": [
+                      "base64"
+                    ],
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "display",
+                  "encoding",
+                  "value"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "Candidate": {
+            "properties": {
+              "command": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "template": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "HookSource": {
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "repository": {
+                "$ref": "#/definitions/BytePath"
+              }
+            },
+            "required": [
+              "kind",
+              "repository"
+            ],
+            "type": "object"
+          },
+          "HookStatus": {
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "phase": {
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/definitions/HookSource"
+              },
+              "step_count": {
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "trusted": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "configured",
+              "phase",
+              "source",
+              "step_count",
+              "trusted"
+            ],
+            "type": "object"
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "status"
+                ],
+                "type": "string"
+              },
+              "phases": {
+                "items": {
+                  "$ref": "#/definitions/HookStatus"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "outcome",
+              "phases"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "identity": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "generator_status"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "already_reset"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "candidate": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/Candidate"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "dry_run"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "Success"
+      },
       "selection_required_context_schema": null
     },
     "error": null,

@@ -31,7 +31,8 @@ the four operations above must go through `pando`, not `git`.
 
 ## Local setup
 
-- Binaries: `pando` and its `pd` symlink on `PATH` when installed with Homebrew or `just install` (pinned during generation: **v0.1.1**).
+- Binaries: `pando` and its `pd` symlink on `PATH` when installed with Homebrew or `just install` (current contract: **v0.2.0**).
+- Runtime support: Linux and macOS; macOS is supported but is not currently CI-verified while the repository is private. Source builds require Rust 1.85 or newer, and CI checks 1.85 explicitly.
 - The installed zsh integration wraps both `pando` and `pd` so
   `switch`/`create`/`remove`/`merge` can `cd` to the destination the selected binary
   prints. `command pando ...` and `command pd ...` bypass the wrappers.
@@ -62,9 +63,14 @@ scalar stdout. Read `status`, typed `result`/`error`, `effects`, bounded
 when a returned next step explicitly requires a person's approval.
 
 Requests reject unknown fields, trailing data, unsupported versions, and
-mixed command flags. Generated exact-leaf help restricts request and response
-`schema_version` to the literal `1`, and response `status` to `"success"` or
-`"error"`. Dry-run mutating requests use `input.dry_run:true`.
+mixed command flags. Every response with `status:"error"` exits nonzero.
+Generated exact-leaf help uses the leaf identity (`pr.create`, not `create`)
+and returns runtime-derived request and response schemas, successful-result
+schemas where published, plus complete stable `error_codes` and `actions`
+catalogs. The schemas restrict
+request and response `schema_version` to the literal `1`, and response `status`
+to `"success"` or `"error"`. Dry-run mutating requests use
+`input.dry_run:true`.
 `create` requests may include `input.description` to set the repository-local
 Git branch description as part of creation, so do not follow a successful
 request with a separate `git config branch.<name>.description` call.
@@ -276,10 +282,14 @@ Source: README.md ("Lifecycle commands" / "Squashing")
 ```sh
 pando commit --help --output json   # generated request/response JSON Schemas
 ```
-The generated schemas express the version 1 wire exactly: request and response
-`schema_version` accept only the integer `1`, and response `status` accepts only
-`"success"` or `"error"`.
-Source: README.md ("Structured (JSON) usage")
+The exact-leaf response includes runtime-derived `request_schema` and
+`response_schema`, complete `error_codes` and `actions`, and a `result_schema`
+for leaves that publish a successful result type (including remove and every
+supported trust leaf). The schemas express the version 1 wire exactly:
+request and response `schema_version` accept only the integer `1`, and response
+`status` accepts only `"success"` or `"error"`. A typed error response exits
+nonzero even though its JSON document was emitted successfully.
+Source: README.md ("Structured JSON")
 
 ## References
 

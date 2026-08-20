@@ -171,13 +171,13 @@ fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> 
             existing.path.display()
         )),
         Source::New { base } => {
-            if let Some(base_ref) = &base.base_ref
-                && fetch.requested()
-            {
-                ui::info(format!(
-                    "Would fetch {} before branching; no changes made.",
-                    base_ref.reference()
-                ))?;
+            if fetch.requested() {
+                if let Some(base_ref) = &base.base_ref {
+                    ui::info(format!(
+                        "Would fetch {} before branching; no changes made.",
+                        base_ref.reference()
+                    ))?;
+                }
             }
             ui::finish(format!(
                 "Would create a worktree for {branch} from {} at {}; no changes made.",

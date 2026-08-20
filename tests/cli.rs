@@ -1876,6 +1876,197 @@ fn json_merge_captures_bounded_validation_diagnostics_and_retries_the_journal() 
 }
 
 #[test]
+fn merge_retry_observes_a_completed_fast_forward_and_runs_only_cleanup() {
+    for no_remove in [true, false] {
+        let repo = Repository::new();
+        let xdg = tempfile::tempdir().unwrap();
+        let calls = repo.temp.path().join("pre-merge-calls");
+        fs::write(repo.linked.join("topic.txt"), "topic\n").unwrap();
+        git(&repo.linked, ["add", "topic.txt"]);
+        git(&repo.linked, ["commit", "-m", "topic"]);
+        write_ignored_local_config(
+            &repo,
+            &format!(
+                "hooks:\n  pre-merge:\n    - name: count validation\n      command: printf x >> {}\n",
+                shell_quote(&calls)
+            ),
+        );
+        let (_fake_bin, path, real_git) = succeeding_then_failing_git("merge", "--ff-only");
+        let mut args = vec!["merge", "--no-squash"];
+        if no_remove {
+            args.push("--no-remove");
+        }
+        let mut first = Command::cargo_bin("pando").unwrap();
+        first
+            .args(&args)
+            .current_dir(&repo.linked)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("PATH", &path)
+            .env("REAL_GIT", &real_git);
+
+        let interrupted = run_pty_command(first, b"y\r");
+
+        assert!(!interrupted.status.success(), "{}", interrupted.stderr);
+        assert_eq!(fs::read(&calls).unwrap(), b"x");
+        assert_eq!(
+            git_output(&repo.main, ["rev-parse", "main"]),
+            git_output(&repo.main, ["rev-parse", "feature"])
+        );
+        let request = serde_json::json!({
+            "schema_version": 1,
+            "input": {"no_remove": no_remove, "no_squash": true}
+        });
+        let resumed = json_command_with_env(
+            &repo.linked,
+            &["merge", "--input-output", "json"],
+            Some(&request),
+            &[("XDG_CONFIG_HOME", xdg.path())],
+        );
+
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stdout)
+        );
+        let response = assert_json_pure(&resumed);
+        assert_eq!(
+            response["result"]["outcome"],
+            if no_remove { "retained" } else { "removed" }
+        );
+        assert_eq!(fs::read(&calls).unwrap(), b"x");
+        assert_eq!(repo.linked.exists(), no_remove);
+    }
+}
+
+#[test]
+fn cleanup_retry_rejects_pinned_source_or_target_drift() {
+    for drift_target in [false, true] {
+        let repo = Repository::new();
+        let xdg = tempfile::tempdir().unwrap();
+        fs::write(repo.linked.join("topic.txt"), "topic\n").unwrap();
+        git(&repo.linked, ["add", "topic.txt"]);
+        git(&repo.linked, ["commit", "-m", "topic"]);
+        write_ignored_local_config(
+            &repo,
+            "hooks:\n  pre-remove:\n    - name: block cleanup\n      command: exit 9\n",
+        );
+        let mut first = Command::cargo_bin("pando").unwrap();
+        first
+            .args(["merge", "--no-squash"])
+            .current_dir(&repo.linked)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", repo.temp.path());
+        let failed = run_pty_command(first, b"y\r");
+        assert!(!failed.status.success(), "{}", failed.stderr);
+        assert_eq!(
+            git_output(&repo.main, ["rev-parse", "main"]),
+            git_output(&repo.main, ["rev-parse", "feature"])
+        );
+
+        let changed = if drift_target {
+            &repo.main
+        } else {
+            &repo.linked
+        };
+        fs::write(changed.join("drift.txt"), "drift\n").unwrap();
+        git(changed, ["add", "drift.txt"]);
+        git(changed, ["commit", "-m", "drift after integration"]);
+        write_ignored_local_config(&repo, "hooks:\n  pre-remove: []\n");
+        let request = serde_json::json!({
+            "schema_version": 1,
+            "input": {"no_squash": true}
+        });
+        let retried = json_command_with_env(
+            &repo.linked,
+            &["merge", "--input-output", "json"],
+            Some(&request),
+            &[("XDG_CONFIG_HOME", xdg.path()), ("HOME", repo.temp.path())],
+        );
+
+        assert!(!retried.status.success());
+        let retried = assert_json_pure(&retried);
+        assert_eq!(retried["error"]["code"], "merge.stale_plan");
+        assert!(repo.linked.exists());
+    }
+}
+
+#[test]
+fn concurrent_merge_reports_a_typed_busy_outcome_before_running_hooks() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    let arm = repo.temp.path().join("arm-hook");
+    let ready = repo.temp.path().join("hook-ready");
+    let release = repo.temp.path().join("release-hook");
+    let calls = repo.temp.path().join("hook-calls");
+    fs::write(repo.linked.join("topic.txt"), "topic\n").unwrap();
+    git(&repo.linked, ["add", "topic.txt"]);
+    git(&repo.linked, ["commit", "-m", "topic"]);
+    write_ignored_local_config(
+        &repo,
+        &format!(
+            "hooks:\n  pre-merge:\n    - name: blocking validation\n      command: if test ! -f {arm}; then exit 7; fi; printf x >> {calls}; touch {ready}; while test ! -f {release}; do sleep 0.01; done\n",
+            arm = shell_quote(&arm),
+            calls = shell_quote(&calls),
+            ready = shell_quote(&ready),
+            release = shell_quote(&release),
+        ),
+    );
+    let mut approve = Command::cargo_bin("pando").unwrap();
+    approve
+        .args(["merge", "--no-remove", "--no-squash"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path());
+    let approved = run_pty_command(approve, b"y\r");
+    assert!(!approved.status.success(), "{}", approved.stderr);
+    fs::write(&arm, "armed\n").unwrap();
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {"no_remove": true, "no_squash": true}
+    });
+    let mut first = Command::cargo_bin("pando").unwrap();
+    first
+        .args(["merge", "--input-output", "json"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut first = first.spawn().unwrap();
+    serde_json::to_writer(first.stdin.as_mut().unwrap(), &request).unwrap();
+    drop(first.stdin.take());
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first merge never entered the blocking hook"
+        );
+        thread::yield_now();
+    }
+
+    let second = json_command_with_env(
+        &repo.linked,
+        &["merge", "--input-output", "json"],
+        Some(&request),
+        &[("XDG_CONFIG_HOME", xdg.path())],
+    );
+
+    assert!(!second.status.success());
+    let second = assert_json_pure(&second);
+    assert_eq!(second["error"]["code"], "merge.busy");
+    assert_eq!(fs::read(&calls).unwrap(), b"x");
+    fs::write(&release, "release\n").unwrap();
+    let first = first.wait_with_output().unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stdout)
+    );
+    let first = assert_json_pure(&first);
+    assert_eq!(first["result"]["outcome"], "retained");
+    assert_eq!(fs::read(&calls).unwrap(), b"x");
+}
+
+#[test]
 fn json_merge_cleanup_failure_preserves_topic_and_retries_captured_hooks() {
     let repo = Repository::new();
     fs::write(repo.linked.join("topic.txt"), "topic\n").unwrap();
@@ -2164,6 +2355,14 @@ fn nonanimated_human_merge_streams_git_output_while_git_is_running() {
 }
 
 fn failing_git(first: &str, second: &str) -> (TempDir, String, PathBuf) {
+    injected_git(first, second, false)
+}
+
+fn succeeding_then_failing_git(first: &str, second: &str) -> (TempDir, String, PathBuf) {
+    injected_git(first, second, true)
+}
+
+fn injected_git(first: &str, second: &str, run_before_failure: bool) -> (TempDir, String, PathBuf) {
     let real_git = PathBuf::from(
         String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
             .unwrap()
@@ -2171,10 +2370,15 @@ fn failing_git(first: &str, second: &str) -> (TempDir, String, PathBuf) {
     );
     let bin = tempfile::tempdir().unwrap();
     let wrapper = bin.path().join("git");
+    let injected = if run_before_failure {
+        "\"$REAL_GIT\" \"$@\" || exit $?; printf 'injected post-success failure\\n' >&2; exit 91"
+    } else {
+        "printf 'injected git failure\\n' >&2; exit 91"
+    };
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = {} ] && [ \"$2\" = {} ]; then printf 'injected git failure\\n' >&2; exit 91; fi\nexec \"$REAL_GIT\" \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" = {} ] && [ \"$2\" = {} ]; then {injected}; fi\nexec \"$REAL_GIT\" \"$@\"\n",
             shell_quote(Path::new(first)),
             shell_quote(Path::new(second)),
         ),
@@ -3413,6 +3617,51 @@ fn merge_leaves_a_single_commit_topic_and_its_message_alone() {
 }
 
 #[test]
+fn merge_squash_generator_overflow_stops_before_history_or_validation() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        "merge:\n  generation:\n    command: dd if=/dev/zero bs=1024 count=80 2>/dev/null; cat >/dev/null\n",
+    )
+    .unwrap();
+    commit_three_on_topic(&repo);
+    let topic_before = git_output(&repo.linked, ["rev-parse", "HEAD"]);
+    let target_before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {"no_remove": true}
+    });
+
+    let output = json_command_with_env(
+        &repo.linked,
+        &["merge", "--input-output", "json"],
+        Some(&request),
+        &[("XDG_CONFIG_HOME", xdg.path())],
+    );
+
+    assert!(!output.status.success());
+    let response = assert_json_pure(&output);
+    assert_eq!(response["error"]["code"], "merge.execution_failed");
+    assert_eq!(response["context"]["phase"], "squash");
+    for action in ["pre_merge_hooks", "fast_forward_merge", "remove_worktree"] {
+        let effect = response["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|effect| effect["action"] == action)
+            .unwrap_or_else(|| panic!("missing {action} effect"));
+        assert_eq!(effect["attempted"], false, "{action}");
+    }
+    assert_eq!(
+        git_output(&repo.linked, ["rev-parse", "HEAD"]),
+        topic_before
+    );
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), target_before);
+}
+
+#[test]
 fn merge_refuses_to_squash_without_a_configured_generator() {
     let repo = Repository::new();
     let xdg = tempfile::tempdir().unwrap();
@@ -3895,6 +4144,75 @@ fn json_trust_merge_leaves_answer_structurally_instead_of_panicking() {
     );
 }
 
+#[test]
+fn concurrent_trust_approvals_preserve_both_repository_identities() {
+    let first = Repository::new();
+    let second = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        first.linked.join(".pando.yaml"),
+        "commit:\n  generation:\n    command: 'printf first'\n",
+    )
+    .unwrap();
+    fs::write(
+        second.linked.join(".pando.yaml"),
+        "commit:\n  generation:\n    command: 'printf second'\n",
+    )
+    .unwrap();
+    let padding = (0..20_000)
+        .map(|index| {
+            (
+                format!("padding-{index:05}"),
+                serde_json::Value::String(format!("hash-{index:05}")),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    fs::write(
+        xdg.path().join("pando/trust.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "repositories": padding,
+            "commit_generators": {},
+            "pr_generators": {},
+            "merge_generators": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let approval = |repo: &Repository| {
+        let mut command = Command::cargo_bin("pando").unwrap();
+        command
+            .args(["trust", "commit-approve"])
+            .current_dir(&repo.linked)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", repo.temp.path());
+        command
+    };
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let first_barrier = std::sync::Arc::clone(&barrier);
+    let first_command = approval(&first);
+    let first_run = thread::spawn(move || {
+        first_barrier.wait();
+        run_pty_command(first_command, b"y\r")
+    });
+    let second_barrier = std::sync::Arc::clone(&barrier);
+    let second_command = approval(&second);
+    let second_run = thread::spawn(move || {
+        second_barrier.wait();
+        run_pty_command(second_command, b"y\r")
+    });
+    barrier.wait();
+    let first_output = first_run.join().unwrap();
+    let second_output = second_run.join().unwrap();
+    assert!(first_output.status.success(), "{}", first_output.stderr);
+    assert!(second_output.status.success(), "{}", second_output.stderr);
+
+    let trust: serde_json::Value =
+        serde_json::from_slice(&fs::read(xdg.path().join("pando/trust.json")).unwrap()).unwrap();
+    assert_eq!(trust["commit_generators"].as_object().unwrap().len(), 2);
+}
+
 /// `pr-*` has no JSON implementation. It must refuse structurally rather than
 /// panicking on an unmatched trust leaf.
 #[test]
@@ -3946,9 +4264,76 @@ fn pr_request_mode_preserves_request_id_on_version_failure() {
         .unwrap();
     let output = child.wait_with_output().unwrap();
 
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
     let response = assert_json_pure(&output);
+    assert_eq!(response["command"], "pr.create");
     assert_eq!(response["request_id"], "pr-40");
     assert_eq!(response["error"]["code"], "json.unsupported_schema_version");
+}
+
+#[test]
+fn pr_request_mode_rejects_invalid_documents_with_one_failed_response() {
+    let repo = Repository::new();
+    for input in [
+        br"{".as_slice(),
+        br#"{"schema_version":1,"input":{"title":"T","description":"B","unknown":true}}"#,
+        br#"{"schema_version":1,"input":{"title":"T","description":"B"}} trailing"#,
+    ] {
+        let mut command = Command::cargo_bin("pando").unwrap();
+        command
+            .args(["pr", "create", "--input-output", "json"])
+            .current_dir(&repo.linked)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = run_raw_json_command(command, input);
+
+        assert!(
+            !output.status.success(),
+            "input={}",
+            String::from_utf8_lossy(input)
+        );
+        assert!(output.stderr.is_empty());
+        let response = assert_json_pure(&output);
+        assert_eq!(response["command"], "pr.create");
+        assert_eq!(response["error"]["code"], "json.invalid_request");
+    }
+}
+
+#[test]
+fn pr_exact_leaf_help_describes_the_pr_contract() {
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["pr", "create", "--help", "--output", "json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let response = assert_json_pure(&output);
+    assert_eq!(response["command"], "pr.create");
+    let result = &response["result"];
+    assert!(
+        result["request_schema"]
+            .to_string()
+            .contains("description_file")
+    );
+    assert!(result["result_schema"].to_string().contains("head_branch"));
+    assert!(
+        result["error_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "provider.creation_failed")
+    );
+    assert!(
+        result["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action == "retry")
+    );
 }
 
 #[test]
@@ -3979,6 +4364,54 @@ fn pr_missing_metadata_generator_fails_before_dirty_worktree_handling() {
         git_output(&repo.linked, ["status", "--porcelain"]),
         "?? dirty.txt"
     );
+}
+
+#[test]
+fn pr_generator_overflow_is_bounded_and_stops_before_publication() {
+    let repo = Repository::new();
+    let bare = configure_test_forge_remote(&repo);
+    git(&repo.main, ["push", "origin", "main:main"]);
+    let (fake_bin, capture, created) = fake_tea_without_created_url(&repo);
+    let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        "pr:\n  generation:\n    command: dd if=/dev/zero bs=1024 count=80 2>/dev/null | cat >&2; cat >/dev/null; printf '# Unreachable\\n\\nBody\\n'\n",
+    )
+    .unwrap();
+    let request = serde_json::json!({"schema_version": 1, "input": {}});
+
+    let output = json_command_with_env(
+        &repo.linked,
+        &["pr", "create", "--input-output", "json"],
+        Some(&request),
+        &[
+            ("XDG_CONFIG_HOME", xdg.path()),
+            ("PATH", Path::new(&path)),
+            ("TEA_CAPTURE", &capture),
+            ("TEA_CREATED", &created),
+        ],
+    );
+
+    assert!(!output.status.success());
+    let response = assert_json_pure(&output);
+    assert_eq!(response["error"]["code"], "pr.generator_failed");
+    assert!(
+        response["diagnostics"][0]["content"]
+            .as_str()
+            .unwrap()
+            .len()
+            < 1024
+    );
+    assert!(response["effects"].as_array().unwrap().is_empty());
+    assert!(!created.exists());
+    assert_eq!(
+        git_output(&bare, ["for-each-ref", "--format=%(refname)", "refs/heads"]),
+        "refs/heads/main"
+    );
+    let invocations = fs::read_to_string(capture).unwrap();
+    assert!(!invocations.contains("pulls create"), "{invocations}");
 }
 
 fn configure_test_forge_remote(repo: &Repository) -> PathBuf {
@@ -4153,6 +4586,8 @@ fn pr_provider_failure_reports_completed_push_and_bounded_diagnostic() {
         .output()
         .unwrap();
 
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
     let response = assert_json_pure(&output);
     assert_eq!(response["error"]["code"], "provider.creation_failed");
     assert_eq!(response["effects"][0]["action"], "git.push");
@@ -4171,6 +4606,67 @@ fn pr_provider_failure_reports_completed_push_and_bounded_diagnostic() {
     assert_eq!(
         git_output(&bare, ["rev-parse", "refs/heads/feature"]),
         git_output(&repo.linked, ["rev-parse", "HEAD"])
+    );
+}
+
+#[test]
+fn pr_publication_uses_the_topic_name_when_its_upstream_names_the_target() {
+    let repo = Repository::new();
+    let bare = configure_test_forge_remote(&repo);
+    git(&repo.main, ["push", "origin", "main:main"]);
+    let target_before = git_output(&bare, ["rev-parse", "refs/heads/main"]);
+    fs::write(repo.linked.join("topic.txt"), "topic\n").unwrap();
+    git(&repo.linked, ["add", "topic.txt"]);
+    git(&repo.linked, ["commit", "-m", "topic change"]);
+    git(
+        &repo.linked,
+        ["branch", "--set-upstream-to=origin/main", "feature"],
+    );
+    let (fake_bin, capture, created) = fake_tea_without_created_url(&repo);
+    let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
+    let xdg = tempfile::tempdir().unwrap();
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args([
+            "--output",
+            "json",
+            "pr",
+            "create",
+            "--title",
+            "Publish topic",
+            "--description",
+            "Keep the local topic identity.",
+        ])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("PATH", path)
+        .env("TEA_CAPTURE", &capture)
+        .env("TEA_CREATED", &created)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response = assert_json_pure(&output);
+    assert_eq!(response["result"]["head_branch"], "feature");
+    assert_eq!(
+        git_output(&bare, ["rev-parse", "refs/heads/feature"]),
+        git_output(&repo.linked, ["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        git_output(&bare, ["rev-parse", "refs/heads/main"]),
+        target_before
+    );
+    assert_eq!(
+        git_output(
+            &repo.linked,
+            ["rev-parse", "--abbrev-ref", "feature@{upstream}"]
+        ),
+        "origin/main"
     );
 }
 
@@ -5357,6 +5853,62 @@ fn get_prints_exact_current_context_values_and_stable_ports() {
             "{property}: get writes only the requested value"
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn primary_repository_identity_preserves_non_utf8_unix_path_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let primary = temp
+        .path()
+        .join(OsString::from_vec(b"primary-\xff".to_vec()));
+    fs::create_dir(&primary).unwrap();
+    git(&primary, ["init", "-b", "main"]);
+    git(&primary, ["config", "user.email", "test@example.com"]);
+    git(&primary, ["config", "user.name", "Test User"]);
+    git(&primary, ["config", "commit.gpgsign", "false"]);
+    git(&primary, ["commit", "--allow-empty", "-m", "initial"]);
+
+    let queried = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["get", "primary-worktree-path"])
+        .current_dir(&primary)
+        .output()
+        .unwrap();
+    let mut expected = primary
+        .canonicalize()
+        .unwrap()
+        .as_os_str()
+        .as_bytes()
+        .to_vec();
+    expected.push(b'\n');
+    assert!(
+        queried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&queried.stderr)
+    );
+    assert_eq!(queried.stdout, expected);
+
+    let switched = json_command(&primary, &["switch", "main", "--output", "json"], None);
+    assert!(
+        switched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&switched.stderr)
+    );
+    let switched = assert_json_pure(&switched);
+    assert_eq!(switched["result"]["destination"]["encoding"], "base64");
+
+    let trust = json_command(
+        &primary,
+        &["trust", "status", "--input-output", "json"],
+        None,
+    );
+    assert!(
+        trust.status.success(),
+        "{}",
+        String::from_utf8_lossy(&trust.stderr)
+    );
+    assert_eq!(assert_json_pure(&trust)["status"], "success");
 }
 
 #[cfg(target_os = "linux")]
@@ -7573,6 +8125,50 @@ fn commit_generator_failure_finishes_the_spinner_with_an_error_state() {
 }
 
 #[test]
+fn commit_generator_overflow_is_bounded_and_does_not_commit() {
+    let repo = Repository::new();
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        "commit:\n  generation:\n    command: dd if=/dev/zero bs=1024 count=80 2>/dev/null; cat >/dev/null\n",
+    )
+    .unwrap();
+    fs::write(repo.main.join("large.txt"), "x".repeat(256 * 1024)).unwrap();
+    git(&repo.main, ["add", "large.txt"]);
+    let before = git_output(&repo.main, ["rev-parse", "HEAD"]);
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "input": {
+            "selection": "staged",
+            "message": {"source": "configured_generator"},
+            "dry_run": false
+        }
+    });
+
+    let output = json_command_with_env(
+        &repo.main,
+        &["commit", "--input-output", "json"],
+        Some(&request),
+        &[("XDG_CONFIG_HOME", xdg.path())],
+    );
+
+    assert!(!output.status.success());
+    let response = assert_json_pure(&output);
+    assert_eq!(response["error"]["code"], "commit.generator_failed");
+    let diagnostic = response["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["stream"] == "stdout")
+        .expect("overflowing generator stdout is diagnosed");
+    assert!(diagnostic["original_size"].as_u64().unwrap() > 64 * 1024);
+    assert_eq!(diagnostic["truncated"], true);
+    assert!(diagnostic["content"].as_str().unwrap().len() <= 64 * 1024);
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), before);
+}
+
+#[test]
 fn commit_generator_trust_commands_distinguish_absent_and_user_controlled_settings() {
     let repo = Repository::new();
     let absent_xdg = tempfile::tempdir().unwrap();
@@ -7919,7 +8515,7 @@ fn json_version_one_rejection_is_characterized_across_every_command_family() {
             serde_json::json!({}),
             "json.unsupported_schema_version",
             true,
-            true,
+            false,
         ),
         (
             &["trust", "status", "--input-output", "json"],
@@ -7994,6 +8590,117 @@ fn json_version_one_responses_are_exclusive_single_documents() {
         assert!(response["effects"].is_array());
         assert!(response["diagnostics"].is_array());
         assert!(response["next_steps"].is_array());
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // The full stable catalogs stay visible in one compatibility assertion.
+fn json_exact_leaf_help_advertises_complete_operation_contracts() {
+    let help = |args: &[&str]| {
+        let output = Command::cargo_bin("pando")
+            .unwrap()
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_json_pure(&output)["result"].clone()
+    };
+
+    let switch = help(&["switch", "--help", "--output", "json"]);
+    assert_eq!(
+        switch["error_codes"],
+        serde_json::json!([
+            "json.invalid_request",
+            "json.unsupported_schema_version",
+            "repository.invalid",
+            "repository.primary_unavailable",
+            "repository.root_unavailable",
+            "switch.selection_required",
+            "switch.invalid_branch",
+            "switch.config_invalid",
+            "switch.fetch_not_applicable",
+            "switch.base_unavailable",
+            "switch.destination_unavailable",
+            "switch.destination_invalid",
+            "switch.destination_collision",
+            "switch.irrelevant_remote",
+            "switch.unknown_remote",
+            "switch.remote_selection_required",
+            "switch.approval_required",
+            "switch.plan_stale",
+            "switch.creation_failed",
+            "switch.setup_failed",
+            "switch.setup_incomplete",
+            "trust.approval_required"
+        ])
+    );
+
+    let create = help(&["create", "--help", "--output", "json"]);
+    assert_eq!(
+        create["error_codes"],
+        serde_json::json!([
+            "json.invalid_request",
+            "json.unsupported_schema_version",
+            "repository.invalid",
+            "repository.primary_unavailable",
+            "repository.root_unavailable",
+            "create.branch_required",
+            "create.invalid_branch",
+            "create.branch_registered",
+            "create.config_invalid",
+            "create.fetch_not_applicable",
+            "create.base_unavailable",
+            "create.destination_unavailable",
+            "create.destination_invalid",
+            "create.destination_collision",
+            "create.irrelevant_remote",
+            "create.unknown_remote",
+            "create.remote_selection_required",
+            "create.plan_stale",
+            "create.creation_failed",
+            "create.description_failed",
+            "create.setup_failed",
+            "trust.approval_required"
+        ])
+    );
+
+    let removal = help(&["remove", "--help", "--output", "json"]);
+    assert!(removal["result_schema"].to_string().contains("removed"));
+    assert!(removal["result_schema"].to_string().contains("targets"));
+
+    for leaf in [
+        "status",
+        "reset",
+        "commit-status",
+        "commit-reset",
+        "commit-approve",
+        "merge-status",
+        "merge-reset",
+        "merge-approve",
+    ] {
+        let trust = help(&["trust", leaf, "--help", "--output", "json"]);
+        assert!(
+            trust["result_schema"]
+                .to_string()
+                .contains("generator_status"),
+            "{leaf}"
+        );
+    }
+    for leaf in ["pr-status", "pr-reset", "pr-approve"] {
+        let trust = help(&["trust", leaf, "--help", "--output", "json"]);
+        assert!(trust["result_schema"].is_null(), "{leaf}");
+        assert!(
+            trust["error_codes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|code| code == "trust.json_unsupported"),
+            "{leaf}"
+        );
     }
 }
 
@@ -8687,6 +9394,34 @@ fn json_post_create_failure_and_interruption_preserve_recovery_contracts() {
         assert_eq!(value["diagnostics"][0]["stream"], "stdout");
         assert!(root.join(branch).join(".git").exists());
         assert!(repo.main.join(".git/pando-state/incomplete").exists());
+
+        let switch_request = serde_json::json!({
+            "schema_version": 1,
+            "request_id": format!("recover-{branch}"),
+            "input": {"branch": branch}
+        });
+        let switched = json_command_with_env(
+            &repo.main,
+            &["switch", "--input-output", "json"],
+            Some(&switch_request),
+            &[("XDG_CONFIG_HOME", xdg.path()), ("HOME", repo.temp.path())],
+        );
+        assert!(!switched.status.success());
+        assert!(switched.stderr.is_empty());
+        let switched = assert_json_pure(&switched);
+        assert_eq!(switched["status"], "error");
+        assert!(switched["result"].is_null());
+        assert_eq!(switched["error"]["code"], "switch.setup_incomplete");
+        assert_eq!(switched["context"]["branch"], branch);
+        assert_eq!(switched["context"]["setup"], "incomplete");
+        assert!(switched["context"]["destination"].is_null());
+        assert_eq!(switched["next_steps"][0]["action"], "switch.recover_setup");
+        assert_eq!(switched["next_steps"][0]["mutation"], "setup");
+        assert_eq!(switched["next_steps"][0]["requires_human_approval"], true);
+        assert_eq!(
+            switched["next_steps"][0]["invocation"]["argv"],
+            serde_json::json!(["pando", "switch", branch])
+        );
     }
 }
 

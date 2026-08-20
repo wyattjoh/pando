@@ -7,9 +7,7 @@
 use std::{
     error::Error,
     fmt,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
 };
 
 use anyhow::{Context, Result, bail};
@@ -18,6 +16,7 @@ use minijinja::{Environment, context};
 use crate::{
     WorktreeKind,
     config::{EffectiveConfig, EffectiveGeneration, GenerationSource},
+    generator,
     git::{
         HistoryObservation, LifecycleMutation, RangeDiffSource, Repository, RepositoryObservation,
     },
@@ -604,29 +603,19 @@ fn generate_message(
         .as_ref()
         .map_or(BUILTIN_TEMPLATE, |value| value.value.as_str());
     let prompt = render_prompt(repository, template, target, include_staged)?;
-    let mut child = Command::new("/bin/sh")
+    let mut process = std::process::Command::new("/bin/sh");
+    process
         .args(["-c", command])
         .current_dir(&repository.current().path)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to start the squash message generator")?;
-    if let Err(error) = child
-        .stdin
-        .take()
-        .expect("stdin was piped")
-        .write_all(prompt.as_bytes())
-        && error.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        return Err(error).context("failed to send the squash prompt to the generator");
-    }
-    let output = child
-        .wait_with_output()
-        .context("failed to await the squash message generator")?;
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let output = generator::run(
+        &mut process,
+        prompt.as_bytes(),
+        generator::Limits::default(),
+    )
+    .context("squash message generator execution failed")?;
     if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = String::from_utf8_lossy(&output.stderr.bytes);
         let detail = detail.trim();
         if detail.is_empty() {
             bail!(
@@ -639,7 +628,7 @@ fn generate_message(
             output.status
         );
     }
-    let message = String::from_utf8(output.stdout)
+    let message = String::from_utf8(output.stdout.bytes)
         .context("squash message generator produced non-UTF-8 output")?
         .trim()
         .to_owned();

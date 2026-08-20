@@ -1,10 +1,4 @@
-use std::{
-    env,
-    ffi::OsString,
-    io::Write,
-    path::Path,
-    process::{Command, Output, Stdio},
-};
+use std::{env, ffi::OsString, path::Path};
 
 use anyhow::{Context, Result, bail};
 use cliclack::confirm;
@@ -16,6 +10,7 @@ use serde_json::{Value, json};
 use crate::{
     WorktreeKind,
     config::{EffectiveConfig, GenerationSource},
+    generator,
     git::{self, LifecycleMutation, Repository, RepositoryObservation},
     protocol::{self, Diagnostic, Effect, ErrorBody, NextStep, Response},
     render, trust, ui,
@@ -575,50 +570,51 @@ fn run_generator(
         message: format!("{error:#}"),
         diagnostics: Vec::new(),
     })?;
-    let mut child = Command::new("/bin/sh")
+    let mut process = std::process::Command::new("/bin/sh");
+    process
         .args(["-c", command])
         .current_dir(&repository.current().path)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(if json_mode {
-            Stdio::piped()
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let output = generator::run(
+        &mut process,
+        prompt.as_bytes(),
+        generator::Limits::default(),
+    )
+    .map_err(|error| {
+        let diagnostics = if json_mode {
+            diagnostics_for_captures("commit.generator", &error.stdout, &error.stderr)
         } else {
-            Stdio::inherit()
-        })
-        .spawn()
-        .map_err(|error| CommandFailure {
+            Vec::new()
+        };
+        CommandFailure {
             code: "commit.generator_failed",
             message: error.to_string(),
-            diagnostics: Vec::new(),
-        })?;
-    if let Err(error) = child.stdin.take().unwrap().write_all(prompt.as_bytes())
-        && error.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        return Err(CommandFailure {
-            code: "commit.generator_failed",
-            message: error.to_string(),
-            diagnostics: Vec::new(),
-        });
-    }
-    let output = child.wait_with_output().map_err(|error| CommandFailure {
-        code: "commit.generator_failed",
-        message: error.to_string(),
-        diagnostics: Vec::new(),
+            diagnostics,
+        }
     })?;
     let diagnostics = if json_mode {
-        diagnostics_for("commit.generator", &output)
+        diagnostics_for_captures("commit.generator", &output.stdout, &output.stderr)
     } else {
         Vec::new()
     };
     if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr.bytes);
+        let detail = detail.trim();
+        let message = if detail.is_empty() || json_mode {
+            format!("commit generator failed with status {}", output.status)
+        } else {
+            format!(
+                "commit generator failed with status {}\n{detail}",
+                output.status
+            )
+        };
         return Err(CommandFailure {
             code: "commit.generator_failed",
-            message: format!("commit generator failed with status {}", output.status),
+            message,
             diagnostics,
         });
     }
-    let message = String::from_utf8(output.stdout).map_err(|_| CommandFailure {
+    let message = String::from_utf8(output.stdout.bytes).map_err(|_| CommandFailure {
         code: "commit.generator_invalid_output",
         message: "commit generator produced non-UTF-8 output".into(),
         diagnostics: diagnostics.clone(),
@@ -645,8 +641,22 @@ fn git_commit_captured(cwd: &Path, message: &str) -> Result<git::MutationTranscr
     LifecycleMutation::new(cwd).commit_captured(message)
 }
 
-fn diagnostics_for(source: &str, output: &Output) -> Vec<Diagnostic> {
-    diagnostics_for_streams(source, &output.stdout, &output.stderr)
+fn diagnostics_for_captures(
+    source: &str,
+    stdout: &generator::Capture,
+    stderr: &generator::Capture,
+) -> Vec<Diagnostic> {
+    [("stdout", stdout), ("stderr", stderr)]
+        .into_iter()
+        .filter(|(_, capture)| capture.original_size > 0)
+        .map(|(stream, capture)| Diagnostic {
+            source: source.into(),
+            stream: stream.into(),
+            content: String::from_utf8_lossy(&capture.bytes).into_owned(),
+            original_size: capture.original_size,
+            truncated: capture.truncated,
+        })
+        .collect()
 }
 
 fn diagnostics_for_streams(source: &str, stdout: &[u8], stderr: &[u8]) -> Vec<Diagnostic> {
@@ -891,23 +901,8 @@ fn recovery_steps(
 pub fn render_clap_json(args: &[OsString], error: &clap::Error) {
     let help = error.kind() == clap::error::ErrorKind::DisplayHelp;
     let version = error.kind() == clap::error::ErrorKind::DisplayVersion;
-    let words: Vec<_> = args.iter().filter_map(|arg| arg.to_str()).collect();
-    let commit_help = words.contains(&"commit");
-    let leaf = words
-        .iter()
-        .find_map(|word| match *word {
-            "list" | "switch" | "create" | "get" | "remove" | "merge" | "install" => {
-                Some((*word).to_owned())
-            }
-            _ => None,
-        })
-        .or_else(|| {
-            words
-                .iter()
-                .position(|word| *word == "trust")
-                .and_then(|index| words.get(index + 1))
-                .map(|leaf| format!("trust.{}", leaf.replace('-', "_")))
-        });
+    let leaf = crate::machine::command_id(args);
+    let commit_help = leaf.as_deref() == Some("commit");
     let result = if help {
         if commit_help {
             json!({"outcome":"help","arguments":["--message","--stage-all","--dry-run"],"request_schema":schema_for!(CommitRequestEnvelope),"response_schema":schema_for!(Response),"error_codes":["cli.invalid_arguments","json.invalid_request","json.unsupported_schema_version","commit.nothing_staged","commit.nothing_to_commit","commit.generator_failed","commit.git_failed","trust.approval_required"],"actions":["git.stage_paths","git.stage_patch","commit.stage_all","commit.retry_staged","trust.approve_commit_generator","help.command_json"]})

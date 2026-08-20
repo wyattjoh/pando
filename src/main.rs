@@ -231,10 +231,10 @@ fn main() {
                 rendered
             }
         };
-        if rendered.is_err()
-            && let Some(interaction) = interaction
-        {
-            eprintln!("{interaction}");
+        if rendered.is_err() {
+            if let Some(interaction) = interaction {
+                eprintln!("{interaction}");
+            }
         }
         if rendered.is_ok() && interaction.is_some_and(ui::InteractionError::is_successful) {
             return;
@@ -244,19 +244,7 @@ fn main() {
 }
 
 fn command_id(args: &[std::ffi::OsString]) -> Option<String> {
-    let words: Vec<_> = args.iter().filter_map(|arg| arg.to_str()).collect();
-    for command in [
-        "list", "switch", "create", "get", "remove", "merge", "commit", "install", "pr",
-    ] {
-        if words.contains(&command) {
-            return Some(command.into());
-        }
-    }
-    words
-        .iter()
-        .position(|word| *word == "trust")
-        .and_then(|index| words.get(index + 1))
-        .map(|leaf| format!("trust.{}", leaf.replace('-', "_")))
+    machine::command_id(args)
 }
 
 #[allow(clippy::too_many_lines)]

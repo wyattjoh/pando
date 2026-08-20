@@ -1160,7 +1160,7 @@ fn persist_install_command(
     saved_command: Option<&str>,
     command: &str,
 ) -> Result<Vec<u8>> {
-    let has_managed_block = find_bytes(existing, INSTALL_START_MARKER).is_some();
+    let has_managed_block = find_marker_line(existing, INSTALL_START_MARKER).is_some();
     if !has_managed_block && has_top_level_install(existing)? {
         if saved_command == Some(command) {
             return Ok(existing.to_vec());
@@ -1185,42 +1185,14 @@ fn has_top_level_install(existing: &[u8]) -> Result<bool> {
 }
 
 fn update_install_command(existing: &[u8], command: &str) -> Result<Vec<u8>> {
-    let has_start = find_bytes(existing, INSTALL_START_MARKER).is_some();
-    let has_end = find_bytes(existing, INSTALL_END_MARKER).is_some();
-    if has_start != has_end {
-        bail!("config.yaml contains an incomplete pando guided installer block");
-    }
-
-    let block = install_command_block(command)?;
-    let mut output = Vec::with_capacity(existing.len() + block.len() + 1);
-    let mut remaining = existing;
-    let mut inserted = false;
-    while let Some(start) = find_bytes(remaining, INSTALL_START_MARKER) {
-        output.extend_from_slice(&remaining[..start]);
-        let managed = &remaining[start..];
-        let Some(relative_end) = find_bytes(managed, INSTALL_END_MARKER) else {
-            bail!("config.yaml contains an unterminated pando guided installer block");
-        };
-        let mut after = relative_end + INSTALL_END_MARKER.len();
-        if managed.get(after..after + 2) == Some(b"\r\n") {
-            after += 2;
-        } else if managed.get(after) == Some(&b'\n') {
-            after += 1;
-        }
-        if !inserted {
-            output.extend_from_slice(&block);
-            inserted = true;
-        }
-        remaining = &managed[after..];
-    }
-    output.extend_from_slice(remaining);
-    if !inserted {
-        if !output.is_empty() && !output.ends_with(b"\n") {
-            output.push(b'\n');
-        }
-        output.extend_from_slice(&block);
-    }
-    Ok(output)
+    rewrite_managed_blocks(
+        existing,
+        INSTALL_START_MARKER,
+        INSTALL_END_MARKER,
+        &install_command_block(command)?,
+        "config.yaml contains an incomplete pando guided installer block",
+        "config.yaml contains an unterminated pando guided installer block",
+    )
 }
 
 fn config_home() -> Result<PathBuf> {
@@ -1248,37 +1220,14 @@ fn nonempty_var(name: &str) -> Option<std::ffi::OsString> {
 }
 
 fn update_config_scaffold(existing: &[u8]) -> Result<Vec<u8>> {
-    let mut output = Vec::with_capacity(existing.len() + CONFIG_SCAFFOLD.len() + 1);
-    let mut remaining = existing;
-    let mut inserted = false;
-
-    while let Some(start) = find_bytes(remaining, CONFIG_START_MARKER) {
-        output.extend_from_slice(&remaining[..start]);
-        let managed = &remaining[start..];
-        let Some(relative_end) = find_bytes(managed, CONFIG_END_MARKER) else {
-            bail!("config.yaml contains an unterminated pando configuration scaffold");
-        };
-        let mut after = relative_end + CONFIG_END_MARKER.len();
-        if managed.get(after..after + 2) == Some(b"\r\n") {
-            after += 2;
-        } else if managed.get(after) == Some(&b'\n') {
-            after += 1;
-        }
-        if !inserted {
-            output.extend_from_slice(CONFIG_SCAFFOLD);
-            inserted = true;
-        }
-        remaining = &managed[after..];
-    }
-    output.extend_from_slice(remaining);
-
-    if !inserted {
-        if !output.is_empty() && !output.ends_with(b"\n") {
-            output.push(b'\n');
-        }
-        output.extend_from_slice(CONFIG_SCAFFOLD);
-    }
-    Ok(output)
+    rewrite_managed_blocks(
+        existing,
+        CONFIG_START_MARKER,
+        CONFIG_END_MARKER,
+        CONFIG_SCAFFOLD,
+        "config.yaml contains an incomplete pando configuration scaffold",
+        "config.yaml contains an unterminated pando configuration scaffold",
+    )
 }
 
 fn source_block(integration_path: &Path) -> Vec<u8> {
@@ -1305,43 +1254,123 @@ fn append_zsh_quoted(output: &mut Vec<u8>, value: &OsStr) {
 }
 
 fn update_source_block(existing: &[u8], source_block: &[u8]) -> Result<Vec<u8>> {
-    let mut output = Vec::with_capacity(existing.len() + source_block.len() + 1);
+    rewrite_managed_blocks(
+        existing,
+        START_MARKER,
+        END_MARKER,
+        source_block,
+        ".zshrc contains an incomplete pando source block",
+        ".zshrc contains an unterminated pando source block",
+    )
+}
+
+#[derive(Clone, Copy)]
+struct MarkerLine {
+    start: usize,
+    after: usize,
+}
+
+fn rewrite_managed_blocks(
+    existing: &[u8],
+    start_marker: &[u8],
+    end_marker: &[u8],
+    generated_block: &[u8],
+    incomplete_message: &str,
+    unterminated_message: &str,
+) -> Result<Vec<u8>> {
+    let line_ending = line_ending(existing);
+    let block = normalize_line_endings(generated_block, line_ending);
+    let mut output = Vec::with_capacity(existing.len() + block.len() + line_ending.len());
     let mut remaining = existing;
     let mut inserted = false;
 
-    while let Some(start) = find_bytes(remaining, START_MARKER) {
-        output.extend_from_slice(&remaining[..start]);
-        let managed = &remaining[start..];
-        let Some(relative_end) = find_bytes(managed, END_MARKER) else {
-            bail!("{} contains an unterminated pando source block", ".zshrc");
-        };
-        let mut after = relative_end + END_MARKER.len();
-        if managed.get(after..after + 2) == Some(b"\r\n") {
-            after += 2;
-        } else if managed.get(after) == Some(&b'\n') {
-            after += 1;
+    loop {
+        let start = find_marker_line(remaining, start_marker);
+        let end = find_marker_line(remaining, end_marker);
+        match (start, end) {
+            (None, None) => break,
+            (None, Some(_)) => bail!(incomplete_message.to_owned()),
+            (Some(start), Some(end)) if end.start < start.start => {
+                bail!(incomplete_message.to_owned());
+            }
+            (Some(start), _) => {
+                output.extend_from_slice(&remaining[..start.start]);
+                let after_start = &remaining[start.after..];
+                let Some(end) = find_marker_line(after_start, end_marker) else {
+                    bail!(unterminated_message.to_owned());
+                };
+                if find_marker_line(after_start, start_marker)
+                    .is_some_and(|nested| nested.start < end.start)
+                {
+                    bail!(incomplete_message.to_owned());
+                }
+                if !inserted {
+                    output.extend_from_slice(&block);
+                    inserted = true;
+                }
+                remaining = &after_start[end.after..];
+            }
         }
-        if !inserted {
-            output.extend_from_slice(source_block);
-            inserted = true;
-        }
-        remaining = &managed[after..];
     }
     output.extend_from_slice(remaining);
 
     if !inserted {
         if !output.is_empty() && !output.ends_with(b"\n") {
-            output.push(b'\n');
+            output.extend_from_slice(line_ending);
         }
-        output.extend_from_slice(source_block);
+        output.extend_from_slice(&block);
     }
     Ok(output)
 }
 
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+fn find_marker_line(haystack: &[u8], marker: &[u8]) -> Option<MarkerLine> {
+    let mut start = 0;
+    loop {
+        let newline = haystack[start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| start + offset);
+        let after = newline.map_or(haystack.len(), |index| index + 1);
+        let mut content_end = newline.unwrap_or(haystack.len());
+        if newline.is_some() && content_end > start && haystack[content_end - 1] == b'\r' {
+            content_end -= 1;
+        }
+        if &haystack[start..content_end] == marker {
+            return Some(MarkerLine { start, after });
+        }
+        match newline {
+            Some(_) if after < haystack.len() => start = after,
+            _ => return None,
+        }
+    }
+}
+
+fn line_ending(existing: &[u8]) -> &'static [u8] {
+    existing
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .filter(|index| *index > 0 && existing[index - 1] == b'\r')
+        .map_or(b"\n", |_| b"\r\n")
+}
+
+fn normalize_line_endings(value: &[u8], line_ending: &[u8]) -> Vec<u8> {
+    let mut normalized = Vec::with_capacity(value.len());
+    let mut start = 0;
+    for (index, byte) in value.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let content_end = if index > start && value[index - 1] == b'\r' {
+            index - 1
+        } else {
+            index
+        };
+        normalized.extend_from_slice(&value[start..content_end]);
+        normalized.extend_from_slice(line_ending);
+        start = index + 1;
+    }
+    normalized.extend_from_slice(&value[start..]);
+    normalized
 }
 
 fn write_observed_target(path: &Path, observed: &TargetObservation, content: &[u8]) -> Result<()> {
@@ -1795,6 +1824,66 @@ mod tests {
             .windows(marker.len())
             .filter(|window| *window == marker)
             .count()
+    }
+
+    #[test]
+    fn marker_substrings_are_not_managed_blocks() {
+        let shell = [
+            b"echo '# >>> pando shell integration >>>'\n".as_slice(),
+            b"# longer # <<< pando shell integration <<< comment\n".as_slice(),
+        ]
+        .concat();
+        let source = [START_MARKER, b"\nnew\n".as_slice(), END_MARKER, b"\n"].concat();
+        let updated = update_source_block(&shell, &source).unwrap();
+        assert!(updated.starts_with(&shell));
+
+        let yaml = b"message: '# >>> pando configuration scaffold >>>'\nliteral: |\n  # <<< pando configuration scaffold <<<\n";
+        let updated = update_config_scaffold(yaml).unwrap();
+        assert!(updated.starts_with(yaml));
+
+        let install = b"message: '# >>> pando guided installer >>>'\ninstall:\n  command: claude\n";
+        assert_eq!(
+            persist_install_command(install, Some("claude"), "claude").unwrap(),
+            install
+        );
+        assert!(
+            persist_install_command(install, Some("claude"), "pi")
+                .unwrap_err()
+                .to_string()
+                .contains("outside Pando's managed block")
+        );
+    }
+
+    #[test]
+    fn managed_block_rewrites_preserve_crlf_convention() {
+        let existing = [
+            b"before\r\n".as_slice(),
+            START_MARKER,
+            b"\r\nold\r\n".as_slice(),
+            END_MARKER,
+            b"\r\nafter\r\n".as_slice(),
+        ]
+        .concat();
+        let desired = [START_MARKER, b"\nnew\n".as_slice(), END_MARKER, b"\n"].concat();
+        let updated = update_source_block(&existing, &desired).unwrap();
+        assert_eq!(
+            updated,
+            [
+                b"before\r\n".as_slice(),
+                START_MARKER,
+                b"\r\nnew\r\n".as_slice(),
+                END_MARKER,
+                b"\r\nafter\r\n".as_slice(),
+            ]
+            .concat()
+        );
+        assert!(
+            updated
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| *byte != b'\n' || index > 0 && updated[index - 1] == b'\r')
+        );
+        assert_eq!(update_source_block(&updated, &desired).unwrap(), updated);
     }
 
     #[test]

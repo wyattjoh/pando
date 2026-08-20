@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::{
     borrow::Cow,
     env, fs,
-    io::{self, IsTerminal, Read, Write},
+    io::{self, IsTerminal, Read},
     path::Path,
     process::Command,
 };
@@ -44,9 +44,29 @@ pub struct Request {
     #[serde(default)]
     pub remote: Option<String>,
 }
-#[derive(Clone, Debug, Serialize)]
+pub(crate) const ERRORS: &[&str] = &[
+    "cli.invalid_arguments",
+    "json.invalid_request",
+    "json.unsupported_schema_version",
+    "command.execution_failed",
+    "pr.generator_unavailable",
+    "trust.approval_required",
+    "pr.remote_selection",
+    "provider.unsupported",
+    "pr.invalid_source",
+    "provider.unauthenticated",
+    "provider.preflight_failed",
+    "pr.already_exists",
+    "repository.dirty",
+    "pr.generator_failed",
+    "git.push_failed",
+    "provider.creation_failed",
+];
+pub(crate) const ACTIONS: &[&str] = &["retry"];
+
+#[derive(Clone, Debug, JsonSchema, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
-enum PrResult {
+pub(crate) enum PrResult {
     DryRun {
         provider: String,
         base_repository: String,
@@ -145,8 +165,10 @@ pub fn run(inv: Invocation) -> Result<()> {
         if inv.title.is_some() || inv.description.is_some() || inv.description_file.is_some() {
             bail!("json.invalid_request: command options are forbidden with --input-output json");
         }
-        let request: RequestEnvelope = crate::protocol::read_request()
-            .map_err(|message| anyhow::anyhow!("json.invalid_request: {message}"))?;
+        let request: RequestEnvelope = match crate::protocol::read_request() {
+            Ok(request) => request,
+            Err(message) => return render_failure("json.invalid_request", &message, None),
+        };
         if request.schema_version != crate::protocol::SCHEMA_VERSION {
             return render_failure(
                 "json.unsupported_schema_version",
@@ -676,24 +698,30 @@ fn generate_with_retries(
 }
 
 fn run_generator(command: &str, dir: &Path, prompt: &str) -> Result<(String, String)> {
-    let mut child = Command::new("/bin/sh")
+    let mut process = Command::new("/bin/sh");
+    process
         .args(["-c", command])
         .current_dir(dir)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .context("generator stdin unavailable")?
-        .write_all(prompt.as_bytes())?;
-    let output = child.wait_with_output()?;
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let output = crate::generator::run(
+        &mut process,
+        prompt.as_bytes(),
+        crate::generator::Limits::default(),
+    )
+    .context("PR metadata generator execution failed")?;
     if !output.status.success() {
-        bail!("PR metadata generator failed");
+        let detail = String::from_utf8_lossy(&output.stderr.bytes);
+        let detail = detail.trim();
+        if detail.is_empty() {
+            bail!("PR metadata generator failed with status {}", output.status);
+        }
+        bail!(
+            "PR metadata generator failed with status {}\n{detail}",
+            output.status
+        );
     }
     parse_metadata(
-        &String::from_utf8(output.stdout)
+        &String::from_utf8(output.stdout.bytes)
             .map_err(|_| anyhow::anyhow!("PR generator produced non-UTF-8 output"))?,
     )
 }
@@ -814,8 +842,10 @@ fn resolved_pull_request_template(
     repo: &crate::git::Repository,
     config: &crate::config::EffectiveConfig,
 ) -> Result<String> {
-    if let Some(value) = config.pull_request_template.as_ref()
-        && value.source != crate::config::GenerationSource::Global
+    if let Some(value) = config
+        .pull_request_template
+        .as_ref()
+        .filter(|value| value.source != crate::config::GenerationSource::Global)
     {
         return Ok(value.value.clone());
     }
@@ -872,6 +902,7 @@ fn parse_metadata(value: &str) -> Result<(String, String)> {
 
 fn render_outcome(outcome: PrOutcome, json_mode: bool, request_id: Option<String>) -> Result<()> {
     if json_mode {
+        let failed = outcome.result.is_err();
         let response = crate::protocol::adapt(
             "pr.create",
             request_id,
@@ -882,6 +913,9 @@ fn render_outcome(outcome: PrOutcome, json_mode: bool, request_id: Option<String
             outcome.recovery,
         )?;
         crate::protocol::write(&response)?;
+        if failed {
+            std::process::exit(1);
+        }
         return Ok(());
     }
     match outcome.result {

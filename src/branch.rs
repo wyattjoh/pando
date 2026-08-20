@@ -178,7 +178,7 @@ impl<'repository> Snapshot<'repository> {
             }));
         }
         if let Some(upstream) = self.upstreams.get(branch) {
-            let (remote, upstream_branch) = upstream
+            let (remote, _) = upstream
                 .split_once('/')
                 .filter(|(remote, branch)| !remote.is_empty() && !branch.is_empty())
                 .with_context(|| {
@@ -186,7 +186,7 @@ impl<'repository> Snapshot<'repository> {
                 })?;
             return Ok(PushResolution::Planned(PushPlan {
                 remote: remote.to_owned(),
-                branch: upstream_branch.to_owned(),
+                branch: branch.to_owned(),
                 set_upstream: false,
             }));
         }

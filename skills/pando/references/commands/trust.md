@@ -36,10 +36,7 @@ Executable identity is the **ordered `command` strings only** —
 comments, and formatting are excluded on purpose. Reordering or editing a
 command revokes approval; renaming a step does not.
 
-Approval is scoped to the **canonical path of this repository clone** and
-stored atomically in
-`${XDG_CONFIG_HOME:-$HOME/.config}/pando/trust.json`. It is never
-auto-shared across clones of the same repository.
+Approval is scoped to the **canonical byte-preserving path of this repository clone** and stored with file-and-directory-durable atomic replacement in `${XDG_CONFIG_HOME:-$HOME/.config}/pando/trust.json`. Mutating read-modify-write transactions hold a bounded store lease through the durable replacement, so concurrent approvals and resets serialize instead of losing records. It is never auto-shared across clones of the same repository.
 
 `reset`/`commit-reset`/`merge-reset` are idempotent and remove only the
 current clone's record. After `reset`, the next operation that reaches a
@@ -70,4 +67,4 @@ pando trust merge-reset       # revoke squash-generator trust for this clone
 
 ## Structured JSON contract
 
-Trust leaves identify as `trust.status`, `trust.reset`, `trust.commit_status`, `trust.commit_reset`, `trust.commit_approve`, `trust.merge_status`, `trust.merge_reset`, and `trust.merge_approve`. Status leaves allow omitted `input`; mutating leaves accept `input.dry_run`. Status reports configured/trusted state, source metadata, counts, and identities without ordinary command contents. Approval previews and approval-required context include the generator settings a person must review. JSON never writes approval: it returns a human-required next step. Reset dry runs emit unattempted effects; real resets distinguish `reset` and `already_reset`. Exact-leaf JSON help is runtime-derived.
+Trust leaves identify as `trust.status`, `trust.reset`, `trust.commit_status`, `trust.commit_reset`, `trust.commit_approve`, `trust.merge_status`, `trust.merge_reset`, and `trust.merge_approve`. Status leaves allow omitted `input`; mutating leaves accept `input.dry_run`. Status reports configured/trusted state, source metadata, counts, and identities without ordinary command contents. Approval previews and approval-required context include the generator settings a person must review. JSON never writes approval: it returns a human-required next step. Reset dry runs emit unattempted effects; real resets distinguish `reset` and `already_reset`; bounded store contention returns `trust.busy` without authorizing anything. Exact-leaf JSON help derives the successful trust result schema for every supported leaf. The three unsupported PR trust leaves advertise `trust.json_unsupported` and no successful result schema.

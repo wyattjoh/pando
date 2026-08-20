@@ -39,10 +39,12 @@ Usage: pando commit [OPTIONS]
 - **`{"source":"configured_generator"}`** (no `-m` in human mode) renders the
   staged snapshot into a MiniJinja prompt sent on stdin to the configured
   generator command (`/bin/sh -c`, run from the worktree root, ordinary
-  environment/`PATH`). The generator's stdout becomes the commit message.
-  Git's normal hooks, signing, and failure behavior remain enabled. A
-  generator failure after staging everything leaves the all-changes snapshot
-  staged for inspection or retry.
+  environment/`PATH`). The generator's stdout becomes the commit message;
+  stdout and stderr are independently bounded at 64 KiB while stdin and both
+  output pipes are serviced concurrently. Overflow fails generation before
+  commit creation. Git's normal hooks, signing, and failure behavior remain
+  enabled. A generator failure after staging everything leaves the all-changes
+  snapshot staged for inspection or retry.
 - Shared (`.pando.yaml`) generator fields (`command`/`template`) are
   **untrusted** and must be approved via `pando trust commit-approve`
   (interactive, default-negative) before they can win — **JSON requests
@@ -127,7 +129,6 @@ use the one the response gives you.
 | `commit.invalid_message` | Provided message was empty after trimming | Provide a non-empty message |
 | `commit.git_failed` | `git commit` itself failed | Inspect `diagnostics` |
 | `commit.result_failed` | Commit was created but its hash couldn't be read | Check `git log` directly |
-| `output.unsupported` | Any command other than `commit` was asked for `--output json` | Use human mode for that command |
 | `cli.invalid_arguments` | clap failed to parse the arguments | Fix the invocation |
 
 ## Human-mode commands (interactive terminal use only)
@@ -151,7 +152,7 @@ pando trust commit-approve
 ## Introspection
 
 ```sh
-pando commit --help --output json   # generated request/response JSON Schemas
+pando commit --help --output json   # runtime request/response schemas and catalogs
 ```
 
 The typed command outcome (`docs/adr/0002-render-typed-command-outcomes.md`)

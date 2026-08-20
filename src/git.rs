@@ -169,11 +169,10 @@ impl GitProcess {
             stdout,
             stderr,
         };
-        if clear_on_success
-            && output.status.success()
-            && let Some(relay) = relay
-        {
-            clear_relayed_output(&relay);
+        if clear_on_success && output.status.success() {
+            if let Some(relay) = relay {
+                clear_relayed_output(&relay);
+            }
         }
         Ok(output)
     }
@@ -859,12 +858,12 @@ fn repository_from_worktrees(cwd: &Path, discovery: Discovery) -> Result<Reposit
         .filter(|worktree| !worktree.is_bare())
         .map(|worktree| canonical_or_normalized(&worktree.path))
         .transpose()?;
-    let common = git_stdout(
+    let common = git_path_stdout(
         cwd,
         ["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )
     .context("failed to resolve Git's common directory")?;
-    let common_dir = canonical_or_normalized(Path::new(&common))?;
+    let common_dir = canonical_or_normalized(&common)?;
     Ok(Repository {
         worktrees,
         current_index,
@@ -1179,10 +1178,10 @@ fn parse_commit_batch(
             bail!("git cat-file omitted an object separator");
         }
         cursor += 1;
-        if kind == "commit"
-            && let Some(timestamp) = parse_committer_timestamp(object)
-        {
-            resolved.insert(head.clone(), timestamp);
+        if kind == "commit" {
+            if let Some(timestamp) = parse_committer_timestamp(object) {
+                resolved.insert(head.clone(), timestamp);
+            }
         }
     }
     Ok(resolved)
@@ -1394,17 +1393,24 @@ fn fetch_base_ref(cwd: &Path, base: &BaseRef) -> Result<String> {
 fn push(cwd: &Path, plan: &PushPlan, inherit: bool) -> Result<()> {
     let refspec = format!("{}:{}", plan.branch, plan.branch);
     if inherit {
-        let output = GitProcess::new(cwd, ["push", "-u", &plan.remote, &refspec])
-            .streamed()
-            .context("failed to start git push")?;
+        let output = if plan.set_upstream {
+            GitProcess::new(cwd, ["push", "-u", &plan.remote, &refspec]).streamed()
+        } else {
+            GitProcess::new(cwd, ["push", &plan.remote, &refspec]).streamed()
+        }
+        .context("failed to start git push")?;
         if output.status.success() {
             Ok(())
         } else {
             bail!("git push failed with {}", output.status)
         }
     } else {
-        let output = run_git(cwd, ["push", "-u", &plan.remote, &refspec])
-            .context("failed to start git push")?;
+        let output = if plan.set_upstream {
+            run_git(cwd, ["push", "-u", &plan.remote, &refspec])
+        } else {
+            run_git(cwd, ["push", &plan.remote, &refspec])
+        }
+        .context("failed to start git push")?;
         ensure_success(&output, "git push")
     }
 }
@@ -1415,9 +1421,9 @@ fn push(cwd: &Path, plan: &PushPlan, inherit: bool) -> Result<()> {
 ///
 /// Returns an error when Git cannot resolve the worktree's administrative directory.
 fn worktree_identity(cwd: &Path) -> Result<PathBuf> {
-    let git_dir = git_stdout(cwd, ["rev-parse", "--path-format=absolute", "--git-dir"])
+    let git_dir = git_path_stdout(cwd, ["rev-parse", "--path-format=absolute", "--git-dir"])
         .context("failed to resolve the worktree's Git administrative directory")?;
-    canonical_or_normalized(Path::new(&git_dir))
+    canonical_or_normalized(&git_dir)
 }
 
 fn head_commit_observed(cwd: &Path) -> Result<String> {
@@ -1895,6 +1901,17 @@ fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String> {
     let output = run_git(cwd, args).with_context(|| format!("failed to start {operation}"))?;
     ensure_success(&output, &operation)?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn git_path_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<PathBuf> {
+    let operation = format!("git {}", args.join(" "));
+    let output = run_git(cwd, args).with_context(|| format!("failed to start {operation}"))?;
+    ensure_success(&output, &operation)?;
+    let mut bytes = output.stdout;
+    if bytes.pop() != Some(b'\n') {
+        bail!("{operation} returned a path without a record terminator");
+    }
+    Ok(PathBuf::from(OsString::from_vec(bytes)))
 }
 
 fn current_record(worktrees: &[Worktree], cwd: &Path) -> Option<usize> {

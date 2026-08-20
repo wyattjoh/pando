@@ -6,7 +6,7 @@
 
 use crate::{
     git::{Repository, RepositoryObservation},
-    install,
+    install, pr,
     protocol::{self, EmptyInput},
     read_only::{self, GetProperty, GetRequest},
     trust,
@@ -18,7 +18,31 @@ use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::env;
+use std::{env, ffi::OsString};
+
+/// Resolves the exact structured command leaf named by a CLI argument vector.
+#[must_use]
+pub fn command_id(args: &[OsString]) -> Option<String> {
+    let words: Vec<_> = args.iter().filter_map(|arg| arg.to_str()).collect();
+    if let Some(index) = words.iter().position(|word| *word == "pr") {
+        if words.get(index + 1) == Some(&"create") {
+            return Some("pr.create".into());
+        }
+    }
+    if let Some(index) = words.iter().position(|word| *word == "trust") {
+        if let Some(leaf) = words.get(index + 1) {
+            return Some(format!("trust.{}", leaf.replace('-', "_")));
+        }
+    }
+    for command in [
+        "list", "switch", "create", "get", "remove", "merge", "commit", "install",
+    ] {
+        if words.contains(&command) {
+            return Some(command.into());
+        }
+    }
+    None
+}
 
 fn checked_request<I>(
     request: protocol::Request<I>,
@@ -307,10 +331,15 @@ pub fn trust(command: &str, request_mode: bool, dry_run_flag: bool) -> Result<()
                 "command options are forbidden with --input-output json",
             );
         }
-        if matches!(
-            command,
-            "trust.status" | "trust.commit_status" | "trust.merge_status"
-        ) {
+        if trust::Command::from_id(command).is_some_and(|leaf| {
+            matches!(
+                leaf,
+                trust::Command::HooksStatus
+                    | trust::Command::CommitStatus
+                    | trust::Command::PrStatus
+                    | trust::Command::MergeStatus
+            )
+        }) {
             match protocol::read_optional_request::<EmptyInput>() {
                 Ok(r) if r.schema_version == 1 => (r.request_id, false),
                 Ok(r) => {
@@ -345,12 +374,8 @@ pub fn trust(command: &str, request_mode: bool, dry_run_flag: bool) -> Result<()
         Ok(v) => v,
         Err(e) => return emit_err(command, id, "repository.invalid", format!("{e:#}")),
     };
-    let Some(leaf) = trust::Command::from_id(command).filter(|leaf| {
-        !matches!(
-            leaf,
-            trust::Command::PrStatus | trust::Command::PrReset | trust::Command::PrApprove
-        )
-    }) else {
+    let Some(leaf) = trust::Command::from_id(command).filter(|leaf| leaf.supports_structured())
+    else {
         // PR trust leaves intentionally retain their published version 1 refusal.
         return emit_err(
             command,
@@ -359,7 +384,13 @@ pub fn trust(command: &str, request_mode: bool, dry_run_flag: bool) -> Result<()
             format!("{command} does not support structured output; run it interactively"),
         );
     };
-    let outcome = trust::execute(&repo, leaf, dry)?;
+    let outcome = match trust::execute(&repo, leaf, dry) {
+        Ok(outcome) => outcome,
+        Err(error) if trust::is_store_busy(&error) => {
+            return emit_err(command, id, "trust.busy", error.to_string());
+        }
+        Err(error) => return Err(error),
+    };
     let failed = outcome.result.is_err();
     let response = protocol::adapt(
         leaf.id(),
@@ -537,7 +568,11 @@ pub fn install(request_mode: bool, dry_flag: bool, no_guide: bool) -> Result<()>
 #[allow(clippy::too_many_lines)]
 pub fn help(command: &str) -> Value {
     let request_schema = match command {
-        "list" | "trust.status" | "trust.commit_status" | "trust.merge_status" => {
+        "list"
+        | "trust.status"
+        | "trust.commit_status"
+        | "trust.pr_status"
+        | "trust.merge_status" => {
             json!(schemars::schema_for!(
                 protocol::OptionalInputRequest<EmptyInput>
             ))
@@ -554,11 +589,14 @@ pub fn help(command: &str) -> Value {
         "trust.reset"
         | "trust.commit_reset"
         | "trust.commit_approve"
+        | "trust.pr_reset"
+        | "trust.pr_approve"
         | "trust.merge_reset"
         | "trust.merge_approve" => json!(schemars::schema_for!(protocol::Request<DryRunInput>)),
         "install" => json!(schemars::schema_for!(
             protocol::Request<install::InstallInput>
         )),
+        "pr.create" => json!(schemars::schema_for!(pr::RequestEnvelope)),
         _ => Value::Null,
     };
     let (errors, actions): (&[&str], &[&str]) = match command {
@@ -585,14 +623,20 @@ pub fn help(command: &str) -> Value {
             crate::lifecycle::MERGE_ACTIONS,
         ),
         "install" => (install::INSTALL_ERRORS, install::INSTALL_ACTIONS),
+        "pr.create" => (pr::ERRORS, pr::ACTIONS),
         _ => (&[], &[]),
     };
     let result_schema = match command {
         "list" => json!(schemars::schema_for!(read_only::ListResult)),
         "get" => json!(schemars::schema_for!(read_only::GetResult)),
         "install" => json!(schemars::schema_for!(install::InstallResult)),
+        "remove" => json!(schemars::schema_for!(crate::lifecycle::RemovalResult)),
         "merge" => json!(schemars::schema_for!(crate::lifecycle::MergeResult)),
         "switch" | "create" => json!(schemars::schema_for!(OperationResult)),
+        "pr.create" => json!(schemars::schema_for!(pr::PrResult)),
+        id if trust::Command::from_id(id).is_some_and(trust::Command::supports_structured) => {
+            json!(schemars::schema_for!(trust::Success))
+        }
         _ => Value::Null,
     };
     let selection_required_context_schema = if command == "switch" {

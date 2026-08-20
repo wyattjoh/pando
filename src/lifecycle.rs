@@ -1,5 +1,6 @@
 use std::{
     env, fs,
+    fs::OpenOptions,
     io::{self, Write},
     os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
@@ -7,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use fs2::FileExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -220,6 +222,7 @@ pub const MERGE_ERRORS: &[&str] = &[
     "merge.remove_failed",
     "merge.journal_failed",
     "merge.execution_failed",
+    "merge.busy",
     "merge.blocked",
     "trust.read_failed",
 ];
@@ -250,6 +253,8 @@ pub enum PreflightFailureKind {
     SquashGeneratorMissing,
     Dirty,
     NotFastForwardable,
+    StalePlan,
+    LeaseBusy,
     Blocked,
 }
 #[derive(Debug)]
@@ -287,6 +292,8 @@ pub fn merge_preflight_outcome(error: &PreflightFailure) -> MergeOutcome {
         PreflightFailureKind::NotFastForwardable => "merge.not_fast_forwardable",
         PreflightFailureKind::NothingToMerge => "merge.nothing_to_merge",
         PreflightFailureKind::SquashGeneratorMissing => "merge.squash_generator_missing",
+        PreflightFailureKind::StalePlan => "merge.stale_plan",
+        PreflightFailureKind::LeaseBusy => "merge.busy",
         _ => "merge.blocked",
     };
     MergeOutcome {
@@ -304,15 +311,28 @@ pub fn merge_preflight_outcome(error: &PreflightFailure) -> MergeOutcome {
 
 type PreflightResult<T> = std::result::Result<T, PreflightFailure>;
 
+#[derive(Debug)]
+struct MergeLease {
+    file: fs::File,
+}
+
+impl Drop for MergeLease {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
 /// Validated, read-only state held behind the journaled merge preparation seam.
 #[derive(Debug)]
 struct MergePlan {
+    _lease: Option<MergeLease>,
     pub repository: Repository,
     pub context: MergeContext,
     pub config: EffectiveConfig,
     pub needs_rebase: bool,
     pub(crate) squash: squash::Assessment,
     resuming_squash: bool,
+    integration_observed: bool,
     /// Ordered lifecycle effects. Planning never attempts or completes one.
     pub effects: Vec<Effect>,
 }
@@ -527,6 +547,7 @@ fn merge_trust_recovery(
 fn plan_merge(
     policy: MergePolicy,
     changes: journaled_merge::ChangePolicy,
+    acquire_lease: bool,
 ) -> PreflightResult<MergePlan> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = RepositoryObservation::new(&cwd).repository()?;
@@ -537,6 +558,9 @@ fn plan_merge(
     let in_place = repository.current().path == *primary;
     let current_history = HistoryObservation::new(&repository.current().path);
     let identity = RepositoryObservation::new(&repository.current().path).worktree_identity()?;
+    let lease = acquire_lease
+        .then(|| merge_lease(&repository.common_dir, &identity))
+        .transpose()?;
     let journal = read_journal(&repository.common_dir, &identity)?;
     let rebase_active = LifecycleMutation::new(&repository.current().path).rebase_in_progress()?;
     if rebase_active && journal.is_none() {
@@ -613,7 +637,37 @@ fn plan_merge(
     }
     let source_commit = merge_target.source_commit;
     let target_commit = merge_target.target_commit;
-    let cleanup_pending = journal.as_ref().is_some_and(|s| s.cleanup_pending);
+    let mut integration_observed = false;
+    if let Some(state) = journal.as_ref() {
+        if let (Some(validated_source), Some(validated_target)) =
+            (&state.validated_source, &state.validated_target)
+        {
+            if source_commit != *validated_source {
+                return Err(preflight(
+                    PreflightFailureKind::StalePlan,
+                    "the journaled source changed after validation; restore it or reconcile the lifecycle journal",
+                ));
+            }
+            if target_commit == *validated_source {
+                if !HistoryObservation::new(primary)
+                    .is_ancestor(validated_target, validated_source)?
+                {
+                    return Err(preflight(
+                        PreflightFailureKind::StalePlan,
+                        "the journaled validation ancestry is no longer observable",
+                    ));
+                }
+                integration_observed = true;
+            } else if state.cleanup_pending || target_commit != *validated_target {
+                return Err(preflight(
+                    PreflightFailureKind::StalePlan,
+                    "the target changed after journaled validation; reconcile it before retrying",
+                ));
+            }
+        }
+    }
+    let cleanup_pending =
+        journal.as_ref().is_some_and(|state| state.cleanup_pending) || integration_observed;
     let needs_rebase =
         !cleanup_pending && !rebase_active && !current_history.is_ancestor(&target, &source)?;
     if needs_rebase && policy.no_rebase {
@@ -696,12 +750,14 @@ fn plan_merge(
     let removes = policy.removes_topic(in_place);
     let effects = planned_merge_effects(&context, &config, needs_rebase, removes);
     Ok(MergePlan {
+        _lease: lease,
         repository,
         context,
         config,
         needs_rebase,
         squash,
         resuming_squash,
+        integration_observed,
         effects,
     })
 }
@@ -1246,18 +1302,18 @@ pub(crate) fn execute_removal_with_observations(
             effects[hook_effect].completed = true;
         }
 
-        if let Some(path) = &target.stale_journal
-            && let Err(error) = fs::remove_file(path)
-        {
-            targets[index].status = RemovalTargetStatus::Failed;
-            return removal_failure(
-                plan,
-                targets,
-                effects,
-                diagnostics,
-                RemovalFailureKind::JournalCleanup,
-                error,
-            );
+        if let Some(path) = &target.stale_journal {
+            if let Err(error) = fs::remove_file(path) {
+                targets[index].status = RemovalTargetStatus::Failed;
+                return removal_failure(
+                    plan,
+                    targets,
+                    effects,
+                    diagnostics,
+                    RemovalFailureKind::JournalCleanup,
+                    error,
+                );
+            }
         }
 
         let remove_effect = hook_effect + 1;
@@ -1898,6 +1954,24 @@ fn execute_merge(
             validated_target: None,
         }
     };
+    if plan.integration_observed {
+        mark_effect(&mut effects, "fast_forward_merge", false, true);
+        if plan.context.policy.removes_topic(plan.context.in_place) {
+            state.cleanup_pending = true;
+            if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
+                return execution_failure(
+                    plan,
+                    effects,
+                    diagnostics,
+                    MergePhase::Integration,
+                    MergeExecutionFailureKind::Journal,
+                    error,
+                );
+            }
+            return execute_merge_cleanup(plan, &state, effects, diagnostics, observations);
+        }
+        return finish_retained_merge(plan, &state, effects, diagnostics);
+    }
     if plan.context.cleanup_pending {
         return execute_merge_cleanup(plan, &state, effects, diagnostics, observations);
     }
@@ -2507,6 +2581,15 @@ fn execute_merge(
         }
         return execute_merge_cleanup(plan, &state, effects, diagnostics, observations);
     }
+    finish_retained_merge(plan, &state, effects, diagnostics)
+}
+
+fn finish_retained_merge(
+    plan: &MergePlan,
+    state: &MergeJournal,
+    mut effects: Vec<Effect>,
+    diagnostics: Vec<MergeDiagnostic>,
+) -> MergeExecutionOutcome {
     mark_effect(&mut effects, "journal_cleanup", true, false);
     if let Err(error) = remove_journal(&plan.repository.common_dir, &state.topic_identity) {
         return execution_failure(
@@ -2521,6 +2604,7 @@ fn execute_merge(
     mark_effect(&mut effects, "journal_cleanup", true, true);
     let mut context = plan.context.clone();
     context.phase = MergePhase::Complete;
+    context.cleanup_pending = false;
     context.journaled = false;
     MergeExecutionOutcome {
         context,
@@ -3004,13 +3088,53 @@ fn primary_branch(repository: &Repository) -> Result<String> {
         .context("the primary worktree is not on a named branch")
 }
 
-fn journal_path(common_dir: &Path, identity: &Path) -> PathBuf {
+fn lifecycle_key(identity: &Path) -> String {
     let mut digest = Sha256::new();
     digest.update(identity.as_os_str().as_bytes());
+    hash::encode_hex(&digest.finalize())
+}
+
+fn journal_path(common_dir: &Path, identity: &Path) -> PathBuf {
     common_dir
         .join("pando-state/lifecycle")
-        .join(format!("{}.json", hash::encode_hex(&digest.finalize())))
+        .join(format!("{}.json", lifecycle_key(identity)))
 }
+
+fn merge_lease(common_dir: &Path, identity: &Path) -> PreflightResult<MergeLease> {
+    let path = common_dir
+        .join("pando-state/merge-leases")
+        .join(format!("{}.lock", lifecycle_key(identity)));
+    let parent = path
+        .parent()
+        .expect("a lifecycle lease always has a parent directory");
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create merge lease directory {}",
+            parent.display()
+        )
+    })?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("failed to open lifecycle lease {}", path.display()))?;
+    match FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(MergeLease { file }),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(preflight(
+            PreflightFailureKind::LeaseBusy,
+            "another merge invocation is already executing this topic lifecycle; retry after it finishes",
+        )),
+        Err(error) => Err(anyhow::Error::new(error)
+            .context(format!(
+                "failed to acquire lifecycle lease {}",
+                path.display()
+            ))
+            .into()),
+    }
+}
+
 fn decode_journal(bytes: &[u8]) -> Result<MergeJournal> {
     let version: JournalVersion = serde_json::from_slice(bytes)
         .context("lifecycle journal must contain only a supported numeric version before its body is decoded")?;

@@ -10,11 +10,11 @@
 
 ## Requirements
 
-- macOS or Linux
+- Linux, or macOS (supported but not currently CI-verified while hosted macOS runners carry private-repository billing)
 - Git
 - zsh for parent-shell directory switching
 - Pi, Claude Code, Codex, Gemini CLI, or another interactive agent command for guided configuration
-- Rust 1.85 or newer when building from source
+- Rust 1.85 or newer when building from source; CI checks the declared 1.85 minimum explicitly
 
 ## Install
 
@@ -67,7 +67,7 @@ printf '%s\n' '{"schema_version":1,"input":{"branch":"feature/login","descriptio
   | pando create --input-output json
 ```
 
-`--output json` instead uses ordinary argv flags as input. Both modes emit exactly one newline-terminated JSON document on stdout and no ordinary stderr on typed success or failure unless `--verbose` explicitly enables diagnostics. Generated exact-leaf help restricts request and response `schema_version` to the literal `1`, and response `status` to `"success"` or `"error"`. Requests reject unknown fields, unsupported versions, trailing data, and mixed stdin/argv command input. Paths use tagged UTF-8 or base64 objects; responses carry typed results or errors plus context, effects, bounded diagnostics, and recovery steps. Structured `list` worktrees and `switch.selection_required` choices include nullable `last_commit_at` values as RFC 3339 committer timestamps with explicit offsets. These records stay in Git order regardless of personal sort configuration; metadata lookup failures use `null` values and a bounded diagnostic.
+`--output json` instead uses ordinary argv flags as input. Both modes emit exactly one newline-terminated JSON document on stdout and no ordinary stderr on typed success or failure unless `--verbose` explicitly enables diagnostics. Every response with `status: "error"` exits nonzero. Generated exact-leaf help uses the leaf command identity (for example `pr.create`) and exposes runtime-derived request and response schemas, successful-result schemas where published, plus the complete stable error and action catalogs. Its schemas restrict request and response `schema_version` to the literal `1`, and response `status` to `"success"` or `"error"`. Requests reject unknown fields, unsupported versions, trailing data, and mixed stdin/argv command input. Paths use tagged UTF-8 or base64 objects; responses carry typed results or errors plus context, effects, bounded diagnostics, and recovery steps. Structured `list` worktrees and `switch.selection_required` choices include nullable `last_commit_at` values as RFC 3339 committer timestamps with explicit offsets. These records stay in Git order regardless of personal sort configuration; metadata lookup failures use `null` values and a bounded diagnostic.
 
 JSON execution is deterministic and noninteractive. Mutating commands support dry-run planning, while shared trust approval and installer writes remain manual human operations. The canonical property is `primary-worktree-path` (`primary_worktree_path` in JSON); the former Main spelling is not an alias. The installed zsh wrappers for `pando` and `pd` pass JSON invocations and all noninteractive-shell invocations through byte-for-byte without destination capture or `cd`.
 
@@ -196,7 +196,7 @@ Preserve this managed block when editing the global config. On a later run, the 
 
 Executable identity consists only of the effective ordered command strings. Before untrusted nonempty setup is allowed to create a worktree, the CLI shows every command and asks for approval. Names, comments, and formatting do not invalidate approval; adding, removing, editing, reordering, or reverting commands does.
 
-Approval is scoped to the canonical path of this repository clone and stored atomically in `${XDG_CONFIG_HOME:-$HOME/.config}/pando/trust.json`. It is never shared automatically across clones and there is no noninteractive bypass.
+Approval is scoped to the canonical byte-preserving path of this repository clone and stored with file-and-directory-durable atomic replacement in `${XDG_CONFIG_HOME:-$HOME/.config}/pando/trust.json`. Concurrent approvals and resets serialize through a bounded trust-store lease instead of overwriting one another. It is never shared automatically across clones and there is no noninteractive bypass.
 
 ```sh
 pando trust status
@@ -207,7 +207,7 @@ pando trust reset
 
 For nonempty setup, an incomplete record is written under Git's common directory after worktree creation and before the first step. A failed step preserves the worktree, emits its destination, and returns nonzero. The zsh wrapper enters it so it can be inspected. Ctrl-C preserves the worktree and record but emits no destination, so the shell stays put.
 
-A later switch to that worktree offers:
+A later human switch to that worktree offers the recovery menu below. Structured switching fails with `switch.setup_incomplete`, returns no successful destination result, and provides a human-only `switch.recover_setup` next step that identifies the existing worktree.
 
 - **Retry setup** — resolve the invoking worktree's current shared configuration and current primary local overlay, rechecking trust if commands changed;
 - **Enter once** — preserve the record, enter with a warning, and return nonzero;
@@ -235,7 +235,7 @@ pando commit --stage-all          # use the configured generator
 
 When an interactive bare commit finds a dirty worktree but an empty index, it previews the all-change candidate and offers a default-No confirmation. `--dry-run` validates and previews without staging, generating, running hooks, changing trust, or committing. Shared generation is approved separately with `pando trust commit-approve`.
 
-Without a message, `pando commit` renders the staged snapshot into a MiniJinja prompt and sends it on stdin to a configured generator. Its stdout becomes the complete commit message; its stderr remains visible. The generator runs from the worktree root through `/bin/sh -c`. Git's normal hooks, signing, and failures remain enabled. A generator failure after `--stage-all` leaves the all-changes snapshot staged for inspection or retry.
+Without a message, `pando commit` renders the staged snapshot into a MiniJinja prompt and sends it on stdin to a configured generator. Its stdout becomes the complete commit message; its stderr remains visible. The generator runs from the worktree root through `/bin/sh -c`, with stdout and stderr independently bounded at 64 KiB while stdin and both output pipes are serviced concurrently. Limit overflow fails generation before commit creation. Git's normal hooks, signing, and failures remain enabled. A generator failure after `--stage-all` leaves the all-changes snapshot staged for inspection or retry.
 
 Configure a personal generator globally:
 
@@ -309,9 +309,9 @@ JSON mode emits exactly one document on stdout and nothing on stderr. Errors are
 
 `pando remove [--force] [branch ...]` removes registered topic worktrees but never deletes their local branch refs. No arguments removes the current topic; explicit branches select registered topics. Dirty worktrees require `--force`, and removing the current worktree emits the primary path after deletion.
 
-`pando pr create` requires `pr.generation.command` only when `--title` or `--description` is omitted. Supplying both explicit values bypasses generator configuration and trust checks. Missing generator configuration is rejected before any dirty-worktree commit, skip, or yolo handling. The PR provider defaults to `auto`: GitHub remotes use `gh`, while other forge hosts use a matching `tea` login for Gitea or Forgejo. Set `pr.provider` to `github` or `tea` in global, shared, or local configuration to override detection; local wins over shared, then global. The Tea adapter represents draft PRs with the server-default `WIP:` title prefix for compatibility across Tea versions. When no target branch is configured, PR and merge operations fall back to the fetched `origin/HEAD`, then local `main`, then local `master`.
+`pando pr create` requires `pr.generation.command` only when `--title` or `--description` is omitted. Supplying both explicit values bypasses generator configuration and trust checks. Missing generator configuration is rejected before any dirty-worktree commit, skip, or yolo handling. Generator stdout and stderr are independently bounded at 64 KiB, and overflow fails before push or provider creation. An existing upstream chooses the remote but never substitutes its branch name for the local topic being published. The PR provider defaults to `auto`: GitHub remotes use `gh`, while other forge hosts use a matching `tea` login for Gitea or Forgejo. Set `pr.provider` to `github` or `tea` in global, shared, or local configuration to override detection; local wins over shared, then global. The Tea adapter represents draft PRs with the server-default `WIP:` title prefix for compatibility across Tea versions. When no target branch is configured, PR and merge operations fall back to the fetched `origin/HEAD`, then local `main`, then local `master`.
 
-`pando merge [--no-rebase] [--no-remove] [--no-squash] [--yolo]` integrates the current clean topic into the configured target checked out in the primary worktree using `git merge --ff-only`. When no target is configured, it falls back to the already-fetched `origin/HEAD` branch, then local `main`, then local `master`, without fetching. A diverged topic rebases by default. `--yolo` stages every local change and, when squashing (the default), incorporates it directly into the generated squash commit, so only the squash generator runs. With `--no-squash`, it instead runs the equivalent of `pando commit --stage-all`, using the configured commit-message generator. It is available only with human output and cannot be combined with `--dry-run`. Phase-specific `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries; the journal pins recovery state through conflicts and cleanup retries.
+`pando merge [--no-rebase] [--no-remove] [--no-squash] [--yolo]` integrates the current clean topic into the configured target checked out in the primary worktree using `git merge --ff-only`. When no target is configured, it falls back to the already-fetched `origin/HEAD` branch, then local `main`, then local `master`, without fetching. A diverged topic rebases by default. `--yolo` stages every local change and, when squashing (the default), incorporates it directly into the generated squash commit, so only the squash generator runs. With `--no-squash`, it instead runs the equivalent of `pando commit --stage-all`, using the configured commit-message generator. It is available only with human output and cannot be combined with `--dry-run`. Phase-specific `pre-merge` and `pre-remove` hooks run at their lifecycle boundaries. The journal pins recovery state through conflicts and cleanup retries, and a per-topic lease rejects overlapping execution as `merge.busy`. Retry recognizes an already-completed fast-forward without rerunning validated hooks; source or target drift fails as `merge.stale_plan` instead of replanning.
 
 ### Squashing
 

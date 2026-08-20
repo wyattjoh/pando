@@ -1,12 +1,15 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::Write,
+    io::{self, Write},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -72,10 +75,28 @@ impl Command {
         }
     }
 
+    /// Whether this leaf supports version 1 structured execution.
+    #[must_use]
+    pub const fn supports_structured(self) -> bool {
+        !matches!(self, Self::PrStatus | Self::PrReset | Self::PrApprove)
+    }
+
     /// Returns the stable version 1 error catalog for this leaf.
     #[must_use]
     pub const fn errors(self) -> &'static [&'static str] {
         match self {
+            Self::PrStatus | Self::PrReset | Self::PrApprove => &[
+                "json.invalid_request",
+                "json.unsupported_schema_version",
+                "repository.invalid",
+                "trust.json_unsupported",
+            ],
+            Self::HooksReset | Self::CommitReset | Self::MergeReset => &[
+                "json.invalid_request",
+                "json.unsupported_schema_version",
+                "repository.invalid",
+                "trust.busy",
+            ],
             Self::CommitApprove | Self::MergeApprove => &[
                 "json.invalid_request",
                 "json.unsupported_schema_version",
@@ -186,6 +207,23 @@ impl Outcome {
             recovery: Vec::new(),
         }
     }
+}
+
+#[derive(Debug)]
+struct StoreBusy;
+
+impl std::fmt::Display for StoreBusy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("another trust update is already in progress; retry after it finishes")
+    }
+}
+
+impl std::error::Error for StoreBusy {}
+
+/// Reports whether an error is bounded trust-store contention.
+#[must_use]
+pub(crate) fn is_store_busy(error: &anyhow::Error) -> bool {
+    error.chain().any(<dyn std::error::Error>::is::<StoreBusy>)
 }
 
 /// Executes a noninteractive trust leaf and returns domain-owned protocol data.
@@ -488,21 +526,23 @@ pub(crate) fn is_trusted(
 /// Returns an error when repository identity or trust storage cannot be updated.
 pub(crate) fn approve(repository: &Repository, phase: HookPhase, steps: &[HookStep]) -> Result<()> {
     let identity = repository_key(repository)?;
-    let mut trust = read_trust()?;
-    let approvals = match trust.repositories.remove(&identity) {
-        Some(TrustRecord::Legacy(post_create)) => PhaseApprovals {
-            post_create: Some(post_create),
-            ..PhaseApprovals::default()
-        },
-        Some(TrustRecord::Phases(approvals)) => approvals,
-        None => PhaseApprovals::default(),
-    };
-    let mut approvals = approvals;
-    approvals.set(phase, command_hash(phase, steps));
-    trust
-        .repositories
-        .insert(identity, TrustRecord::Phases(approvals));
-    write_trust(&trust)
+    let approved_hash = command_hash(phase, steps);
+    update_trust(|trust| {
+        let approvals = match trust.repositories.remove(&identity) {
+            Some(TrustRecord::Legacy(post_create)) => PhaseApprovals {
+                post_create: Some(post_create),
+                ..PhaseApprovals::default()
+            },
+            Some(TrustRecord::Phases(approvals)) => approvals,
+            None => PhaseApprovals::default(),
+        };
+        let mut approvals = approvals;
+        approvals.set(phase, approved_hash);
+        trust
+            .repositories
+            .insert(identity, TrustRecord::Phases(approvals));
+        ((), true)
+    })
 }
 
 /// Returns the approval identity for effective shared generation fields.
@@ -553,11 +593,11 @@ pub fn approve_generation(repository: &Repository, generation: &EffectiveGenerat
     let Some(hash) = generation_hash(generation) else {
         return Ok(());
     };
-    let mut trust = read_trust()?;
-    trust
-        .commit_generators
-        .insert(repository_key(repository)?, hash);
-    write_trust(&trust)
+    let identity = repository_key(repository)?;
+    update_trust(|trust| {
+        trust.commit_generators.insert(identity, hash);
+        ((), true)
+    })
 }
 
 /// Removes generator approval for this clone and reports whether one existed.
@@ -589,11 +629,11 @@ pub fn approve_pr_generation(
     let Some(hash) = generation_hash_named(generation, b"pando-pr-generation-v1") else {
         return Ok(());
     };
-    let mut trust = read_trust()?;
-    trust
-        .pr_generators
-        .insert(repository_key(repository)?, hash);
-    write_trust(&trust)
+    let identity = repository_key(repository)?;
+    update_trust(|trust| {
+        trust.pr_generators.insert(identity, hash);
+        ((), true)
+    })
 }
 
 /// Resets PR generator approval.
@@ -601,15 +641,11 @@ pub fn approve_pr_generation(
 /// # Errors
 /// Returns an error when trust storage cannot be updated.
 pub fn reset_pr_generation(repository: &Repository) -> Result<bool> {
-    let mut trust = read_trust()?;
-    let removed = trust
-        .pr_generators
-        .remove(&repository_key(repository)?)
-        .is_some();
-    if removed {
-        write_trust(&trust)?;
-    }
-    Ok(removed)
+    let identity = repository_key(repository)?;
+    update_trust(|trust| {
+        let removed = trust.pr_generators.remove(&identity).is_some();
+        (removed, removed)
+    })
 }
 
 /// Returns the approval identity for the effective shared squash-message generator.
@@ -648,11 +684,11 @@ pub fn approve_merge_generation(
     let Some(hash) = merge_generation_hash(generation) else {
         return Ok(());
     };
-    let mut trust = read_trust()?;
-    trust
-        .merge_generators
-        .insert(repository_key(repository)?, hash);
-    write_trust(&trust)
+    let identity = repository_key(repository)?;
+    update_trust(|trust| {
+        trust.merge_generators.insert(identity, hash);
+        ((), true)
+    })
 }
 
 /// Resets squash-message generator approval.
@@ -660,15 +696,11 @@ pub fn approve_merge_generation(
 /// # Errors
 /// Returns an error when trust storage cannot be updated.
 pub fn reset_merge_generation(repository: &Repository) -> Result<bool> {
-    let mut trust = read_trust()?;
-    let removed = trust
-        .merge_generators
-        .remove(&repository_key(repository)?)
-        .is_some();
-    if removed {
-        write_trust(&trust)?;
-    }
-    Ok(removed)
+    let identity = repository_key(repository)?;
+    update_trust(|trust| {
+        let removed = trust.merge_generators.remove(&identity).is_some();
+        (removed, removed)
+    })
 }
 
 fn generation_hash_named(generation: &EffectiveGeneration, domain: &[u8]) -> Option<String> {
@@ -695,15 +727,11 @@ fn generation_hash_named(generation: &EffectiveGeneration, domain: &[u8]) -> Opt
 /// # Errors
 /// Returns an error when trust storage cannot be updated.
 pub fn reset_generation(repository: &Repository) -> Result<bool> {
-    let mut trust = read_trust()?;
-    let removed = trust
-        .commit_generators
-        .remove(&repository_key(repository)?)
-        .is_some();
-    if removed {
-        write_trust(&trust)?;
-    }
-    Ok(removed)
+    let identity = repository_key(repository)?;
+    update_trust(|trust| {
+        let removed = trust.commit_generators.remove(&identity).is_some();
+        (removed, removed)
+    })
 }
 
 /// Removes this clone's phase approvals and reports whether any existed.
@@ -713,12 +741,10 @@ pub fn reset_generation(repository: &Repository) -> Result<bool> {
 /// Returns an error when repository identity or trust storage cannot be updated.
 pub fn reset(repository: &Repository) -> Result<bool> {
     let identity = repository_key(repository)?;
-    let mut trust = read_trust()?;
-    let removed = trust.repositories.remove(&identity).is_some();
-    if removed {
-        write_trust(&trust)?;
-    }
-    Ok(removed)
+    update_trust(|trust| {
+        let removed = trust.repositories.remove(&identity).is_some();
+        (removed, removed)
+    })
 }
 
 pub(crate) fn repository_key(repository: &Repository) -> Result<String> {
@@ -737,10 +763,13 @@ fn trust_path() -> Result<PathBuf> {
 }
 
 fn read_trust() -> Result<TrustFile> {
-    let path = trust_path()?;
-    let bytes = match fs::read(&path) {
+    read_trust_at(&trust_path()?)
+}
+
+fn read_trust_at(path: &Path) -> Result<TrustFile> {
+    let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(TrustFile::default());
         }
         Err(error) => {
@@ -752,21 +781,76 @@ fn read_trust() -> Result<TrustFile> {
         .with_context(|| format!("failed to parse trust storage {}", path.display()))
 }
 
-fn write_trust(trust: &TrustFile) -> Result<()> {
+const TRUST_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const TRUST_LOCK_RETRY: Duration = Duration::from_millis(10);
+
+fn update_trust<T>(update: impl FnOnce(&mut TrustFile) -> (T, bool)) -> Result<T> {
     let path = trust_path()?;
-    let bytes = serde_json::to_vec_pretty(trust).context("failed to encode trust storage")?;
-    write_atomic(&path, &bytes)
+    update_trust_at(&path, TRUST_LOCK_TIMEOUT, update)
 }
 
-/// Atomically replaces a state file beside its destination.
-///
-/// # Errors
-///
-/// Returns an error when the parent or temporary file cannot be written or renamed.
-pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
+fn update_trust_at<T>(
+    path: &Path,
+    timeout: Duration,
+    update: impl FnOnce(&mut TrustFile) -> (T, bool),
+) -> Result<T> {
     let parent = path
         .parent()
         .context("trust path has no parent directory")?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let lock_path = path.with_extension("lock");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open trust-store lock {}", lock_path.display()))?;
+    let started = Instant::now();
+    loop {
+        match FileExt::try_lock_exclusive(&lock) {
+            Ok(()) => break,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if started.elapsed() >= timeout {
+                    return Err(StoreBusy.into());
+                }
+                thread::sleep(TRUST_LOCK_RETRY.min(timeout.saturating_sub(started.elapsed())));
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to acquire trust-store lock {}", lock_path.display())
+                });
+            }
+        }
+    }
+    let mut trust = read_trust_at(path)?;
+    let (result, changed) = update(&mut trust);
+    if changed {
+        let bytes = serde_json::to_vec_pretty(&trust).context("failed to encode trust storage")?;
+        write_atomic(path, &bytes)?;
+    }
+    Ok(result)
+}
+
+/// Atomically replaces a state file beside its destination and syncs the
+/// directory entries changed by the rename.
+///
+/// # Errors
+///
+/// Returns an error when the parent, temporary file, destination, or changed
+/// parent directory cannot be written or synchronized.
+pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
+    write_atomic_with(path, content, sync_directory)
+}
+
+fn write_atomic_with(
+    path: &Path,
+    content: &[u8],
+    sync: impl FnMut(&Path) -> io::Result<()>,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("state path has no parent directory")?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     for attempt in 0..100_u8 {
         let temporary = parent.join(format!(".pando.tmp.{}.{}", std::process::id(), attempt));
@@ -776,7 +860,7 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
             .open(&temporary)
         {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("failed to create {}", temporary.display()));
@@ -786,7 +870,7 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
             file.write_all(content)?;
             file.sync_all()?;
             drop(file);
-            fs::rename(&temporary, path)?;
+            rename_durable_with(&temporary, path, sync)?;
             Ok(())
         })();
         if result.is_err() {
@@ -795,14 +879,62 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> Result<()> {
         return result.with_context(|| format!("failed to atomically update {}", path.display()));
     }
     bail!(
-        "could not allocate a temporary trust file beside {}",
+        "could not allocate a temporary state file beside {}",
         path.display()
     )
 }
 
+/// Renames one state record and durably commits every changed directory entry.
+pub(crate) fn rename_durable(source: &Path, destination: &Path) -> Result<()> {
+    rename_durable_with(source, destination, sync_directory)
+}
+
+fn rename_durable_with(
+    source: &Path,
+    destination: &Path,
+    mut sync: impl FnMut(&Path) -> io::Result<()>,
+) -> Result<()> {
+    let source_parent = source
+        .parent()
+        .context("state source has no parent directory")?;
+    let destination_parent = destination
+        .parent()
+        .context("state destination has no parent directory")?;
+    fs::rename(source, destination).with_context(|| {
+        format!(
+            "failed to rename state from {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    sync(destination_parent).with_context(|| {
+        format!(
+            "failed to synchronize state directory {}",
+            destination_parent.display()
+        )
+    })?;
+    if source_parent != destination_parent {
+        sync(source_parent).with_context(|| {
+            format!(
+                "failed to synchronize state directory {}",
+                source_parent.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TrustRecord, legacy_post_create_hash};
+    use std::sync::mpsc;
+
+    use tempfile::tempdir;
+
+    use super::*;
     use crate::config::{HookPhase, HookStep};
 
     #[test]
@@ -817,5 +949,137 @@ mod tests {
             legacy_post_create_hash(&steps),
             super::command_hash(HookPhase::PostCreate, &steps)
         );
+    }
+
+    #[test]
+    fn atomic_replacement_syncs_after_the_rename_and_reports_sync_failure() -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("state/value.json");
+        let parent = path.parent().expect("state parent").to_path_buf();
+        let error = write_atomic_with(&path, b"complete", |observed| {
+            assert_eq!(observed, parent);
+            assert_eq!(fs::read(&path)?, b"complete");
+            assert!(fs::read_dir(&parent)?.all(|entry| {
+                !entry
+                    .expect("directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".pando.tmp.")
+            }));
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected directory sync failure",
+            ))
+        })
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("failed to synchronize state directory"));
+        assert_eq!(fs::read(path)?, b"complete");
+        Ok(())
+    }
+
+    #[test]
+    fn trust_transactions_preserve_concurrent_updates() -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("pando/trust.json");
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first_path = path.clone();
+        let first = thread::spawn(move || {
+            update_trust_at(&first_path, Duration::from_secs(2), |trust| {
+                locked_tx.send(()).expect("announce acquired lock");
+                release_rx.recv().expect("release first transaction");
+                trust.commit_generators.insert("first".into(), "one".into());
+                ((), true)
+            })
+        });
+        locked_rx.recv()?;
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let second_path = path.clone();
+        let second = thread::spawn(move || {
+            started_tx.send(()).expect("announce second transaction");
+            update_trust_at(&second_path, Duration::from_secs(2), |trust| {
+                trust
+                    .commit_generators
+                    .insert("second".into(), "two".into());
+                ((), true)
+            })
+        });
+        started_rx.recv()?;
+        release_tx.send(())?;
+        first.join().expect("first transaction")?;
+        second.join().expect("second transaction")?;
+
+        let trust = read_trust_at(&path)?;
+        assert_eq!(
+            trust.commit_generators.get("first").map(String::as_str),
+            Some("one")
+        );
+        assert_eq!(
+            trust.commit_generators.get("second").map(String::as_str),
+            Some("two")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_reset_and_approval_are_serializable() -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("pando/trust.json");
+        update_trust_at(&path, Duration::from_secs(2), |trust| {
+            trust.commit_generators.insert("old".into(), "hash".into());
+            ((), true)
+        })?;
+
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let reset_path = path.clone();
+        let reset = thread::spawn(move || {
+            update_trust_at(&reset_path, Duration::from_secs(2), |trust| {
+                locked_tx.send(()).expect("announce acquired reset lock");
+                release_rx.recv().expect("release reset transaction");
+                let removed = trust.commit_generators.remove("old").is_some();
+                (removed, removed)
+            })
+        });
+        locked_rx.recv()?;
+
+        let approval_path = path.clone();
+        let approval = thread::spawn(move || {
+            update_trust_at(&approval_path, Duration::from_secs(2), |trust| {
+                trust.commit_generators.insert("new".into(), "hash".into());
+                ((), true)
+            })
+        });
+        release_tx.send(())?;
+        assert!(reset.join().expect("reset transaction")?);
+        approval.join().expect("approval transaction")?;
+
+        let trust = read_trust_at(&path)?;
+        assert!(!trust.commit_generators.contains_key("old"));
+        assert_eq!(
+            trust.commit_generators.get("new").map(String::as_str),
+            Some("hash")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn trust_lock_contention_is_bounded_and_typed() -> Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("pando/trust.json");
+        fs::create_dir_all(path.parent().expect("trust parent"))?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("lock"))?;
+        FileExt::lock_exclusive(&lock)?;
+
+        let error = update_trust_at(&path, Duration::ZERO, |_| ((), false)).unwrap_err();
+        assert!(is_store_busy(&error), "{error:#}");
+        Ok(())
     }
 }

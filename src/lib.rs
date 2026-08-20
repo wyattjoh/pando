@@ -3,6 +3,7 @@ pub mod commit;
 pub mod completion;
 pub mod config;
 mod debug;
+mod generator;
 pub mod git;
 mod hash;
 pub(crate) mod hook;

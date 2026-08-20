@@ -96,7 +96,13 @@ impl PendingApproval {
     /// Discards every pre-approval fact and repeats read-only preparation.
     #[must_use]
     pub(crate) fn reprepare(self) -> Preparation {
-        prepare(self.request)
+        let Self {
+            request,
+            plan,
+            requirement: _,
+        } = self;
+        drop(plan);
+        prepare(request)
     }
 
     #[must_use]
@@ -251,14 +257,14 @@ impl Observations {
                 completed,
                 failed,
             } => {
-                if self.active.is_none()
-                    && let Ok(progress) = ui::TimedProgress::start(true, starting)
-                {
-                    self.active = Some(ActiveProgress {
-                        progress,
-                        completed: completed.clone(),
-                        failed: failed.clone(),
-                    });
+                if self.active.is_none() {
+                    if let Ok(progress) = ui::TimedProgress::start(true, starting) {
+                        self.active = Some(ActiveProgress {
+                            progress,
+                            completed: completed.clone(),
+                            failed: failed.clone(),
+                        });
+                    }
                 }
             }
             Observation::ProgressCompleted => {
@@ -295,7 +301,11 @@ impl Observations {
 /// Performs read-only planning and returns at most one ordered requirement.
 #[must_use]
 pub(crate) fn prepare(request: MergeRequest) -> Preparation {
-    let plan = match plan_merge(request.input.policy(), request.changes) {
+    let plan = match plan_merge(
+        request.input.policy(),
+        request.changes,
+        !request.input.dry_run,
+    ) {
         Ok(plan) => plan,
         Err(error) => return Preparation::Complete(merge_preflight_outcome(&error)),
     };
