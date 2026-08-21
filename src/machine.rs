@@ -141,7 +141,8 @@ fn resolve(
         input.dry_run = dry_run;
         input.fetch = fetch;
     }
-    let outcome = crate::worktree_plan::operation(intent, &input);
+    let prepared = crate::worktree_plan::prepare(intent, &input, intent == Intent::Create, None);
+    let outcome = crate::worktree_plan::finish_noninteractive(prepared);
     let failed = outcome.result.is_err();
     emit(
         protocol::adapt(

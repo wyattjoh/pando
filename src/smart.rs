@@ -4,7 +4,7 @@ use std::{
     hash::{Hash, Hasher},
     io::{self, Write},
     os::unix::ffi::OsStrExt,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use anyhow::{Context, Result, bail};
@@ -14,16 +14,16 @@ use siphasher::sip::SipHasher13;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    Row, SortMode, Worktree, WorktreeKind,
-    branch::{self, Snapshot},
+    Row, SortMode, Worktree, WorktreeKind, branch,
     config::{EffectiveConfig, HookPhase},
     debug,
-    git::{self, HistoryObservation, Repository, RepositoryObservation},
-    hook::{self, HookOutcome},
+    git::{self, Repository, RepositoryObservation},
     hook_approval,
     read_only::{self, PropertyValue},
-    render, setup, sorted_row_indices, trust, ui,
-    worktree_plan::{self, Blocker as PlanBlocker, FetchIntent, Intent, OperationInput, Source},
+    render, sorted_row_indices, trust, ui,
+    worktree_plan::{
+        self, Delivery, Intent, NewBranchFacts, OperationInput, Preparation, SetupRecoveryDecision,
+    },
 };
 
 pub use crate::read_only::GetProperty;
@@ -58,7 +58,6 @@ pub enum TrustCommand {
 /// Returns an error when repository planning, user approval, creation, or setup fails.
 pub fn switch(branch: Option<String>, branches: bool, fetch: bool) -> Result<()> {
     let _span = debug::Span::new("switch");
-    let fetch = FetchIntent::new(fetch, false);
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let Some(branch) = branch else {
         let initial_view = if branches {
@@ -94,7 +93,7 @@ pub fn create(branch: &str, fetch: bool) -> Result<()> {
         &RepositoryObservation::new(&cwd).repository_for_navigation()?,
         branch,
         Intent::Create,
-        FetchIntent::new(fetch, false),
+        fetch,
     )
 }
 
@@ -124,7 +123,7 @@ pub fn get(property: GetProperty) -> Result<()> {
 /// Returns an error when the branch or repository cannot be resolved.
 pub fn switch_dry_run(branch: Option<String>, fetch: bool) -> Result<()> {
     let branch = branch.context("switch --dry-run requires a branch")?;
-    plan_dry_run(&branch, Intent::Switch, FetchIntent::new(fetch, true))
+    plan_dry_run(&branch, Intent::Switch, fetch)
 }
 
 /// Previews creation without creating directories, worktrees, trust, or setup records.
@@ -132,63 +131,71 @@ pub fn switch_dry_run(branch: Option<String>, fetch: bool) -> Result<()> {
 /// # Errors
 /// Returns an error when the branch is already registered or cannot be resolved.
 pub fn create_dry_run(branch: &str, fetch: bool) -> Result<()> {
-    plan_dry_run(branch, Intent::Create, FetchIntent::new(fetch, true))
+    plan_dry_run(branch, Intent::Create, fetch)
 }
 
-fn plan_dry_run(branch: &str, intent: Intent, fetch: FetchIntent) -> Result<()> {
-    let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = RepositoryObservation::new(&cwd).repository_for_navigation()?;
-    let planned = if let Some(plan) =
-        worktree_plan::registered_plan(&repository, intent, branch, None, fetch, None, true)
-    {
-        plan
-    } else {
-        let snapshot = Snapshot::observe(&repository)?;
-        worktree_plan::plan(
-            &repository,
-            &snapshot,
-            intent,
-            branch,
-            None,
-            fetch,
-            None,
-            true,
-        )?
+fn plan_dry_run(branch: &str, intent: Intent, fetch: bool) -> Result<()> {
+    let input = OperationInput {
+        branch: Some(branch.into()),
+        remote: None,
+        fetch,
+        dry_run: true,
+        description: None,
     };
-    let plan = match planned {
-        Ok(plan) => plan,
-        Err(PlanBlocker::RemoteSelectionRequired { destination, .. }) => {
-            return ui::finish(format!(
-                "Would create a worktree for {branch} at {}; no changes made.",
-                destination.display()
-            ));
-        }
-        Err(blocker) => return Err(render_plan_blocker(branch, blocker)),
-    };
-    match &plan.source {
-        Source::Registered(existing) => ui::finish(format!(
-            "Would enter {}; no changes made.",
-            existing.path.display()
+    match worktree_plan::prepare(intent, &input, false, None) {
+        Preparation::RemoteSelection { destination, .. } => ui::finish(format!(
+            "Would create a worktree for {branch} at {}; no changes made.",
+            destination.display()
         )),
-        Source::New { base } => {
-            if fetch.requested() {
-                if let Some(base_ref) = &base.base_ref {
-                    ui::info(format!(
-                        "Would fetch {} before branching; no changes made.",
-                        base_ref.reference()
-                    ))?;
-                }
+        Preparation::NewBranch { facts, .. } => {
+            if fetch && let Some(base_ref) = facts.base_ref.as_deref() {
+                ui::info(format!(
+                    "Would fetch {base_ref} before branching; no changes made."
+                ))?;
             }
             ui::finish(format!(
                 "Would create a worktree for {branch} from {} at {}; no changes made.",
-                new_branch_source(&repository, base),
-                plan.destination.display()
+                facts.source,
+                facts.destination.display()
             ))
         }
-        Source::Local { .. } | Source::Remote { .. } => ui::finish(format!(
-            "Would create a worktree for {branch} at {}; no changes made.",
-            plan.destination.display()
+        Preparation::SetupRecoveryReady(_) => {
+            unreachable!("dry-run preparation never executes setup recovery")
+        }
+        Preparation::Ready(prepared) => render_dry_run_outcome(
+            branch,
+            worktree_plan::execute_prepared(prepared, Delivery::Captured),
+        ),
+        Preparation::Complete(outcome)
+        | Preparation::ApprovalRequired { outcome, .. }
+        | Preparation::SetupRecoveryRequired { outcome } => render_dry_run_outcome(branch, outcome),
+    }
+}
+
+fn render_dry_run_outcome(branch: &str, outcome: worktree_plan::OperationOutcome) -> Result<()> {
+    if let Some(message) = outcome.failure_message() {
+        return Err(anyhow::anyhow!(message.to_owned()));
+    }
+    match outcome.result.expect("successful dry-run outcome") {
+        worktree_plan::OperationResult::Existing { destination, .. } => ui::finish(format!(
+            "Would enter {}; no changes made.",
+            display_byte_path(&destination)
         )),
+        worktree_plan::OperationResult::CreationPlan { destination, .. } => ui::finish(format!(
+            "Would create a worktree for {branch} at {}; no changes made.",
+            display_byte_path(&destination)
+        )),
+        worktree_plan::OperationResult::NewBranchApproval { .. }
+        | worktree_plan::OperationResult::Created { .. } => {
+            unreachable!("dry-run rendering receives only dry-run outcomes")
+        }
+    }
+}
+
+fn display_byte_path(path: &crate::protocol::BytePath) -> &str {
+    match path {
+        crate::protocol::BytePath::Utf8 { value } => value,
+        crate::protocol::BytePath::Base64 { display, .. } => display,
     }
 }
 
@@ -473,7 +480,7 @@ fn render_trust_outcome(command: TrustCommand, outcome: trust::Outcome) -> Resul
 fn pick_and_switch(
     repository_branches: &git::RepositoryBranches,
     initial_view: PickerView,
-    fetch: FetchIntent,
+    fetch: bool,
 ) -> Result<()> {
     let repository = &repository_branches.repository;
     let choices: Vec<_> = repository
@@ -507,8 +514,8 @@ fn pick_and_switch(
             if let WorktreeKind::Branch(branch) = &chosen.kind {
                 return resolve_and_switch(repository, branch, Intent::Switch, fetch);
             }
-            branch::reject_fetch(fetch.requested(), branch::FETCH_REGISTERED_WORKTREE)?;
-            enter_existing(repository, &chosen.path, None)
+            branch::reject_fetch(fetch, branch::FETCH_REGISTERED_WORKTREE)?;
+            enter_existing(repository, &chosen.path)
         }
         PickerChoice::Branch(branch) => {
             resolve_and_switch(repository, &branch, Intent::Switch, fetch)
@@ -1291,117 +1298,74 @@ fn read_branch_name() -> Result<String> {
     Ok(value.trim().to_owned())
 }
 
-#[allow(clippy::too_many_lines)] // One adapter loop handles every typed planning outcome.
 fn resolve_and_switch(
     repository: &Repository,
     branch: &str,
     intent: Intent,
-    fetch: FetchIntent,
+    fetch: bool,
 ) -> Result<()> {
     let _span = debug::Span::new("resolve switch");
-    let mut remote = None;
-    let plan = if let Some(plan) =
-        worktree_plan::registered_plan(repository, intent, branch, None, fetch, None, false)
-    {
-        plan.map_err(|blocker| render_plan_blocker(branch, blocker))?
-    } else {
-        let mut snapshot = {
-            let _span = debug::Span::new("branch snapshot");
-            Snapshot::observe(repository)?
-        };
-        loop {
-            let planned = {
-                let _span = debug::Span::new("worktree plan");
-                worktree_plan::plan(
-                    repository,
-                    &snapshot,
-                    intent,
-                    branch,
-                    remote.as_deref(),
-                    fetch,
-                    None,
-                    false,
-                )?
-            };
-            match planned {
-                Ok(plan) => break plan,
-                Err(PlanBlocker::RemoteSelectionRequired { remotes, .. }) => {
-                    remote = Some(choose_remote(&remotes, branch)?);
-                }
-                Err(PlanBlocker::ApprovalRequired { candidate, .. }) => {
-                    approve_planned_hooks(repository, &candidate)?;
-                    snapshot = Snapshot::observe(repository)?;
-                }
-                Err(blocker) => return Err(render_plan_blocker(branch, blocker)),
-            }
-        }
+    let mut input = OperationInput {
+        branch: Some(branch.into()),
+        remote: None,
+        fetch,
+        dry_run: false,
+        description: None,
     };
-    debug_assert_eq!(plan.intent, intent);
-    debug_assert_eq!(plan.branch, branch);
-    if !matches!(plan.source, Source::Registered(_)) {
-        if let Source::New { base } = &plan.source {
-            if let Some(output) = base
-                .fetch_output
-                .as_deref()
-                .filter(|output| !output.trim().is_empty())
-            {
-                ui::step(render::git_output(output))?;
+    let mut authorize_new = false;
+    let mut setup_decision = None;
+    loop {
+        match worktree_plan::prepare(intent, &input, authorize_new, setup_decision) {
+            Preparation::RemoteSelection { remotes, .. } => {
+                input.remote = Some(choose_remote(&remotes, branch)?);
             }
-            match intent {
-                Intent::Switch => confirm_new_branch(repository, branch, base, &plan.destination)?,
-                Intent::Create => announce_new_branch(repository, branch, base, &plan.destination)?,
+            Preparation::ApprovalRequired { candidate, .. } => {
+                approve_planned_hooks(repository, &candidate)?;
             }
-        }
-        let has_hooks = plan
-            .config
-            .as_ref()
-            .is_some_and(|config| !config.post_create.is_empty());
-        let input = OperationInput {
-            branch: Some(branch.into()),
-            remote: remote.clone(),
-            fetch: fetch.requested(),
-            dry_run: false,
-            description: plan.description.clone(),
-        };
-        if !has_hooks {
-            let progress = ui::TimedProgress::start(true, "Creating worktree...").ok();
-            let mut observations = setup::Observations::captured();
-            let outcome =
-                worktree_plan::execute_planned(repository, &plan, &input, &mut observations);
-            drop(observations.finish());
-            let failure = outcome.failure_message().map(str::to_owned);
-            if let Some(progress) = progress {
-                if failure.is_some() {
-                    let _ = progress.fail("Failed to create worktree");
-                } else {
-                    let _ = progress.complete("Created worktree", ui::Completion::Outro);
+            Preparation::NewBranch { facts, .. } => {
+                if let Some(output) = facts
+                    .fetch_output
+                    .as_deref()
+                    .filter(|output| !output.trim().is_empty())
+                {
+                    ui::step(render::git_output(output))?;
                 }
+                match intent {
+                    Intent::Switch => confirm_new_branch(&facts)?,
+                    Intent::Create => announce_new_branch(&facts)?,
+                }
+                authorize_new = true;
             }
-            if let Some(destination) = outcome.destination() {
-                write_destination(destination)?;
+            Preparation::SetupRecoveryRequired { .. } => {
+                setup_decision = Some(choose_setup_recovery()?);
             }
-            return failure.map_or(Ok(()), |message| Err(anyhow::anyhow!(message)));
-        }
-        let mut observations = setup::Observations::human();
-        let outcome = worktree_plan::execute_planned(repository, &plan, &input, &mut observations);
-        drop(observations.finish());
-        if let Some(message) = outcome.failure_message() {
-            if let Some(destination) = outcome.destination() {
-                write_destination(destination)?;
+            Preparation::SetupRecoveryReady(authority) => {
+                let outcome = worktree_plan::execute_setup_recovery(authority, Delivery::Human);
+                if outcome.setup_recovery_required() {
+                    setup_decision = Some(choose_setup_recovery()?);
+                    continue;
+                }
+                return finish_operation_outcome(&outcome);
             }
-            return Err(anyhow::anyhow!(message.to_owned()));
+            Preparation::Ready(prepared) => {
+                let outcome = worktree_plan::execute_prepared(prepared, Delivery::Human);
+                if outcome.setup_recovery_required() {
+                    setup_decision = Some(choose_setup_recovery()?);
+                    continue;
+                }
+                return finish_operation_outcome(&outcome);
+            }
+            Preparation::Complete(outcome) => return finish_operation_outcome(&outcome),
         }
-        let _ = ui::finish("Post-create setup complete");
-        if let Some(destination) = outcome.destination() {
-            return write_destination(destination);
-        }
-        return Ok(());
     }
-    let Source::Registered(worktree) = &plan.source else {
-        unreachable!("creation plans execute before existing-worktree navigation")
-    };
-    debug_assert_eq!(plan.destination, worktree.path);
-    enter_existing(repository, &plan.destination, Some(branch))
+}
+
+fn finish_operation_outcome(outcome: &worktree_plan::OperationOutcome) -> Result<()> {
+    let failure = outcome.failure_message().map(str::to_owned);
+    if let Some(destination) = outcome.destination() {
+        write_destination(destination)?;
+    }
+    failure.map_or(Ok(()), |message| Err(anyhow::anyhow!(message)))
 }
 
 fn approve_planned_hooks(
@@ -1411,46 +1375,6 @@ fn approve_planned_hooks(
     hook_approval::approve_candidate_interactively(repository, candidate)
     // Approval changes trust state. The caller discards every provisional fact
     // and requests an executable plan from current repository state.
-}
-
-fn already_registered(branch: &str, path: &Path) -> anyhow::Error {
-    anyhow::anyhow!(
-        "branch {branch:?} is already registered at {}; enter it with 'pando switch {branch}'",
-        path.display()
-    )
-}
-
-fn render_plan_blocker(branch: &str, blocker: PlanBlocker) -> anyhow::Error {
-    match blocker {
-        PlanBlocker::InvalidBranch { message }
-        | PlanBlocker::ConfigInvalid { message }
-        | PlanBlocker::RootUnavailable { message }
-        | PlanBlocker::DestinationInvalid { message }
-        | PlanBlocker::FetchNotApplicable { message }
-        | PlanBlocker::BaseUnavailable { message } => anyhow::anyhow!(message),
-        PlanBlocker::RegisteredForCreate { worktree } => already_registered(branch, &worktree.path),
-        PlanBlocker::DestinationUnavailable { worktree } => anyhow::anyhow!(
-            "branch {branch:?} is registered at {} but that worktree is {}; inspect it with 'git worktree list' and repair or prune it explicitly with Git",
-            worktree.path.display(),
-            worktree.state_label()
-        ),
-        PlanBlocker::PrimaryUnavailable => {
-            anyhow::anyhow!("creating worktrees from a bare repository is not supported")
-        }
-        PlanBlocker::DestinationCollision => anyhow::anyhow!(
-            "the configured destination for branch {branch:?} already exists or is registered; Pando will not adopt, move, or delete it"
-        ),
-        PlanBlocker::DestinationNotIgnored { first, gitignore } => anyhow::anyhow!(
-            "the configured destination for branch {branch:?} is inside the primary worktree but is not ignored; add '/{first}/' to {}",
-            gitignore.display()
-        ),
-        PlanBlocker::IrrelevantRemote | PlanBlocker::UnknownRemote => {
-            anyhow::anyhow!("the selected remote does not apply to branch {branch:?}")
-        }
-        PlanBlocker::RemoteSelectionRequired { .. } | PlanBlocker::ApprovalRequired { .. } => {
-            unreachable!("the human adapter resolves interactive blockers")
-        }
-    }
 }
 
 fn choose_remote(remotes: &[String], branch: &str) -> Result<String> {
@@ -1472,19 +1396,15 @@ fn choose_remote(remotes: &[String], branch: &str) -> Result<String> {
     Ok(remotes[selection].clone())
 }
 
-fn confirm_new_branch(
-    repository: &Repository,
-    branch: &str,
-    base: &git::NewBranchBase,
-    destination: &Path,
-) -> Result<()> {
+fn confirm_new_branch(facts: &NewBranchFacts) -> Result<()> {
     ui::ensure_interactive("new branch creation requires confirmation")?;
     ui::info(format!(
-        "Create branch {branch:?} from {} at {}?",
-        new_branch_source(repository, base),
-        destination.display()
+        "Create branch {:?} from {} at {}?",
+        facts.branch,
+        facts.source,
+        facts.destination.display()
     ))?;
-    warn_dirty_source(repository)?;
+    warn_dirty_source(facts.dirty_source)?;
     let confirmed = ui::prompt_result(
         confirm("Create this branch and worktree?")
             .initial_value(false)
@@ -1501,68 +1421,24 @@ fn confirm_new_branch(
 }
 
 /// Reports the branch about to be created without asking to confirm it.
-fn announce_new_branch(
-    repository: &Repository,
-    branch: &str,
-    base: &git::NewBranchBase,
-    destination: &Path,
-) -> Result<()> {
+fn announce_new_branch(facts: &NewBranchFacts) -> Result<()> {
     ui::info(format!(
-        "Creating branch {branch:?} from {} at {}.",
-        new_branch_source(repository, base),
-        destination.display()
+        "Creating branch {:?} from {} at {}.",
+        facts.branch,
+        facts.source,
+        facts.destination.display()
     ))?;
-    warn_dirty_source(repository)
+    warn_dirty_source(facts.dirty_source)
 }
 
-/// Names the start point in the one sentence shape both entry points share.
-fn new_branch_source(repository: &Repository, base: &git::NewBranchBase) -> String {
-    let commit = &base.commit;
-    if let Some(base_ref) = &base.base_ref {
-        return format!("branch {:?} at {commit}", base_ref.reference());
-    }
-    match &repository.current().kind {
-        WorktreeKind::Branch(source) => format!("branch {source:?} at {commit}"),
-        WorktreeKind::Detached => format!("detached commit {commit}"),
-        _ => format!("commit {commit}"),
-    }
-}
-
-fn warn_dirty_source(repository: &Repository) -> Result<()> {
-    if HistoryObservation::new(&repository.current().path)
-        .status()?
-        .is_dirty()
-    {
+fn warn_dirty_source(dirty: bool) -> Result<()> {
+    if dirty {
         ui::warning("Staged, unstaged, and untracked changes remain in the source worktree.")?;
     }
     Ok(())
 }
 
-fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&str>) -> Result<()> {
-    let _span = debug::Span::new("enter existing worktree");
-    let destination = resolved_path(destination)?;
-    let worktree_identity = RepositoryObservation::new(&destination).worktree_identity()?;
-    let setup_lifecycle = setup::Lifecycle::new(&repository.common_dir);
-    let incomplete = match setup_lifecycle
-        .inspect(setup::SetupTarget {
-            worktree_identity: &worktree_identity,
-            branch,
-        })
-        .map_err(|failure| failure.error)?
-    {
-        setup::Inspection::Complete(transition) => {
-            debug_assert_eq!(transition.entry, setup::EntryDisposition::Enter);
-            return write_destination(&destination);
-        }
-        setup::Inspection::Incomplete(incomplete) => incomplete,
-    };
-    let config = EffectiveConfig::load(repository)?;
-    if config.post_create.is_empty() {
-        incomplete
-            .no_hooks_configured()
-            .map_err(|failure| failure.error)?;
-        return write_destination(&destination);
-    }
+fn choose_setup_recovery() -> Result<SetupRecoveryDecision> {
     ui::ensure_interactive("incomplete setup requires a recovery choice")?;
     let choices = ["Retry setup", "Enter once", "Mark setup complete and enter"];
     let mut prompt = select("Setup did not complete for this worktree").initial_value(0);
@@ -1574,68 +1450,44 @@ fn enter_existing(repository: &Repository, destination: &Path, branch: Option<&s
         "setup recovery cancelled",
         "failed to read setup recovery choice",
     )?;
-    match choice {
-        0 => {
-            hook_approval::approve_interactively(
-                repository,
-                HookPhase::PostCreate,
-                &config.post_create,
-            )?;
-            finish_setup(&config, incomplete, &destination)
-        }
-        1 => {
-            ui::warning("Entering once while setup remains incomplete.")?;
-            let transition = incomplete.enter_once();
-            debug_assert_eq!(transition.entry, setup::EntryDisposition::Enter);
-            write_destination(&destination)?;
-            bail!("setup remains incomplete for {}", destination.display())
-        }
-        2 => {
-            incomplete
-                .mark_complete()
-                .map_err(|failure| failure.error)?;
-            ui::finish("Marked setup complete")?;
-            write_destination(&destination)
-        }
+    Ok(match choice {
+        0 => SetupRecoveryDecision::Retry,
+        1 => SetupRecoveryDecision::EnterOnce,
+        2 => SetupRecoveryDecision::MarkComplete,
         _ => unreachable!(),
+    })
+}
+
+fn enter_existing(repository: &Repository, destination: &Path) -> Result<()> {
+    let _span = debug::Span::new("enter existing worktree");
+    let mut decision = None;
+    loop {
+        match worktree_plan::prepare_detached_navigation(destination, decision) {
+            worktree_plan::DetachedNavigationPreparation::Complete(outcome) => {
+                return finish_detached_navigation(&outcome);
+            }
+            worktree_plan::DetachedNavigationPreparation::RecoveryRequired => {
+                decision = Some(choose_setup_recovery()?);
+            }
+            worktree_plan::DetachedNavigationPreparation::ApprovalRequired(candidate) => {
+                approve_planned_hooks(repository, &candidate)?;
+            }
+            worktree_plan::DetachedNavigationPreparation::Ready(prepared) => {
+                return finish_detached_navigation(&worktree_plan::execute_detached_navigation(
+                    prepared,
+                    Delivery::Human,
+                ));
+            }
+        }
     }
 }
 
-fn finish_setup(
-    config: &EffectiveConfig,
-    incomplete: setup::IncompleteSetup<'_>,
-    destination: &Path,
-) -> Result<()> {
-    let mut observations = hook::Observations::human();
-    let execution = hook::execute(
-        HookPhase::PostCreate,
-        &config.post_create,
-        destination,
-        &mut observations,
-    );
-    drop(observations.finish());
-    let (attempt, outcome) = match execution {
-        Ok(execution) => (Ok(execution.outcome), Some(execution.outcome)),
-        Err(error) => (Err(error), None),
-    };
-    match incomplete.recovery_attempt(attempt) {
-        Ok(_) => {
-            // Creation was a mid-rail step so hook output could follow it; this
-            // is the sequence's single closing beat. Presentation cannot
-            // supersede the completed setup transition.
-            let _ = ui::finish("Post-create setup complete");
-            write_destination(destination)
-        }
-        Err(failure) => {
-            if failure.transition.entry == setup::EntryDisposition::Enter {
-                write_destination(destination)?;
-            }
-            if outcome == Some(HookOutcome::Interrupted) {
-                bail!("post-create setup was interrupted; setup remains incomplete");
-            }
-            Err(failure.error)
-        }
+fn finish_detached_navigation(outcome: &worktree_plan::DetachedNavigationOutcome) -> Result<()> {
+    let failure = outcome.failure_message().map(str::to_owned);
+    if let Some(destination) = outcome.destination() {
+        write_destination(destination)?;
     }
+    failure.map_or(Ok(()), |message| Err(anyhow::anyhow!(message)))
 }
 
 fn write_destination(destination: &Path) -> Result<()> {
@@ -1646,11 +1498,6 @@ fn write_destination(destination: &Path) -> Result<()> {
     stdout
         .write_all(b"\n")
         .context("failed to terminate worktree destination")
-}
-
-fn resolved_path(path: &Path) -> Result<PathBuf> {
-    path.canonicalize()
-        .with_context(|| format!("failed to resolve path {}", path.display()))
 }
 
 #[must_use]

@@ -16,15 +16,16 @@ use crate::protocol::{
 };
 
 use crate::{
-    Worktree,
+    Worktree, WorktreeKind,
     branch::{
         self, BaseResolution, Classification, ExactFetch, FETCH_HEAD_BASE, FETCH_LOCAL_BRANCH,
         FETCH_REGISTERED_WORKTREE, FETCH_REMOTE_BRANCH, Snapshot,
     },
-    config::EffectiveConfig,
+    config::{EffectiveConfig, HookPhase},
+    debug,
     git::{self, HistoryObservation, Repository, RepositoryObservation},
     hook::{self, CapturedStep, HookOutcome},
-    hook_approval, setup,
+    hook_approval, setup, ui,
 };
 
 /// Stable error codes advertised by the switch protocol.
@@ -118,7 +119,7 @@ pub(crate) struct CreateInput {
 }
 
 /// Adapter-neutral input shared by the switch and create operation boundary.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct OperationInput {
     pub(crate) branch: Option<String>,
     pub(crate) remote: Option<String>,
@@ -212,7 +213,7 @@ impl Intent {
 
 /// The selected source for a navigation or creation operation.
 #[derive(Clone, Debug)]
-pub(crate) enum Source {
+enum Source {
     Registered(Worktree),
     Local { commit: String },
     Remote { reference: String, commit: String },
@@ -221,14 +222,14 @@ pub(crate) enum Source {
 
 /// Whether the caller requested the only network mutation supported by planning.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FetchIntent {
+enum FetchIntent {
     None,
     Refresh,
     Preview,
 }
 
 impl FetchIntent {
-    pub(crate) const fn new(fetch: bool, dry_run: bool) -> Self {
+    const fn new(fetch: bool, dry_run: bool) -> Self {
         match (fetch, dry_run) {
             (false, _) => Self::None,
             (true, false) => Self::Refresh,
@@ -236,7 +237,7 @@ impl FetchIntent {
         }
     }
 
-    pub(crate) const fn requested(self) -> bool {
+    const fn requested(self) -> bool {
         !matches!(self, Self::None)
     }
 
@@ -247,36 +248,36 @@ impl FetchIntent {
 
 /// A deterministic plan with no terminal or JSON representation concerns.
 #[derive(Debug)]
-pub(crate) struct Plan {
-    pub(crate) intent: Intent,
-    pub(crate) branch: String,
-    pub(crate) destination: PathBuf,
-    pub(crate) source: Source,
-    pub(crate) config: Option<EffectiveConfig>,
-    pub(crate) description: Option<String>,
-    pub(crate) fetch: FetchIntent,
-    pub(crate) dry_run: bool,
+struct Plan {
+    intent: Intent,
+    branch: String,
+    destination: PathBuf,
+    source: Source,
+    config: Option<EffectiveConfig>,
+    description: Option<String>,
+    fetch: FetchIntent,
+    dry_run: bool,
 }
 
 /// The result of executing a navigation or creation plan.
 #[derive(Debug)]
-pub(crate) struct ExecutionOutcome {
-    pub(crate) destination: PathBuf,
-    pub(crate) effects: Vec<Effect>,
-    pub(crate) hook_output: Vec<CapturedStep>,
+struct ExecutionOutcome {
+    destination: PathBuf,
+    effects: Vec<Effect>,
+    hook_output: Vec<CapturedStep>,
 }
 
 /// A failed execution together with effects advanced only at real transitions.
 #[derive(Debug)]
-pub(crate) struct ExecutionFailure {
-    pub(crate) code: &'static str,
-    pub(crate) error: anyhow::Error,
-    pub(crate) effects: Vec<Effect>,
-    pub(crate) created: bool,
-    pub(crate) setup_incomplete: bool,
-    pub(crate) hook_outcome: Option<HookOutcome>,
-    pub(crate) hook_output: Vec<CapturedStep>,
-    pub(crate) entry: setup::EntryDisposition,
+struct ExecutionFailure {
+    code: &'static str,
+    error: anyhow::Error,
+    effects: Vec<Effect>,
+    created: bool,
+    setup_incomplete: bool,
+    hook_outcome: Option<HookOutcome>,
+    hook_output: Vec<CapturedStep>,
+    entry: setup::EntryDisposition,
 }
 
 /// Complete command-owned outcome for a switch or create request.
@@ -302,6 +303,15 @@ impl OperationOutcome {
             .as_ref()
             .err()
             .map(|failure| failure.message.as_str())
+    }
+
+    #[must_use]
+    pub(crate) fn setup_recovery_required(&self) -> bool {
+        self.destination.is_none()
+            && self
+                .result
+                .as_ref()
+                .is_err_and(|failure| failure.code == "switch.setup_incomplete")
     }
 }
 
@@ -398,7 +408,7 @@ pub(crate) struct RetryInput {
 
 /// A caller decision or safety condition that prevents an executable plan.
 #[derive(Debug)]
-pub(crate) enum Blocker {
+enum Blocker {
     InvalidBranch {
         message: String,
     },
@@ -441,19 +451,146 @@ pub(crate) enum Blocker {
     },
 }
 
-/// Runs the complete noninteractive worktree operation and returns typed protocol data.
+/// Presentation policy for the concrete topic worktree operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Delivery {
+    Human,
+    Captured,
+}
+
+/// Renderable facts for a genuinely new branch decision.
+#[derive(Debug)]
+pub(crate) struct NewBranchFacts {
+    pub(crate) branch: String,
+    pub(crate) destination: PathBuf,
+    pub(crate) source: String,
+    pub(crate) base_ref: Option<String>,
+    pub(crate) dirty_source: bool,
+    pub(crate) fetch_output: Option<String>,
+}
+
+/// Opaque, single-use authority produced from current repository facts.
+#[derive(Debug)]
+pub(crate) struct PreparedOperation {
+    repository: Repository,
+    plan: Plan,
+    input: OperationInput,
+}
+
+/// An explicit human decision for recovering a registered worktree's setup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SetupRecoveryDecision {
+    Retry,
+    EnterOnce,
+    MarkComplete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DetachedSetupAction {
+    NoHooks,
+    Recover(SetupRecoveryDecision),
+}
+
+/// Opaque command-owned authority for navigating one detached worktree.
+#[derive(Debug)]
+pub(crate) struct PreparedDetachedNavigation {
+    repository: Repository,
+    destination: PathBuf,
+    action: DetachedSetupAction,
+}
+
+/// Typed result for the picker-only detached-worktree navigation path.
+#[derive(Debug)]
+pub(crate) struct DetachedNavigationOutcome {
+    destination: Option<PathBuf>,
+    failure: Option<String>,
+}
+
+impl DetachedNavigationOutcome {
+    #[must_use]
+    pub(crate) fn destination(&self) -> Option<&Path> {
+        self.destination.as_deref()
+    }
+
+    #[must_use]
+    pub(crate) fn failure_message(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+}
+
+/// Fresh detached-worktree preparation after an optional human recovery choice.
+#[derive(Debug)]
+pub(crate) enum DetachedNavigationPreparation {
+    Complete(DetachedNavigationOutcome),
+    RecoveryRequired,
+    ApprovalRequired(hook_approval::Candidate),
+    Ready(PreparedDetachedNavigation),
+}
+
+/// Opaque, single-use authority for one freshly prepared setup recovery.
+#[derive(Debug)]
+pub(crate) struct PreparedSetupRecovery {
+    prepared: Box<PreparedOperation>,
+    decision: SetupRecoveryDecision,
+}
+
+#[derive(Debug)]
+enum SetupRecoveryPreparation {
+    ApprovalRequired(hook_approval::Candidate),
+    Ready(PreparedSetupRecovery),
+    Complete(Box<OperationOutcome>),
+}
+
+impl SetupRecoveryPreparation {
+    fn complete(outcome: OperationOutcome) -> Self {
+        Self::Complete(Box::new(outcome))
+    }
+}
+
+/// Read-only preparation result consumed by both human and JSON adapters.
+#[derive(Debug)]
+pub(crate) enum Preparation {
+    Complete(OperationOutcome),
+    RemoteSelection {
+        remotes: Vec<String>,
+        destination: PathBuf,
+        outcome: OperationOutcome,
+    },
+    ApprovalRequired {
+        candidate: hook_approval::Candidate,
+        outcome: OperationOutcome,
+    },
+    NewBranch {
+        facts: NewBranchFacts,
+        outcome: OperationOutcome,
+    },
+    SetupRecoveryRequired {
+        outcome: OperationOutcome,
+    },
+    SetupRecoveryReady(PreparedSetupRecovery),
+    Ready(Box<PreparedOperation>),
+}
+
+/// Prepares the topic worktree operation from current repository facts.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutcome {
-    let failure = |code: &str, message: String| OperationOutcome {
-        result: Err(OperationFailure {
-            code: code.into(),
-            message,
-        }),
-        context: OperationContext::Empty {},
-        effects: Vec::new(),
-        diagnostics: Vec::new(),
-        recovery: Vec::new(),
-        destination: None,
+pub(crate) fn prepare(
+    intent: Intent,
+    input: &OperationInput,
+    authorize_new: bool,
+    setup_decision: Option<SetupRecoveryDecision>,
+) -> Preparation {
+    let failure = |code: &str, message: String| {
+        Preparation::Complete(OperationOutcome {
+            result: Err(OperationFailure {
+                code: code.into(),
+                message,
+            }),
+            context: OperationContext::Empty {},
+            effects: Vec::new(),
+            diagnostics: Vec::new(),
+            recovery: Vec::new(),
+            destination: None,
+        })
     };
     let current_dir = match env::current_dir() {
         Ok(path) => path,
@@ -487,7 +624,7 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
             .filter(|worktree| worktree.navigable())
             .map(|worktree| {
                 let branch = match &worktree.kind {
-                    crate::WorktreeKind::Branch(value) => Some(value.clone()),
+                    WorktreeKind::Branch(value) => Some(value.clone()),
                     _ => None,
                 };
                 SwitchChoice {
@@ -527,7 +664,7 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
                     warning.as_bytes(),
                 )]
             });
-        return OperationOutcome {
+        return Preparation::Complete(OperationOutcome {
             result: Err(OperationFailure {
                 code: "switch.selection_required".into(),
                 message:
@@ -544,7 +681,7 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
             diagnostics,
             recovery: Vec::new(),
             destination: None,
-        };
+        });
     };
     let fetch = FetchIntent::new(input.fetch, input.dry_run);
     let registered = registered_plan(
@@ -576,128 +713,937 @@ pub(crate) fn operation(intent: Intent, input: &OperationInput) -> OperationOutc
     };
     let plan = match planned {
         Ok(Ok(plan)) => plan,
+        Ok(Err(Blocker::RemoteSelectionRequired {
+            remotes,
+            destination,
+        })) => {
+            let rendered_destination = destination.clone();
+            let outcome = blocker_outcome(
+                intent,
+                Blocker::RemoteSelectionRequired {
+                    remotes: remotes.clone(),
+                    destination,
+                },
+                &branch,
+                input,
+                working_directory,
+            );
+            return Preparation::RemoteSelection {
+                remotes,
+                destination: rendered_destination,
+                outcome,
+            };
+        }
+        Ok(Err(Blocker::ApprovalRequired {
+            candidate,
+            destination,
+        })) => {
+            let outcome = approval_required_outcome(
+                intent,
+                &candidate,
+                &destination,
+                &branch,
+                working_directory,
+            );
+            return Preparation::ApprovalRequired { candidate, outcome };
+        }
         Ok(Err(blocker)) => {
-            return blocker_outcome(intent, blocker, &branch, input, working_directory);
+            return Preparation::Complete(blocker_outcome(
+                intent,
+                blocker,
+                &branch,
+                input,
+                working_directory,
+            ));
         }
         Err(error) => return failure("repository.invalid", format!("{error:#}")),
     };
-    if let Source::Registered(worktree) = &plan.source {
-        if !input.dry_run {
-            let identity = match RepositoryObservation::new(&worktree.path).worktree_identity() {
-                Ok(identity) => identity,
-                Err(error) => return failure("repository.invalid", format!("{error:#}")),
-            };
-            let setup_lifecycle = setup::Lifecycle::new(&repository.common_dir);
-            let incomplete = match setup_lifecycle.inspect(setup::SetupTarget {
-                worktree_identity: &identity,
-                branch: Some(&branch),
-            }) {
-                Ok(setup::Inspection::Complete(_)) => None,
-                Ok(setup::Inspection::Incomplete(incomplete)) => Some(incomplete),
-                Err(failed) => {
-                    return failure("repository.invalid", format!("{:#}", failed.error));
-                }
-            };
-            if let Some(incomplete) = incomplete {
-                let config = match EffectiveConfig::load(&repository) {
-                    Ok(config) => config,
-                    Err(error) => return failure("repository.invalid", format!("{error:#}")),
+    if !input.dry_run && matches!(plan.source, Source::Registered(_)) {
+        match registered_setup_requires_choice(&repository, &plan) {
+            Ok(true) => {
+                let Some(decision) = setup_decision else {
+                    let outcome = incomplete_setup_outcome(
+                        branch,
+                        BytePath::path(&repository.current().path),
+                    );
+                    return Preparation::SetupRecoveryRequired { outcome };
                 };
-                if config.post_create.is_empty() {
-                    if let Err(failed) = incomplete.no_hooks_configured() {
-                        return failure("switch.setup_failed", format!("{:#}", failed.error));
+                let destination = plan.destination.clone();
+                let prepared = Box::new(PreparedOperation {
+                    repository,
+                    plan,
+                    input: input.clone(),
+                });
+                return match prepare_setup_recovery(prepared, decision) {
+                    SetupRecoveryPreparation::ApprovalRequired(candidate) => {
+                        let outcome = approval_required_outcome(
+                            intent,
+                            &candidate,
+                            &destination,
+                            &branch,
+                            working_directory,
+                        );
+                        Preparation::ApprovalRequired { candidate, outcome }
                     }
-                } else {
-                    return OperationOutcome {
-                        result: Err(OperationFailure {
-                            code: "switch.setup_incomplete".into(),
-                            message: "post-create setup remains incomplete; recover it interactively before structured navigation".into(),
-                        }),
-                        context: OperationContext::Branch(BranchContext {
-                            branch: branch.clone(),
-                            destination: None,
-                            created: Some(false),
-                            setup: Some("incomplete"),
-                            hook_outcome: None,
-                            remotes: None,
-                        }),
-                        effects: Vec::new(),
-                        diagnostics: Vec::new(),
-                        recovery: vec![RecoveryAction {
-                            action: "switch.recover_setup".into(),
-                            description: "Open the existing topic worktree and finish its pinned post-create setup interactively".into(),
-                            mutation: MutationClass::Setup,
-                            requires_human_approval: true,
-                            invocation: RecoveryInvocation {
-                                argv: vec!["pando".into(), "switch".into(), branch.clone()],
-                                stdin: None,
-                                working_directory: Some(working_directory),
-                            },
-                        }],
-                        destination: None,
-                    };
+                    SetupRecoveryPreparation::Ready(authority) => {
+                        Preparation::SetupRecoveryReady(authority)
+                    }
+                    SetupRecoveryPreparation::Complete(outcome) => Preparation::Complete(*outcome),
+                };
+            }
+            Ok(false) => {}
+            Err(error) => return failure("repository.invalid", format!("{error:#}")),
+        }
+    }
+    if let Source::New { base } = &plan.source
+        && !authorize_new
+    {
+        let dirty_source = match HistoryObservation::new(&repository.current().path).status() {
+            Ok(status) => status.is_dirty(),
+            Err(error) => return failure("repository.invalid", format!("{error:#}")),
+        };
+        let facts = NewBranchFacts {
+            branch: branch.clone(),
+            destination: plan.destination.clone(),
+            source: new_branch_source(&repository, base),
+            base_ref: base.base_ref.as_ref().map(git::BaseRef::reference),
+            dirty_source,
+            fetch_output: base.fetch_output.clone(),
+        };
+        let outcome = if intent == Intent::Switch {
+            if input.dry_run {
+                OperationOutcome {
+                    result: Ok(OperationResult::NewBranchApproval {
+                        branch,
+                        destination: BytePath::path(&plan.destination),
+                        kind: "new",
+                        start_point: base.commit.clone(),
+                        base_ref: base.base_ref.as_ref().map(git::BaseRef::reference),
+                        approval_required: true,
+                    }),
+                    context: OperationContext::Empty {},
+                    effects: planned_effects(&plan),
+                    diagnostics: Vec::new(),
+                    recovery: Vec::new(),
+                    destination: None,
+                }
+            } else {
+                OperationOutcome {
+                    result: Err(OperationFailure {
+                        code: "switch.approval_required".into(),
+                        message:
+                            "creating a genuinely new branch requires a manual human invocation"
+                                .into(),
+                    }),
+                    context: OperationContext::Empty {},
+                    effects: Vec::new(),
+                    diagnostics: Vec::new(),
+                    recovery: Vec::new(),
+                    destination: None,
                 }
             }
-        }
-        return OperationOutcome {
-            result: Ok(OperationResult::Existing {
-                branch,
-                destination: BytePath::path(&worktree.path),
-                dry_run: input.dry_run,
-            }),
-            context: OperationContext::Empty {},
-            effects: Vec::new(),
-            diagnostics: Vec::new(),
-            recovery: Vec::new(),
-            destination: (!input.dry_run).then(|| worktree.path.clone()),
-        };
-    }
-    let destination = BytePath::path(&plan.destination);
-    let new_base = match &plan.source {
-        Source::New { base } => Some(base.clone()),
-        _ => None,
-    };
-    if let Some(base) = new_base.clone().filter(|_| intent == Intent::Switch) {
-        if !input.dry_run {
-            return OperationOutcome {
-                result: Err(OperationFailure {
-                    code: "switch.approval_required".into(),
-                    message: "creating a genuinely new branch requires a manual human invocation"
-                        .into(),
+        } else {
+            OperationOutcome {
+                result: Ok(OperationResult::CreationPlan {
+                    branch,
+                    destination: BytePath::path(&plan.destination),
+                    kind: Some("new"),
+                    start_point: Some(base.commit.clone()),
+                    base_ref: base.base_ref.as_ref().map(git::BaseRef::reference),
+                    remote: None,
                 }),
                 context: OperationContext::Empty {},
-                effects: Vec::new(),
+                effects: planned_effects(&plan),
                 diagnostics: Vec::new(),
                 recovery: Vec::new(),
                 destination: None,
-            };
+            }
+        };
+        return Preparation::NewBranch { facts, outcome };
+    }
+    Preparation::Ready(Box::new(PreparedOperation {
+        repository,
+        plan,
+        input: input.clone(),
+    }))
+}
+
+/// Completes prepared work without granting a noninteractive adapter new authority.
+#[must_use]
+pub(crate) fn finish_noninteractive(preparation: Preparation) -> OperationOutcome {
+    match preparation {
+        Preparation::Complete(outcome)
+        | Preparation::RemoteSelection { outcome, .. }
+        | Preparation::ApprovalRequired { outcome, .. }
+        | Preparation::NewBranch { outcome, .. }
+        | Preparation::SetupRecoveryRequired { outcome } => outcome,
+        Preparation::SetupRecoveryReady(authority) => {
+            execute_setup_recovery(authority, Delivery::Captured)
         }
-        return OperationOutcome {
-            result: Ok(OperationResult::NewBranchApproval {
-                branch,
-                destination,
-                kind: "new",
-                start_point: base.commit,
-                base_ref: base.base_ref.as_ref().map(git::BaseRef::reference),
-                approval_required: true,
-            }),
-            context: OperationContext::Empty {},
-            effects: planned_effects(&plan),
-            diagnostics: Vec::new(),
-            recovery: Vec::new(),
-            destination: None,
+        Preparation::Ready(prepared) => execute_prepared(prepared, Delivery::Captured),
+    }
+}
+
+/// Re-observes and prepares picker navigation to one detached worktree.
+#[must_use]
+pub(crate) fn prepare_detached_navigation(
+    destination: &Path,
+    decision: Option<SetupRecoveryDecision>,
+) -> DetachedNavigationPreparation {
+    let current_dir = match env::current_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            return DetachedNavigationPreparation::Complete(detached_failure(format!(
+                "failed to read current directory: {error}"
+            )));
+        }
+    };
+    let repository = match RepositoryObservation::new(&current_dir).repository_for_navigation() {
+        Ok(repository) => repository,
+        Err(error) => {
+            return DetachedNavigationPreparation::Complete(detached_failure(format!("{error:#}")));
+        }
+    };
+    let destination = match destination.canonicalize() {
+        Ok(destination) => destination,
+        Err(error) => {
+            return DetachedNavigationPreparation::Complete(detached_failure(format!(
+                "failed to resolve path {}: {error}",
+                destination.display()
+            )));
+        }
+    };
+    let Some(worktree) = repository
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.path == destination && worktree.navigable())
+    else {
+        return DetachedNavigationPreparation::Complete(detached_failure(
+            "the selected detached worktree is no longer registered or navigable".into(),
+        ));
+    };
+    if !matches!(worktree.kind, WorktreeKind::Detached) {
+        return DetachedNavigationPreparation::Complete(detached_failure(
+            "picker detached navigation requires a detached worktree".into(),
+        ));
+    }
+    let identity = match RepositoryObservation::new(&destination).worktree_identity() {
+        Ok(identity) => identity,
+        Err(error) => {
+            return DetachedNavigationPreparation::Complete(detached_failure(format!("{error:#}")));
+        }
+    };
+    let lifecycle = setup::Lifecycle::new(&repository.common_dir);
+    let incomplete = match lifecycle.inspect(setup::SetupTarget {
+        worktree_identity: &identity,
+        branch: None,
+    }) {
+        Ok(setup::Inspection::Complete(transition)) => {
+            debug_assert_eq!(transition.entry, setup::EntryDisposition::Enter);
+            return DetachedNavigationPreparation::Complete(detached_success(destination));
+        }
+        Ok(setup::Inspection::Incomplete(incomplete)) => incomplete,
+        Err(failure) => {
+            return DetachedNavigationPreparation::Complete(detached_failure(format!(
+                "{:#}",
+                failure.error
+            )));
+        }
+    };
+    let config = match EffectiveConfig::load(&repository) {
+        Ok(config) => config,
+        Err(error) => {
+            return DetachedNavigationPreparation::Complete(detached_failure(format!("{error:#}")));
+        }
+    };
+    let action = if config.post_create.is_empty() {
+        DetachedSetupAction::NoHooks
+    } else {
+        let Some(decision) = decision else {
+            drop(incomplete);
+            return DetachedNavigationPreparation::RecoveryRequired;
+        };
+        if decision == SetupRecoveryDecision::Retry {
+            match hook_approval::evaluate(&repository, HookPhase::PostCreate, &config.post_create) {
+                Ok(hook_approval::Evaluation::ApprovalRequired(candidate)) => {
+                    drop(incomplete);
+                    return DetachedNavigationPreparation::ApprovalRequired(candidate);
+                }
+                Ok(
+                    hook_approval::Evaluation::NoCommands
+                    | hook_approval::Evaluation::Trusted { .. },
+                ) => {}
+                Err(error) => {
+                    return DetachedNavigationPreparation::Complete(detached_failure(format!(
+                        "{error:#}"
+                    )));
+                }
+            }
+        }
+        DetachedSetupAction::Recover(decision)
+    };
+    drop(incomplete);
+    DetachedNavigationPreparation::Ready(PreparedDetachedNavigation {
+        repository,
+        destination,
+        action,
+    })
+}
+
+/// Consumes freshly prepared detached navigation and owns setup mutation and destination authority.
+#[must_use]
+#[allow(clippy::too_many_lines)] // One command-owned transition preserves every detached recovery outcome.
+pub(crate) fn execute_detached_navigation(
+    prepared: PreparedDetachedNavigation,
+    delivery: Delivery,
+) -> DetachedNavigationOutcome {
+    let PreparedDetachedNavigation {
+        repository,
+        destination,
+        action,
+    } = prepared;
+    let identity = match RepositoryObservation::new(&destination).worktree_identity() {
+        Ok(identity) => identity,
+        Err(error) => return detached_failure(format!("{error:#}")),
+    };
+    let lifecycle = setup::Lifecycle::new(&repository.common_dir);
+    let incomplete = match lifecycle.inspect(setup::SetupTarget {
+        worktree_identity: &identity,
+        branch: None,
+    }) {
+        Ok(setup::Inspection::Complete(_)) => return detached_success(destination),
+        Ok(setup::Inspection::Incomplete(incomplete)) => incomplete,
+        Err(failure) => return detached_failure(format!("{:#}", failure.error)),
+    };
+    let config = match EffectiveConfig::load(&repository) {
+        Ok(config) => config,
+        Err(error) => return detached_failure(format!("{error:#}")),
+    };
+    if config.post_create.is_empty() {
+        return match incomplete.no_hooks_configured() {
+            Ok(_) => detached_success(destination),
+            Err(failure) => detached_transition_failure(&failure, destination),
         };
     }
-    let mut observations = setup::Observations::captured();
-    let outcome = execute_planned(&repository, &plan, input, &mut observations);
+    let DetachedSetupAction::Recover(decision) = action else {
+        return detached_failure(
+            "post-create setup configuration changed; choose a recovery again".into(),
+        );
+    };
+    match decision {
+        SetupRecoveryDecision::Retry => {
+            match hook_approval::evaluate(&repository, HookPhase::PostCreate, &config.post_create) {
+                Ok(hook_approval::Evaluation::Trusted { .. }) => {}
+                Ok(hook_approval::Evaluation::NoCommands) => {
+                    return match incomplete.no_hooks_configured() {
+                        Ok(_) => detached_success(destination),
+                        Err(failure) => detached_transition_failure(&failure, destination),
+                    };
+                }
+                Ok(hook_approval::Evaluation::ApprovalRequired(_)) => {
+                    return detached_failure(
+                        "post-create hooks require fresh approval before setup recovery".into(),
+                    );
+                }
+                Err(error) => return detached_failure(format!("{error:#}")),
+            }
+            let mut observations = if delivery == Delivery::Human {
+                hook::Observations::human()
+            } else {
+                hook::Observations::captured()
+            };
+            let execution = hook::execute(
+                HookPhase::PostCreate,
+                &config.post_create,
+                &destination,
+                &mut observations,
+            );
+            drop(observations.finish());
+            let (attempt, outcome) = match execution {
+                Ok(execution) => (Ok(execution.outcome), Some(execution.outcome)),
+                Err(error) => (Err(error), None),
+            };
+            match incomplete.recovery_attempt(attempt) {
+                Ok(_) => {
+                    if delivery == Delivery::Human {
+                        let _ = ui::finish("Post-create setup complete");
+                    }
+                    detached_success(destination)
+                }
+                Err(failure) => {
+                    let message = if outcome == Some(HookOutcome::Interrupted) {
+                        "post-create setup was interrupted; setup remains incomplete".into()
+                    } else {
+                        format!("{:#}", failure.error)
+                    };
+                    DetachedNavigationOutcome {
+                        destination: (failure.transition.entry == setup::EntryDisposition::Enter)
+                            .then_some(destination),
+                        failure: Some(message),
+                    }
+                }
+            }
+        }
+        SetupRecoveryDecision::EnterOnce => {
+            if delivery == Delivery::Human {
+                let _ = ui::warning("Entering once while setup remains incomplete.");
+            }
+            let transition = incomplete.enter_once();
+            DetachedNavigationOutcome {
+                destination: (transition.entry == setup::EntryDisposition::Enter)
+                    .then_some(destination.clone()),
+                failure: Some(format!(
+                    "setup remains incomplete for {}",
+                    destination.display()
+                )),
+            }
+        }
+        SetupRecoveryDecision::MarkComplete => match incomplete.mark_complete() {
+            Ok(_) => {
+                if delivery == Delivery::Human {
+                    let _ = ui::finish("Marked setup complete");
+                }
+                detached_success(destination)
+            }
+            Err(failure) => detached_transition_failure(&failure, destination),
+        },
+    }
+}
+
+fn detached_transition_failure(
+    failure: &setup::TransitionFailure,
+    destination: PathBuf,
+) -> DetachedNavigationOutcome {
+    DetachedNavigationOutcome {
+        destination: (failure.transition.entry == setup::EntryDisposition::Enter)
+            .then_some(destination),
+        failure: Some(format!("{:#}", failure.error)),
+    }
+}
+
+fn detached_success(destination: PathBuf) -> DetachedNavigationOutcome {
+    DetachedNavigationOutcome {
+        destination: Some(destination),
+        failure: None,
+    }
+}
+
+fn detached_failure(message: String) -> DetachedNavigationOutcome {
+    DetachedNavigationOutcome {
+        destination: None,
+        failure: Some(message),
+    }
+}
+
+fn registered_setup_requires_choice(repository: &Repository, plan: &Plan) -> Result<bool> {
+    let Source::Registered(worktree) = &plan.source else {
+        return Ok(false);
+    };
+    let identity = RepositoryObservation::new(&worktree.path).worktree_identity()?;
+    let lifecycle = setup::Lifecycle::new(&repository.common_dir);
+    let incomplete = match lifecycle
+        .inspect(setup::SetupTarget {
+            worktree_identity: &identity,
+            branch: Some(&plan.branch),
+        })
+        .map_err(|failure| failure.error)?
+    {
+        setup::Inspection::Complete(_) => return Ok(false),
+        setup::Inspection::Incomplete(incomplete) => incomplete,
+    };
+    let config = EffectiveConfig::load(repository)?;
+    let required = !config.post_create.is_empty();
+    drop(incomplete);
+    Ok(required)
+}
+
+/// Reprepares a selected human setup recovery from current repository and trust facts.
+#[must_use]
+fn prepare_setup_recovery(
+    prepared: Box<PreparedOperation>,
+    decision: SetupRecoveryDecision,
+) -> SetupRecoveryPreparation {
+    let Source::Registered(worktree) = &prepared.plan.source else {
+        return SetupRecoveryPreparation::complete(simple_outcome(
+            "repository.invalid",
+            "setup recovery requires a registered worktree".into(),
+        ));
+    };
+    let identity = match RepositoryObservation::new(&worktree.path).worktree_identity() {
+        Ok(identity) => identity,
+        Err(error) => {
+            return SetupRecoveryPreparation::complete(simple_outcome(
+                "repository.invalid",
+                format!("{error:#}"),
+            ));
+        }
+    };
+    let lifecycle = setup::Lifecycle::new(&prepared.repository.common_dir);
+    match lifecycle.inspect(setup::SetupTarget {
+        worktree_identity: &identity,
+        branch: Some(&prepared.plan.branch),
+    }) {
+        Ok(setup::Inspection::Complete(_)) => {
+            return SetupRecoveryPreparation::complete(registered_outcome(&prepared.plan, false));
+        }
+        Ok(setup::Inspection::Incomplete(incomplete)) => drop(incomplete),
+        Err(failure) => {
+            return SetupRecoveryPreparation::complete(simple_outcome(
+                "repository.invalid",
+                format!("{:#}", failure.error),
+            ));
+        }
+    }
+    if decision == SetupRecoveryDecision::Retry {
+        let config = match EffectiveConfig::load(&prepared.repository) {
+            Ok(config) => config,
+            Err(error) => {
+                return SetupRecoveryPreparation::complete(simple_outcome(
+                    "repository.invalid",
+                    format!("{error:#}"),
+                ));
+            }
+        };
+        match hook_approval::evaluate(
+            &prepared.repository,
+            HookPhase::PostCreate,
+            &config.post_create,
+        ) {
+            Ok(hook_approval::Evaluation::ApprovalRequired(candidate)) => {
+                return SetupRecoveryPreparation::ApprovalRequired(candidate);
+            }
+            Ok(
+                hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted { .. },
+            ) => {}
+            Err(error) => {
+                return SetupRecoveryPreparation::complete(simple_outcome(
+                    "repository.invalid",
+                    format!("{error:#}"),
+                ));
+            }
+        }
+    }
+    SetupRecoveryPreparation::Ready(PreparedSetupRecovery { prepared, decision })
+}
+
+/// Consumes one freshly prepared registered-worktree setup recovery.
+#[must_use]
+#[allow(clippy::too_many_lines)] // One command-owned transition preserves every setup recovery outcome.
+pub(crate) fn execute_setup_recovery(
+    authority: PreparedSetupRecovery,
+    delivery: Delivery,
+) -> OperationOutcome {
+    let PreparedSetupRecovery { prepared, decision } = authority;
+    let prepared = *prepared;
+    let Source::Registered(worktree) = &prepared.plan.source else {
+        return simple_outcome(
+            "repository.invalid",
+            "setup recovery requires a registered worktree".into(),
+        );
+    };
+    let destination = worktree.path.clone();
+    let branch = prepared.plan.branch.clone();
+    let identity = match RepositoryObservation::new(&destination).worktree_identity() {
+        Ok(identity) => identity,
+        Err(error) => return simple_outcome("repository.invalid", format!("{error:#}")),
+    };
+    let lifecycle = setup::Lifecycle::new(&prepared.repository.common_dir);
+    let incomplete = match lifecycle.inspect(setup::SetupTarget {
+        worktree_identity: &identity,
+        branch: Some(&branch),
+    }) {
+        Ok(setup::Inspection::Complete(_)) => return registered_outcome(&prepared.plan, false),
+        Ok(setup::Inspection::Incomplete(incomplete)) => incomplete,
+        Err(failure) => {
+            return simple_outcome("repository.invalid", format!("{:#}", failure.error));
+        }
+    };
+    let config = match EffectiveConfig::load(&prepared.repository) {
+        Ok(config) => config,
+        Err(error) => return simple_outcome("repository.invalid", format!("{error:#}")),
+    };
+    if config.post_create.is_empty() {
+        return match incomplete.no_hooks_configured() {
+            Ok(_) => registered_outcome(&prepared.plan, false),
+            Err(failure) => setup_recovery_failure(
+                "switch.setup_failed",
+                format!("{:#}", failure.error),
+                branch,
+                destination,
+                failure.transition.entry,
+                Vec::new(),
+            ),
+        };
+    }
+    match decision {
+        SetupRecoveryDecision::Retry => {
+            match hook_approval::evaluate(
+                &prepared.repository,
+                HookPhase::PostCreate,
+                &config.post_create,
+            ) {
+                Ok(hook_approval::Evaluation::Trusted { .. }) => {}
+                Ok(hook_approval::Evaluation::NoCommands) => {
+                    return match incomplete.no_hooks_configured() {
+                        Ok(_) => registered_outcome(&prepared.plan, false),
+                        Err(failure) => setup_recovery_failure(
+                            "switch.setup_failed",
+                            format!("{:#}", failure.error),
+                            branch,
+                            destination,
+                            failure.transition.entry,
+                            Vec::new(),
+                        ),
+                    };
+                }
+                Ok(hook_approval::Evaluation::ApprovalRequired(_)) => {
+                    return incomplete_setup_outcome(
+                        branch,
+                        BytePath::path(&prepared.repository.current().path),
+                    );
+                }
+                Err(error) => {
+                    return simple_outcome("repository.invalid", format!("{error:#}"));
+                }
+            }
+            let mut observations = if delivery == Delivery::Human {
+                hook::Observations::human()
+            } else {
+                hook::Observations::captured()
+            };
+            let execution = hook::execute(
+                HookPhase::PostCreate,
+                &config.post_create,
+                &destination,
+                &mut observations,
+            );
+            drop(observations.finish());
+            let (attempt, outcome, output) = match execution {
+                Ok(execution) => (
+                    Ok(execution.outcome),
+                    Some(execution.outcome),
+                    execution.output,
+                ),
+                Err(error) => (Err(error), None, Vec::new()),
+            };
+            match incomplete.recovery_attempt(attempt) {
+                Ok(_) => {
+                    if delivery == Delivery::Human {
+                        let _ = ui::finish("Post-create setup complete");
+                    }
+                    registered_outcome(&prepared.plan, false)
+                }
+                Err(failure) => {
+                    let message = if outcome == Some(HookOutcome::Interrupted) {
+                        "post-create setup was interrupted; setup remains incomplete".into()
+                    } else {
+                        format!("{:#}", failure.error)
+                    };
+                    setup_recovery_failure(
+                        "switch.setup_failed",
+                        message,
+                        branch,
+                        destination,
+                        failure.transition.entry,
+                        hook_diagnostics(output),
+                    )
+                }
+            }
+        }
+        SetupRecoveryDecision::EnterOnce => {
+            if delivery == Delivery::Human {
+                let _ = ui::warning("Entering once while setup remains incomplete.");
+            }
+            let transition = incomplete.enter_once();
+            setup_recovery_failure(
+                "switch.setup_incomplete",
+                format!("setup remains incomplete for {}", destination.display()),
+                branch,
+                destination,
+                transition.entry,
+                Vec::new(),
+            )
+        }
+        SetupRecoveryDecision::MarkComplete => match incomplete.mark_complete() {
+            Ok(_) => {
+                if delivery == Delivery::Human {
+                    let _ = ui::finish("Marked setup complete");
+                }
+                registered_outcome(&prepared.plan, false)
+            }
+            Err(failure) => setup_recovery_failure(
+                "switch.setup_failed",
+                format!("{:#}", failure.error),
+                branch,
+                destination,
+                failure.transition.entry,
+                Vec::new(),
+            ),
+        },
+    }
+}
+
+fn setup_recovery_failure(
+    code: &str,
+    message: String,
+    branch: String,
+    destination: PathBuf,
+    entry: setup::EntryDisposition,
+    diagnostics: Vec<Diagnostic>,
+) -> OperationOutcome {
+    OperationOutcome {
+        result: Err(OperationFailure {
+            code: code.into(),
+            message,
+        }),
+        context: OperationContext::Branch(BranchContext {
+            branch,
+            destination: Some(BytePath::path(&destination)),
+            created: Some(false),
+            setup: Some("incomplete"),
+            hook_outcome: None,
+            remotes: None,
+        }),
+        effects: Vec::new(),
+        diagnostics,
+        recovery: Vec::new(),
+        destination: (entry == setup::EntryDisposition::Enter).then_some(destination),
+    }
+}
+
+fn registered_outcome(plan: &Plan, dry_run: bool) -> OperationOutcome {
+    let Source::Registered(worktree) = &plan.source else {
+        unreachable!("registered outcome requires a registered source")
+    };
+    OperationOutcome {
+        result: Ok(OperationResult::Existing {
+            branch: plan.branch.clone(),
+            destination: BytePath::path(&worktree.path),
+            dry_run,
+        }),
+        context: OperationContext::Empty {},
+        effects: Vec::new(),
+        diagnostics: Vec::new(),
+        recovery: Vec::new(),
+        destination: (!dry_run).then(|| worktree.path.clone()),
+    }
+}
+
+/// Consumes one opaque prepared operation using the selected presentation policy.
+#[must_use]
+pub(crate) fn execute_prepared(
+    prepared: Box<PreparedOperation>,
+    delivery: Delivery,
+) -> OperationOutcome {
+    let PreparedOperation {
+        repository,
+        plan,
+        input,
+    } = *prepared;
+    if matches!(plan.source, Source::Registered(_)) {
+        return execute_registered(&repository, &plan, &input, delivery);
+    }
+    let has_hooks = plan
+        .config
+        .as_ref()
+        .is_some_and(|config| !config.post_create.is_empty());
+    if delivery == Delivery::Human && !has_hooks && !input.dry_run {
+        let progress = ui::TimedProgress::start(true, "Creating worktree...").ok();
+        let mut observations = setup::Observations::captured();
+        let outcome = execute_planned(&repository, &plan, &input, &mut observations);
+        drop(observations.finish());
+        if let Some(progress) = progress {
+            if outcome.result.is_err() {
+                let _ = progress.fail("Failed to create worktree");
+            } else {
+                let _ = progress.complete("Created worktree", ui::Completion::Outro);
+            }
+        }
+        return outcome;
+    }
+    let mut observations = if delivery == Delivery::Human {
+        setup::Observations::human()
+    } else {
+        setup::Observations::captured()
+    };
+    let outcome = execute_planned(&repository, &plan, &input, &mut observations);
     drop(observations.finish());
+    if delivery == Delivery::Human && has_hooks && outcome.result.is_ok() {
+        let _ = ui::finish("Post-create setup complete");
+    }
     outcome
+}
+
+fn execute_registered(
+    repository: &Repository,
+    plan: &Plan,
+    input: &OperationInput,
+    _delivery: Delivery,
+) -> OperationOutcome {
+    let _span = debug::Span::new("enter existing worktree");
+    let Source::Registered(worktree) = &plan.source else {
+        unreachable!("registered execution requires a registered source")
+    };
+    let branch = plan.branch.clone();
+    if !input.dry_run {
+        let identity = match RepositoryObservation::new(&worktree.path).worktree_identity() {
+            Ok(identity) => identity,
+            Err(error) => {
+                return simple_outcome("repository.invalid", format!("{error:#}"));
+            }
+        };
+        let setup_lifecycle = setup::Lifecycle::new(&repository.common_dir);
+        let incomplete = match setup_lifecycle.inspect(setup::SetupTarget {
+            worktree_identity: &identity,
+            branch: Some(&branch),
+        }) {
+            Ok(setup::Inspection::Complete(_)) => None,
+            Ok(setup::Inspection::Incomplete(incomplete)) => Some(incomplete),
+            Err(failed) => {
+                return simple_outcome("repository.invalid", format!("{:#}", failed.error));
+            }
+        };
+        if let Some(incomplete) = incomplete {
+            let config = match EffectiveConfig::load(repository) {
+                Ok(config) => config,
+                Err(error) => {
+                    return simple_outcome("repository.invalid", format!("{error:#}"));
+                }
+            };
+            if config.post_create.is_empty() {
+                if let Err(failed) = incomplete.no_hooks_configured() {
+                    return simple_outcome("switch.setup_failed", format!("{:#}", failed.error));
+                }
+            } else {
+                return incomplete_setup_outcome(
+                    branch,
+                    BytePath::path(&repository.current().path),
+                );
+            }
+        }
+    }
+    OperationOutcome {
+        result: Ok(OperationResult::Existing {
+            branch,
+            destination: BytePath::path(&worktree.path),
+            dry_run: input.dry_run,
+        }),
+        context: OperationContext::Empty {},
+        effects: Vec::new(),
+        diagnostics: Vec::new(),
+        recovery: Vec::new(),
+        destination: (!input.dry_run).then(|| worktree.path.clone()),
+    }
+}
+
+fn simple_outcome(code: &str, message: String) -> OperationOutcome {
+    OperationOutcome {
+        result: Err(OperationFailure {
+            code: code.into(),
+            message,
+        }),
+        context: OperationContext::Empty {},
+        effects: Vec::new(),
+        diagnostics: Vec::new(),
+        recovery: Vec::new(),
+        destination: None,
+    }
+}
+
+fn incomplete_setup_outcome(branch: String, working_directory: BytePath) -> OperationOutcome {
+    OperationOutcome {
+        result: Err(OperationFailure {
+            code: "switch.setup_incomplete".into(),
+            message: "post-create setup remains incomplete; recover it interactively before structured navigation".into(),
+        }),
+        context: OperationContext::Branch(BranchContext {
+            branch: branch.clone(),
+            destination: None,
+            created: Some(false),
+            setup: Some("incomplete"),
+            hook_outcome: None,
+            remotes: None,
+        }),
+        effects: Vec::new(),
+        diagnostics: Vec::new(),
+        recovery: vec![RecoveryAction {
+            action: "switch.recover_setup".into(),
+            description: "Open the existing topic worktree and finish its pinned post-create setup interactively".into(),
+            mutation: MutationClass::Setup,
+            requires_human_approval: true,
+            invocation: RecoveryInvocation {
+                argv: vec!["pando".into(), "switch".into(), branch],
+                stdin: None,
+                working_directory: Some(working_directory),
+            },
+        }],
+        destination: None,
+    }
+}
+
+fn new_branch_source(repository: &Repository, base: &git::NewBranchBase) -> String {
+    let commit = &base.commit;
+    if let Some(base_ref) = &base.base_ref {
+        return format!("branch {:?} at {commit}", base_ref.reference());
+    }
+    match &repository.current().kind {
+        WorktreeKind::Branch(source) => format!("branch {source:?} at {commit}"),
+        WorktreeKind::Detached => format!("detached commit {commit}"),
+        _ => format!("commit {commit}"),
+    }
+}
+
+fn approval_required_outcome(
+    intent: Intent,
+    candidate: &hook_approval::Candidate,
+    destination: &Path,
+    branch: &str,
+    working_directory: BytePath,
+) -> OperationOutcome {
+    let command = intent.id();
+    OperationOutcome {
+        result: Err(OperationFailure {
+            code: "trust.approval_required".into(),
+            message: "post-create hooks require manual review and approval before mutation".into(),
+        }),
+        context: OperationContext::Approval(ApprovalContext {
+            approval: HookApprovalContext {
+                phase: candidate.phase().key().into(),
+                commands: candidate
+                    .commands()
+                    .iter()
+                    .map(|step| HookApprovalCommand {
+                        name: step.name.clone(),
+                        command: step.command.clone(),
+                    })
+                    .collect(),
+                repository: candidate.repository().into(),
+                identity: candidate.identity().into(),
+            },
+            branch: branch.into(),
+            destination: BytePath::path(destination),
+        }),
+        effects: Vec::new(),
+        diagnostics: Vec::new(),
+        recovery: vec![RecoveryAction {
+            action: "trust.approve_hooks".into(),
+            description: "Review and approve post-create hooks interactively".into(),
+            mutation: MutationClass::Trust,
+            requires_human_approval: true,
+            invocation: RecoveryInvocation {
+                argv: vec!["pando".into(), command.into(), branch.into()],
+                stdin: None,
+                working_directory: Some(working_directory),
+            },
+        }],
+        destination: None,
+    }
 }
 
 /// Executes one already-authorized plan and returns the final command outcome
 /// consumed by both presentation adapters.
 #[must_use]
-pub(crate) fn execute_planned(
+fn execute_planned(
     repository: &Repository,
     plan: &Plan,
     input: &OperationInput,
@@ -787,19 +1733,179 @@ fn blocker_outcome(
     match blocker {
         Blocker::InvalidBranch { message } => simple(format!("{command}.invalid_branch"), message),
         Blocker::ConfigInvalid { message } => simple(format!("{command}.config_invalid"), message),
-        Blocker::FetchNotApplicable { message } => simple(format!("{command}.fetch_not_applicable"), message),
-        Blocker::BaseUnavailable { message } => simple(format!("{command}.base_unavailable"), message),
-        Blocker::DestinationUnavailable { worktree } => simple(format!("{command}.destination_unavailable"), format!("registered destination is {}", worktree.state_label())),
-        Blocker::PrimaryUnavailable => simple("repository.primary_unavailable".into(), "a bare repository cannot create a worktree".into()),
-        Blocker::RootUnavailable { message } => simple("repository.root_unavailable".into(), message),
-        Blocker::DestinationInvalid { message } => simple(format!("{command}.destination_invalid"), message),
-        Blocker::DestinationCollision => simple(format!("{command}.destination_collision"), "the configured destination already exists or is registered".into()),
-        Blocker::DestinationNotIgnored { first, gitignore } => simple(format!("{command}.destination_invalid"), format!("the configured destination is inside the primary worktree but is not ignored; add '/{first}/' to {}", gitignore.display())),
-        Blocker::IrrelevantRemote => simple(format!("{command}.irrelevant_remote"), "remote does not apply to the resolved branch".into()),
-        Blocker::UnknownRemote => simple(format!("{command}.unknown_remote"), "remote does not match an available fetched branch".into()),
-        Blocker::RegisteredForCreate { worktree } => OperationOutcome { result: Err(OperationFailure { code: "create.branch_registered".into(), message: "the branch already has a registered worktree; create will not adopt or replace it".into() }), context: OperationContext::Branch(BranchContext { branch: branch.into(), destination: Some(BytePath::path(&worktree.path)), created: None, setup: None, hook_outcome: None, remotes: None }), effects: Vec::new(), diagnostics: Vec::new(), recovery: vec![RecoveryAction { action: "switch".into(), description: "Enter the registered worktree instead of creating one".into(), mutation: MutationClass::None, requires_human_approval: false, invocation: RecoveryInvocation { argv: vec!["pando".into(), "--input-output".into(), "json".into(), "switch".into()], stdin: Some(protocol::Request { schema_version: protocol::SCHEMA_VERSION, request_id: None, input: RetryInput { branch: Some(branch.into()), remote: None, fetch: None, dry_run: None } }), working_directory: Some(working_directory) } }], destination: None },
-        Blocker::RemoteSelectionRequired { remotes, .. } => { let recovery = remotes.iter().map(|remote| RecoveryAction { action: "retry_with_remote".into(), description: format!("Retry with {remote} as the selected source"), mutation: MutationClass::None, requires_human_approval: false, invocation: RecoveryInvocation { argv: vec!["pando".into(), "--input-output".into(), "json".into(), command.into()], stdin: Some(protocol::Request { schema_version: protocol::SCHEMA_VERSION, request_id: None, input: RetryInput { branch: Some(branch.into()), remote: Some(remote.clone()), fetch: Some(input.fetch), dry_run: Some(input.dry_run) } }), working_directory: Some(working_directory.clone()) } }).collect(); OperationOutcome { result: Err(OperationFailure { code: format!("{command}.remote_selection_required"), message: "multiple fetched remotes match this branch".into() }), context: OperationContext::Branch(BranchContext { branch: branch.into(), destination: None, created: None, setup: None, hook_outcome: None, remotes: Some(remotes) }), effects: Vec::new(), diagnostics: Vec::new(), recovery, destination: None } }
-        Blocker::ApprovalRequired { candidate, destination } => OperationOutcome { result: Err(OperationFailure { code: "trust.approval_required".into(), message: "post-create hooks require manual review and approval before mutation".into() }), context: OperationContext::Approval(ApprovalContext { approval: HookApprovalContext { phase: candidate.phase().key().into(), commands: candidate.commands().iter().map(|step| HookApprovalCommand { name: step.name.clone(), command: step.command.clone() }).collect(), repository: candidate.repository().into(), identity: candidate.identity().into() }, branch: branch.into(), destination: BytePath::path(&destination) }), effects: Vec::new(), diagnostics: Vec::new(), recovery: vec![RecoveryAction { action: "trust.approve_hooks".into(), description: "Review and approve post-create hooks interactively".into(), mutation: MutationClass::Trust, requires_human_approval: true, invocation: RecoveryInvocation { argv: vec!["pando".into(), command.into(), branch.into()], stdin: None, working_directory: Some(working_directory) } }], destination: None },
+        Blocker::FetchNotApplicable { message } => {
+            simple(format!("{command}.fetch_not_applicable"), message)
+        }
+        Blocker::BaseUnavailable { message } => {
+            simple(format!("{command}.base_unavailable"), message)
+        }
+        Blocker::DestinationUnavailable { worktree } => simple(
+            format!("{command}.destination_unavailable"),
+            format!("registered destination is {}", worktree.state_label()),
+        ),
+        Blocker::PrimaryUnavailable => simple(
+            "repository.primary_unavailable".into(),
+            "a bare repository cannot create a worktree".into(),
+        ),
+        Blocker::RootUnavailable { message } => {
+            simple("repository.root_unavailable".into(), message)
+        }
+        Blocker::DestinationInvalid { message } => {
+            simple(format!("{command}.destination_invalid"), message)
+        }
+        Blocker::DestinationCollision => simple(
+            format!("{command}.destination_collision"),
+            "the configured destination already exists or is registered".into(),
+        ),
+        Blocker::DestinationNotIgnored { first, gitignore } => simple(
+            format!("{command}.destination_invalid"),
+            format!(
+                "the configured destination is inside the primary worktree but is not ignored; add '/{first}/' to {}",
+                gitignore.display()
+            ),
+        ),
+        Blocker::IrrelevantRemote => simple(
+            format!("{command}.irrelevant_remote"),
+            "remote does not apply to the resolved branch".into(),
+        ),
+        Blocker::UnknownRemote => simple(
+            format!("{command}.unknown_remote"),
+            "remote does not match an available fetched branch".into(),
+        ),
+        Blocker::RegisteredForCreate { worktree } => OperationOutcome {
+            result: Err(OperationFailure {
+                code: "create.branch_registered".into(),
+                message: format!(
+                    "branch {branch:?} is already registered at {}; enter it with 'pando switch {branch}'",
+                    worktree.path.display()
+                ),
+            }),
+            context: OperationContext::Branch(BranchContext {
+                branch: branch.into(),
+                destination: Some(BytePath::path(&worktree.path)),
+                created: None,
+                setup: None,
+                hook_outcome: None,
+                remotes: None,
+            }),
+            effects: Vec::new(),
+            diagnostics: Vec::new(),
+            recovery: vec![RecoveryAction {
+                action: "switch".into(),
+                description: "Enter the registered worktree instead of creating one".into(),
+                mutation: MutationClass::None,
+                requires_human_approval: false,
+                invocation: RecoveryInvocation {
+                    argv: vec![
+                        "pando".into(),
+                        "--input-output".into(),
+                        "json".into(),
+                        "switch".into(),
+                    ],
+                    stdin: Some(protocol::Request {
+                        schema_version: protocol::SCHEMA_VERSION,
+                        request_id: None,
+                        input: RetryInput {
+                            branch: Some(branch.into()),
+                            remote: None,
+                            fetch: None,
+                            dry_run: None,
+                        },
+                    }),
+                    working_directory: Some(working_directory),
+                },
+            }],
+            destination: None,
+        },
+        Blocker::RemoteSelectionRequired { remotes, .. } => {
+            let recovery = remotes
+                .iter()
+                .map(|remote| RecoveryAction {
+                    action: "retry_with_remote".into(),
+                    description: format!("Retry with {remote} as the selected source"),
+                    mutation: MutationClass::None,
+                    requires_human_approval: false,
+                    invocation: RecoveryInvocation {
+                        argv: vec![
+                            "pando".into(),
+                            "--input-output".into(),
+                            "json".into(),
+                            command.into(),
+                        ],
+                        stdin: Some(protocol::Request {
+                            schema_version: protocol::SCHEMA_VERSION,
+                            request_id: None,
+                            input: RetryInput {
+                                branch: Some(branch.into()),
+                                remote: Some(remote.clone()),
+                                fetch: Some(input.fetch),
+                                dry_run: Some(input.dry_run),
+                            },
+                        }),
+                        working_directory: Some(working_directory.clone()),
+                    },
+                })
+                .collect();
+            OperationOutcome {
+                result: Err(OperationFailure {
+                    code: format!("{command}.remote_selection_required"),
+                    message: "multiple fetched remotes match this branch".into(),
+                }),
+                context: OperationContext::Branch(BranchContext {
+                    branch: branch.into(),
+                    destination: None,
+                    created: None,
+                    setup: None,
+                    hook_outcome: None,
+                    remotes: Some(remotes),
+                }),
+                effects: Vec::new(),
+                diagnostics: Vec::new(),
+                recovery,
+                destination: None,
+            }
+        }
+        Blocker::ApprovalRequired {
+            candidate,
+            destination,
+        } => OperationOutcome {
+            result: Err(OperationFailure {
+                code: "trust.approval_required".into(),
+                message: "post-create hooks require manual review and approval before mutation"
+                    .into(),
+            }),
+            context: OperationContext::Approval(ApprovalContext {
+                approval: HookApprovalContext {
+                    phase: candidate.phase().key().into(),
+                    commands: candidate
+                        .commands()
+                        .iter()
+                        .map(|step| HookApprovalCommand {
+                            name: step.name.clone(),
+                            command: step.command.clone(),
+                        })
+                        .collect(),
+                    repository: candidate.repository().into(),
+                    identity: candidate.identity().into(),
+                },
+                branch: branch.into(),
+                destination: BytePath::path(&destination),
+            }),
+            effects: Vec::new(),
+            diagnostics: Vec::new(),
+            recovery: vec![RecoveryAction {
+                action: "trust.approve_hooks".into(),
+                description: "Review and approve post-create hooks interactively".into(),
+                mutation: MutationClass::Trust,
+                requires_human_approval: true,
+                invocation: RecoveryInvocation {
+                    argv: vec!["pando".into(), command.into(), branch.into()],
+                    stdin: None,
+                    working_directory: Some(working_directory),
+                },
+            }],
+            destination: None,
+        },
     }
 }
 
@@ -907,7 +2013,7 @@ fn bounded_diagnostic(source: &str, stream: &str, bytes: &[u8]) -> Diagnostic {
 
 /// Resolves the registered-worktree fast path without observing unrelated refs.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn registered_plan(
+fn registered_plan(
     repository: &Repository,
     intent: Intent,
     branch: &str,
@@ -952,7 +2058,7 @@ pub(crate) fn registered_plan(
 ///
 /// Returns an error when Git cannot classify the branch or configuration cannot be loaded.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One authoritative planner owns every classification and safety check.
-pub(crate) fn plan(
+fn plan(
     repository: &Repository,
     snapshot: &Snapshot<'_>,
     intent: Intent,
@@ -1218,7 +2324,7 @@ fn plan_source(
 /// Setup and hook observations may be presented live or retained for replay,
 /// but the returned execution state is identical in both cases.
 #[allow(clippy::too_many_lines)] // This is the single explicit worktree execution boundary.
-pub(crate) fn execute(
+fn execute(
     repository: &Repository,
     plan: &Plan,
     observations: &mut setup::Observations,
@@ -1429,7 +2535,7 @@ fn revalidate_new(repository: &Repository, base: &git::NewBranchBase) -> Result<
     Ok(())
 }
 
-pub(crate) fn planned_effects(plan: &Plan) -> Vec<Effect> {
+fn planned_effects(plan: &Plan) -> Vec<Effect> {
     if matches!(plan.source, Source::Registered(_)) {
         return Vec::new();
     }

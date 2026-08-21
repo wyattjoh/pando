@@ -126,7 +126,6 @@ impl From<CommitError> for ErrorBody {
 }
 
 struct CommitOutcome {
-    request_id: Option<String>,
     result: std::result::Result<CommitSuccess, CommitError>,
     context: CommitContext,
     effects: Vec<Effect>,
@@ -141,9 +140,46 @@ struct CommandFailure {
     diagnostics: Vec<Diagnostic>,
 }
 
+#[derive(Clone, Copy)]
+enum Delivery {
+    Human,
+    Captured,
+}
+
+struct CommitIntent {
+    selection: Selection,
+    message: MessageSource,
+    dry_run: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RecoveryContext<'a> {
+    request_mode: bool,
+    request_id: Option<&'a str>,
+}
+
+enum PreparedMessage {
+    Provided(String),
+    Generator(Box<EffectiveConfig>),
+}
+
 struct HumanMessage {
     value: String,
     generated: bool,
+}
+
+struct CommitExecution {
+    outcome: CommitOutcome,
+    repository_path: Option<std::path::PathBuf>,
+    message: Option<HumanMessage>,
+}
+
+enum CommitOperation {
+    StageAllRequired {
+        execution: CommitExecution,
+        repository_path: std::path::PathBuf,
+    },
+    Complete(CommitExecution),
 }
 
 /// Runs commit using the human or JSON adapter.
@@ -200,10 +236,23 @@ pub fn run(mut invocation: Invocation) -> Result<()> {
             })
     };
 
+    let intent = CommitIntent {
+        selection: if invocation.stage_all {
+            Selection::StageAll
+        } else {
+            Selection::Staged
+        },
+        message: source,
+        dry_run: invocation.dry_run,
+    };
+    let recovery = RecoveryContext {
+        request_mode: invocation.request_mode,
+        request_id: request_id.as_deref(),
+    };
     if invocation.json {
-        render_json(execute_json(&invocation, &source, request_id))
+        run_json(&intent, recovery, request_id.clone())
     } else {
-        run_human(&invocation, &source)
+        run_human(intent, recovery)
     }
 }
 
@@ -211,82 +260,87 @@ fn read_request() -> std::result::Result<CommitRequestEnvelope, String> {
     protocol::read_request()
 }
 
-fn run_human(invocation: &Invocation, source: &MessageSource) -> Result<()> {
-    let cwd = env::current_dir().context("failed to read the current directory")?;
-    let repository = RepositoryObservation::new(&cwd).repository()?;
-    ensure_worktree(&repository)?;
-    let mut stage_all = invocation.stage_all;
-    let staged = git::HistoryObservation::new(&repository.current().path).has_staged_changes()?;
-    let dirty = has_any_changes(&repository.current().path)?;
-    if stage_all && !dirty {
-        bail!("nothing to commit");
-    }
-    if !staged && !stage_all {
-        if !dirty {
-            bail!("nothing to commit");
+fn run_human(mut intent: CommitIntent, recovery: RecoveryContext<'_>) -> Result<()> {
+    loop {
+        match operation(&intent, &recovery, Delivery::Human) {
+            CommitOperation::StageAllRequired {
+                execution,
+                repository_path,
+            } => {
+                if intent.dry_run {
+                    return finish_human(execution);
+                }
+                ui::ensure_interactive(
+                    "nothing is staged; stage paths with Git or pass --stage-all",
+                )?;
+                preview_all(&repository_path)?;
+                let approved = ui::prompt_result(
+                    confirm("Stage all changes and continue?")
+                        .initial_value(false)
+                        .interact(),
+                    "commit cancelled",
+                    "failed to read staging confirmation",
+                )?;
+                if !approved {
+                    return Err(ui::declined("staging declined; no changes were staged"));
+                }
+                intent.selection = Selection::StageAll;
+            }
+            CommitOperation::Complete(execution) => return finish_human(execution),
         }
-        if invocation.dry_run {
-            bail!("nothing is staged; stage paths with Git or pass --stage-all");
+    }
+}
+
+fn finish_human(execution: CommitExecution) -> Result<()> {
+    match execution.outcome.result {
+        Ok(CommitSuccess::DryRun { selection, .. }) => {
+            if let Some(path) = execution.repository_path.as_deref() {
+                preview_selection(path, matches!(selection, Selection::StageAll))?;
+            }
+            ui::finish(ui::success_style().apply_to("Commit preflight ready."))
         }
-        ui::ensure_interactive("nothing is staged; stage paths with Git or pass --stage-all")?;
-        preview_all(&repository.current().path)?;
-        let approved = ui::prompt_result(
-            confirm("Stage all changes and continue?")
-                .initial_value(false)
-                .interact(),
-            "commit cancelled",
-            "failed to read staging confirmation",
-        )?;
-        if !approved {
-            return Err(ui::declined("staging declined; no changes were staged"));
+        Ok(CommitSuccess::Committed { commit, .. }) => {
+            let message = execution
+                .message
+                .context("commit message missing from outcome")?;
+            let rendered_message = render::commit_message(&message.value);
+            if message.generated {
+                ui::step(rendered_message)?;
+            } else {
+                ui::step(format!(
+                    "{}\n{rendered_message}",
+                    ui::heading_style().apply_to("Commit message")
+                ))?;
+            }
+            ui::finish(format!(
+                "{} {}",
+                ui::success_style().apply_to("Committed changes @"),
+                ui::muted_style().apply_to(commit.get(..7).unwrap_or(&commit))
+            ))
         }
-        stage_all = true;
+        Err(error) => Err(anyhow::anyhow!(error.message)),
     }
-    let config = preflight(&repository, source)?;
-    if invocation.dry_run {
-        preview_selection(&repository.current().path, stage_all)?;
-        return ui::finish(ui::success_style().apply_to("Commit preflight ready."));
-    }
-    if stage_all {
-        ui::run_timed(
-            true,
-            "Staging all changes...",
-            "Staged all changes",
-            "Failed to stage changes",
-            |_| LifecycleMutation::new(&repository.current().path).stage_all(),
-        )?;
-    }
-    ensure_staged(&repository)?;
-    preview_staged(&repository.current().path)?;
-    let message = resolve_message_human(&repository, source, config.as_ref())?;
-    let progress = ui::TimedProgress::start_before_stream("Running pre-commit hooks")?;
-    LifecycleMutation::new(&repository.current().path).commit(&message.value)?;
-    progress.complete("Created commit", ui::Completion::Step)?;
-    let hash = git::HistoryObservation::new(&repository.current().path).head_commit()?;
-    let rendered_message = render::commit_message(&message.value);
-    if message.generated {
-        ui::step(rendered_message)?;
-    } else {
-        ui::step(format!(
-            "{}\n{rendered_message}",
-            ui::heading_style().apply_to("Commit message")
-        ))?;
-    }
-    ui::finish(format!(
-        "{} {}",
-        ui::success_style().apply_to("Committed changes @"),
-        ui::muted_style().apply_to(hash.get(..7).unwrap_or(&hash))
-    ))
+}
+
+fn run_json(
+    intent: &CommitIntent,
+    recovery: RecoveryContext<'_>,
+    request_id: Option<String>,
+) -> Result<()> {
+    let execution = match operation(intent, &recovery, Delivery::Captured) {
+        CommitOperation::StageAllRequired { execution, .. }
+        | CommitOperation::Complete(execution) => execution,
+    };
+    render_json(execution.outcome, request_id)
 }
 
 #[allow(clippy::too_many_lines)]
-fn execute_json(
-    invocation: &Invocation,
-    source: &MessageSource,
-    request_id: Option<String>,
-) -> CommitOutcome {
+fn operation(
+    intent: &CommitIntent,
+    recovery: &RecoveryContext<'_>,
+    delivery: Delivery,
+) -> CommitOperation {
     let mut outcome = CommitOutcome {
-        request_id,
         result: Err(commit_error(
             "repository.invalid",
             "repository was not inspected",
@@ -300,33 +354,50 @@ fn execute_json(
         Ok(path) => path,
         Err(error) => {
             outcome.result = Err(commit_error("repository.invalid", error));
-            return outcome;
+            return complete(outcome, None, None);
         }
     };
     let repository = match RepositoryObservation::new(&cwd).repository() {
         Ok(value) => value,
         Err(error) => {
             outcome.result = Err(commit_error("repository.invalid", format!("{error:#}")));
-            return outcome;
+            return complete(outcome, None, None);
         }
     };
+    let repository_path = repository.current().path.clone();
     outcome.context = context_for(&repository);
     if let Err(error) = ensure_worktree(&repository) {
         outcome.result = Err(commit_error("repository.bare", error));
-        return outcome;
+        return complete(outcome, Some(repository_path), None);
     }
-    let staged = git::HistoryObservation::new(&repository.current().path)
-        .has_staged_changes()
-        .unwrap_or(false);
-    let dirty = has_any_changes(&repository.current().path).unwrap_or(false);
-    if invocation.stage_all && !dirty {
+    let staged = match git::HistoryObservation::new(&repository_path).has_staged_changes() {
+        Ok(staged) => staged,
+        Err(error) => {
+            outcome.result = Err(commit_error(
+                "commit.preflight_failed",
+                format!("{error:#}"),
+            ));
+            return complete(outcome, Some(repository_path), None);
+        }
+    };
+    let dirty = match has_any_changes(&repository_path) {
+        Ok(dirty) => dirty,
+        Err(error) => {
+            outcome.result = Err(commit_error(
+                "commit.preflight_failed",
+                format!("{error:#}"),
+            ));
+            return complete(outcome, Some(repository_path), None);
+        }
+    };
+    if matches!(intent.selection, Selection::StageAll) && !dirty {
         outcome.result = Err(commit_error(
             "commit.nothing_to_commit",
             "nothing to commit",
         ));
-        return outcome;
+        return complete(outcome, Some(repository_path), None);
     }
-    if !staged && !invocation.stage_all {
+    if !staged && matches!(intent.selection, Selection::Staged) {
         outcome.result = Err(commit_error(
             if dirty {
                 "commit.nothing_staged"
@@ -339,94 +410,192 @@ fn execute_json(
                 "nothing to commit"
             },
         ));
-        outcome.recovery = recovery_steps(invocation.request_mode, outcome.request_id.as_deref());
-        return outcome;
+        outcome.recovery = recovery_steps(recovery.request_mode, recovery.request_id);
+        let execution = CommitExecution {
+            outcome,
+            repository_path: Some(repository_path.clone()),
+            message: None,
+        };
+        return if dirty {
+            CommitOperation::StageAllRequired {
+                execution,
+                repository_path,
+            }
+        } else {
+            CommitOperation::Complete(execution)
+        };
     }
-    let config = match preflight(&repository, source) {
-        Ok(value) => value,
-        Err(error) => {
-            let message = format!("{error:#}");
-            let code = if message.contains("approval") {
-                "trust.approval_required"
-            } else if message.contains("generator") {
-                "commit.generator_unavailable"
-            } else {
-                "commit.preflight_failed"
-            };
-            outcome.result = Err(commit_error(code, message));
-            return outcome;
+    let prepared = match prepare_message(&repository, &intent.message) {
+        Ok(prepared) => prepared,
+        Err(failure) => {
+            outcome.result = Err(commit_error(failure.code, failure.message));
+            outcome.diagnostics = failure.diagnostics;
+            return complete(outcome, Some(repository_path), None);
         }
     };
-    let selection = if invocation.stage_all {
-        Selection::StageAll
-    } else {
-        Selection::Staged
-    };
-    if invocation.dry_run {
+    if intent.dry_run {
         outcome.result = Ok(CommitSuccess::DryRun {
             ready: true,
-            selection,
+            selection: intent.selection,
         });
-        return outcome;
+        return complete(outcome, Some(repository_path), None);
     }
-    if invocation.stage_all {
+    if matches!(intent.selection, Selection::StageAll) {
         outcome.effects.push(effect("git.stage_all", true));
-        if let Err(error) = LifecycleMutation::new(&repository.current().path).stage_all() {
+        let progress = matches!(delivery, Delivery::Human)
+            .then(|| ui::TimedProgress::start(true, "Staging all changes...").ok())
+            .flatten();
+        let staging = LifecycleMutation::new(&repository_path).stage_all();
+        if let Err(error) = staging {
+            if let Some(progress) = progress {
+                let _ = progress.fail("Failed to stage changes");
+            }
             outcome.result = Err(commit_error("commit.staging_failed", format!("{error:#}")));
             outcome.context = context_for(&repository);
-            return outcome;
+            return complete(outcome, Some(repository_path), None);
+        }
+        if let Some(progress) = progress {
+            let _ = progress.complete("Staged all changes", ui::Completion::Step);
         }
         outcome.effects.last_mut().expect("stage effect").completed = true;
         outcome.context = context_for(&repository);
     }
-    if matches!(source, MessageSource::ConfiguredGenerator) {
-        outcome.effects.push(effect("commit.generate", true));
+    if let Err(error) = ensure_staged(&repository) {
+        outcome.result = Err(commit_error("commit.staging_failed", format!("{error:#}")));
+        return complete(outcome, Some(repository_path), None);
     }
-    let (message, diagnostics) = match resolve_message_json(&repository, source, config.as_ref()) {
-        Ok(value) => value,
+    if matches!(delivery, Delivery::Human) {
+        let _ = preview_staged(&repository_path);
+    }
+    let (message, generated) = match prepared {
+        PreparedMessage::Provided(message) => (message, false),
+        PreparedMessage::Generator(config) => {
+            outcome.effects.push(effect("commit.generate", true));
+            let progress = matches!(delivery, Delivery::Human)
+                .then(|| ui::TimedProgress::start(true, "Generating commit message...").ok())
+                .flatten();
+            let generated =
+                run_generator(&repository, &config, matches!(delivery, Delivery::Captured));
+            let (message, diagnostics) = match generated {
+                Ok(value) => {
+                    if let Some(progress) = progress {
+                        let _ =
+                            progress.complete("Generated commit message:", ui::Completion::Step);
+                    }
+                    value
+                }
+                Err(failure) => {
+                    if let Some(progress) = progress {
+                        let _ = progress.fail("Failed to generate commit message");
+                    }
+                    outcome.result = Err(commit_error(failure.code, failure.message));
+                    outcome.diagnostics = failure.diagnostics;
+                    return complete(outcome, Some(repository_path), None);
+                }
+            };
+            outcome.diagnostics = diagnostics;
+            outcome
+                .effects
+                .last_mut()
+                .expect("generation effect")
+                .completed = true;
+            (message, true)
+        }
+    };
+    outcome.effects.push(effect("commit.create", true));
+    let commit = commit_transition(&repository_path, &message, delivery);
+    let diagnostics = match commit {
+        Ok(diagnostics) => diagnostics,
         Err(failure) => {
             outcome.result = Err(commit_error(failure.code, failure.message));
-            outcome.diagnostics = failure.diagnostics;
-            return outcome;
+            outcome.diagnostics.extend(failure.diagnostics);
+            return complete(outcome, Some(repository_path), None);
         }
     };
-    outcome.diagnostics = diagnostics;
-    if matches!(source, MessageSource::ConfiguredGenerator) {
-        outcome
-            .effects
-            .last_mut()
-            .expect("generation effect")
-            .completed = true;
-    }
-    outcome.effects.push(effect("commit.create", true));
-    let transcript = match git_commit_captured(&repository.current().path, &message) {
-        Ok(transcript) => transcript,
-        Err(error) => {
-            outcome.result = Err(commit_error("commit.git_failed", format!("{error:#}")));
-            return outcome;
-        }
-    };
-    outcome.diagnostics.extend(diagnostics_for_streams(
-        "git.commit",
-        &transcript.stdout,
-        &transcript.stderr,
-    ));
-    if !transcript.succeeded {
-        outcome.result = Err(commit_error("commit.git_failed", "git commit failed"));
-        return outcome;
-    }
+    outcome.diagnostics.extend(diagnostics);
     outcome.effects.last_mut().expect("commit effect").completed = true;
     outcome.context = context_for(&repository);
-    match git::HistoryObservation::new(&repository.current().path).head_commit() {
-        Ok(commit) => outcome.result = Ok(CommitSuccess::Committed { commit, selection }),
+    let human_message = HumanMessage {
+        value: message,
+        generated,
+    };
+    match git::HistoryObservation::new(&repository_path).head_commit() {
+        Ok(commit) => {
+            outcome.result = Ok(CommitSuccess::Committed {
+                commit,
+                selection: intent.selection,
+            });
+            complete(outcome, Some(repository_path), Some(human_message))
+        }
         Err(error) => {
             outcome.result = Err(commit_error(
                 "commit.result_failed",
                 format!("commit was created but its identity could not be read: {error:#}"),
             ));
+            complete(outcome, Some(repository_path), None)
         }
     }
-    outcome
+}
+
+fn complete(
+    outcome: CommitOutcome,
+    repository_path: Option<std::path::PathBuf>,
+    message: Option<HumanMessage>,
+) -> CommitOperation {
+    CommitOperation::Complete(CommitExecution {
+        outcome,
+        repository_path,
+        message,
+    })
+}
+
+fn commit_transition(
+    cwd: &Path,
+    message: &str,
+    delivery: Delivery,
+) -> std::result::Result<Vec<Diagnostic>, CommandFailure> {
+    match delivery {
+        Delivery::Human => {
+            let progress = ui::TimedProgress::start_before_stream("Running pre-commit hooks").ok();
+            let result = LifecycleMutation::new(cwd).commit(message);
+            match result {
+                Ok(()) => {
+                    if let Some(progress) = progress {
+                        let _ = progress.complete("Created commit", ui::Completion::Step);
+                    }
+                    Ok(Vec::new())
+                }
+                Err(error) => {
+                    if let Some(progress) = progress {
+                        let _ = progress.fail("Failed to create commit");
+                    }
+                    Err(CommandFailure {
+                        code: "commit.git_failed",
+                        message: format!("{error:#}"),
+                        diagnostics: Vec::new(),
+                    })
+                }
+            }
+        }
+        Delivery::Captured => {
+            let transcript = git_commit_captured(cwd, message).map_err(|error| CommandFailure {
+                code: "commit.git_failed",
+                message: format!("{error:#}"),
+                diagnostics: Vec::new(),
+            })?;
+            let diagnostics =
+                diagnostics_for_streams("git.commit", &transcript.stdout, &transcript.stderr);
+            if transcript.succeeded {
+                Ok(diagnostics)
+            } else {
+                Err(CommandFailure {
+                    code: "commit.git_failed",
+                    message: "git commit failed".into(),
+                    diagnostics,
+                })
+            }
+        }
+    }
 }
 
 fn effect(action: &str, attempted: bool) -> Effect {
@@ -446,10 +615,10 @@ fn commit_error(code: &str, message: impl ToString) -> CommitError {
     }
 }
 
-fn render_json(outcome: CommitOutcome) -> Result<()> {
+fn render_json(outcome: CommitOutcome, request_id: Option<String>) -> Result<()> {
     let response = protocol::adapt(
         "commit",
-        outcome.request_id,
+        request_id,
         outcome.result,
         outcome.context,
         outcome.effects,
@@ -464,22 +633,41 @@ fn render_json(outcome: CommitOutcome) -> Result<()> {
     Ok(())
 }
 
-fn preflight(repository: &Repository, source: &MessageSource) -> Result<Option<EffectiveConfig>> {
-    if matches!(source, MessageSource::Provided { .. }) {
-        return Ok(None);
+fn prepare_message(
+    repository: &Repository,
+    source: &MessageSource,
+) -> std::result::Result<PreparedMessage, CommandFailure> {
+    if let MessageSource::Provided { value } = source {
+        return validate_message(value)
+            .map(PreparedMessage::Provided)
+            .map_err(|error| CommandFailure {
+                code: "commit.invalid_message",
+                message: error.to_string(),
+                diagnostics: Vec::new(),
+            });
     }
-    let config = EffectiveConfig::load(repository)?;
-    let command = config
-        .generation
-        .command
-        .as_ref()
-        .context("no commit generator is configured")?;
+    let config = EffectiveConfig::load(repository).map_err(|error| CommandFailure {
+        code: "commit.preflight_failed",
+        message: format!("{error:#}"),
+        diagnostics: Vec::new(),
+    })?;
+    if config.generation.command.is_none() {
+        return Err(CommandFailure {
+            code: "commit.generator_unavailable",
+            message: "no commit generator is configured".into(),
+            diagnostics: Vec::new(),
+        });
+    }
     let template = config
         .generation
         .template
         .as_ref()
         .map_or(BUILTIN_TEMPLATE, |value| value.value.as_str());
-    validate_template(template)?;
+    validate_template(template).map_err(|error| CommandFailure {
+        code: "commit.preflight_failed",
+        message: format!("{error:#}"),
+        diagnostics: Vec::new(),
+    })?;
     let shared = [
         config.generation.command.as_ref(),
         config.generation.template.as_ref(),
@@ -487,66 +675,26 @@ fn preflight(repository: &Repository, source: &MessageSource) -> Result<Option<E
     .into_iter()
     .flatten()
     .any(|value| value.source == GenerationSource::Shared);
-    if shared && !trust::is_generation_trusted(repository, &config.generation)? {
-        bail!("shared commit generator approval is required; run pando trust commit-approve");
-    }
-    let _ = command;
-    Ok(Some(config))
-}
-
-fn resolve_message_human(
-    repository: &Repository,
-    source: &MessageSource,
-    config: Option<&EffectiveConfig>,
-) -> Result<HumanMessage> {
-    match source {
-        MessageSource::Provided { value } => validate_message(value).map(|value| HumanMessage {
-            value,
-            generated: false,
-        }),
-        MessageSource::ConfiguredGenerator => {
-            let config = config.context("generator config missing")?;
-            let (message, _) = ui::run_timed(
-                true,
-                "Generating commit message...",
-                "Generated commit message:",
-                "Failed to generate commit message",
-                |_| {
-                    run_generator(repository, config, false)
-                        .map_err(|failure| anyhow::anyhow!(failure.message))
-                },
-            )?;
-            Ok(HumanMessage {
-                value: message,
-                generated: true,
-            })
+    if shared {
+        let trusted =
+            trust::is_generation_trusted(repository, &config.generation).map_err(|error| {
+                CommandFailure {
+                    code: "commit.preflight_failed",
+                    message: format!("{error:#}"),
+                    diagnostics: Vec::new(),
+                }
+            })?;
+        if !trusted {
+            return Err(CommandFailure {
+                code: "trust.approval_required",
+                message:
+                    "shared commit generator approval is required; run pando trust commit-approve"
+                        .into(),
+                diagnostics: Vec::new(),
+            });
         }
     }
-}
-
-fn resolve_message_json(
-    repository: &Repository,
-    source: &MessageSource,
-    config: Option<&EffectiveConfig>,
-) -> std::result::Result<(String, Vec<Diagnostic>), CommandFailure> {
-    match source {
-        MessageSource::Provided { value } => validate_message(value)
-            .map(|value| (value, Vec::new()))
-            .map_err(|error| CommandFailure {
-                code: "commit.invalid_message",
-                message: error.to_string(),
-                diagnostics: Vec::new(),
-            }),
-        MessageSource::ConfiguredGenerator => run_generator(
-            repository,
-            config.ok_or_else(|| CommandFailure {
-                code: "commit.generator_unavailable",
-                message: "generator config missing".into(),
-                diagnostics: Vec::new(),
-            })?,
-            true,
-        ),
-    }
+    Ok(PreparedMessage::Generator(Box::new(config)))
 }
 
 fn run_generator(

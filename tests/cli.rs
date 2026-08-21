@@ -6869,6 +6869,54 @@ fn hook_approval_escape_reports_cancellation_without_mutation() {
 }
 
 #[test]
+fn incomplete_setup_retry_uses_the_registered_command_operation() {
+    let repo = Repository::new();
+    git(&repo.main, ["branch", "retry-setup"]);
+    let xdg = tempfile::tempdir().unwrap();
+    let root = repo.temp.path().join("created");
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        format!("worktrees:\n  root: {}\n", root.display()),
+    )
+    .unwrap();
+    fs::write(
+        repo.main.join(".pando.yaml"),
+        "hooks:\n  post-create:\n    - command: test -f setup-ready\n",
+    )
+    .unwrap();
+
+    let run = |input: &[u8]| {
+        let mut command = Command::cargo_bin("pando").unwrap();
+        command
+            .args(["switch", "retry-setup"])
+            .current_dir(&repo.main)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", repo.temp.path());
+        run_pty_command(command, input)
+    };
+    let failed = run(b"y\r");
+    assert!(!failed.status.success());
+    fs::write(root.join("retry-setup/setup-ready"), "ready\n").unwrap();
+
+    let retried = run(b"\r");
+
+    assert!(retried.status.success(), "{}", retried.stderr);
+    assert_eq!(
+        retried.stdout,
+        format!(
+            "{}\n",
+            root.join("retry-setup").canonicalize().unwrap().display()
+        )
+    );
+    assert!(
+        retried.stderr.contains("Post-create setup complete"),
+        "{}",
+        retried.stderr
+    );
+}
+
+#[test]
 fn incomplete_setup_supports_enter_once_then_mark_complete() {
     let repo = Repository::new();
     git(&repo.main, ["branch", "recover"]);
@@ -8285,6 +8333,70 @@ fn bare_commit_uses_only_the_existing_index() {
         "unstaged\n"
     );
     assert!(repo.main.join("untracked.txt").exists());
+}
+
+#[test]
+fn human_and_json_provided_message_commits_share_one_semantic_result() {
+    let repo = Repository::new();
+    let parent = git_output(&repo.main, ["rev-parse", "HEAD"]);
+    let message = "fix: share commit operation";
+    let timestamp = "2025-01-02T03:04:05Z";
+
+    fs::write(repo.main.join("README.md"), "shared operation\n").unwrap();
+    git(&repo.main, ["add", "README.md"]);
+    let human = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["commit", "--message", message])
+        .current_dir(&repo.main)
+        .env("GIT_AUTHOR_DATE", timestamp)
+        .env("GIT_COMMITTER_DATE", timestamp)
+        .output()
+        .unwrap();
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(human.stdout.is_empty());
+    let human_commit = git_output(&repo.main, ["rev-parse", "HEAD"]);
+
+    git(&repo.main, ["reset", "--hard", &parent]);
+    fs::write(repo.main.join("README.md"), "shared operation\n").unwrap();
+    git(&repo.main, ["add", "README.md"]);
+    let request = serde_json::json!({
+        "schema_version": 1,
+        "request_id": "commit-parity",
+        "input": {
+            "selection": "staged",
+            "message": {"source": "provided", "value": message},
+            "dry_run": false
+        }
+    });
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["commit", "--input-output", "json"])
+        .current_dir(&repo.main)
+        .env("GIT_AUTHOR_DATE", timestamp)
+        .env("GIT_COMMITTER_DATE", timestamp)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let json = run_json_command(command, Some(&request));
+    assert!(json.status.success());
+    let response = assert_json_pure(&json);
+
+    assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), human_commit);
+    assert_eq!(response["request_id"], "commit-parity");
+    assert_eq!(response["result"]["commit"], human_commit);
+    assert_eq!(response["result"]["selection"], "staged");
+    assert_eq!(
+        response["effects"],
+        serde_json::json!([{
+            "action": "commit.create",
+            "attempted": true,
+            "completed": true
+        }])
+    );
 }
 
 #[test]

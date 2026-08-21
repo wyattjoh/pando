@@ -174,7 +174,6 @@ fn observations_cannot_become_outcomes_or_adapter_execution_authority() {
         fs::read_to_string(source_root.join("worktree_plan.rs")).expect("worktree source");
     let lifecycle = fs::read_to_string(source_root.join("lifecycle.rs")).expect("lifecycle source");
     let machine = fs::read_to_string(source_root.join("machine.rs")).expect("machine source");
-    let smart = fs::read_to_string(source_root.join("smart.rs")).expect("smart source");
 
     for (name, source) in [
         ("hook", hook.as_str()),
@@ -253,13 +252,102 @@ fn observations_cannot_become_outcomes_or_adapter_execution_authority() {
             "the machine adapter must consume final outcomes, not `{forbidden}`"
         );
     }
-    assert!(!smart.contains("worktree_plan::execute("));
-    assert!(smart.contains("worktree_plan::execute_planned("));
     let install_run = braced_item(&install, "pub fn run(");
     assert!(install_run.contains("let outcome = execute("));
     assert!(install_run.contains("finish_human_install(outcome"));
     assert!(!install_run.contains("run_guided_configuration"));
     assert!(!install.contains("HumanInstallOutcome"));
+}
+
+#[test]
+fn worktree_adapters_enter_only_the_opaque_command_operation() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let worktree =
+        fs::read_to_string(source_root.join("worktree_plan.rs")).expect("worktree source");
+    let machine = fs::read_to_string(source_root.join("machine.rs")).expect("machine source");
+    let smart = fs::read_to_string(source_root.join("smart.rs")).expect("smart source");
+
+    assert!(smart.contains("worktree_plan::prepare("));
+    assert!(smart.contains("worktree_plan::execute_prepared("));
+    assert!(smart.contains("worktree_plan::prepare_detached_navigation("));
+    assert!(machine.contains("worktree_plan::prepare("));
+    assert!(machine.contains("worktree_plan::finish_noninteractive("));
+    for hidden in [
+        "pub(crate) enum Source",
+        "pub(crate) enum Blocker",
+        "pub(crate) struct Plan",
+        "pub(crate) struct ExecutionOutcome",
+        "pub(crate) struct ExecutionFailure",
+        "pub(crate) fn registered_plan(",
+        "pub(crate) fn plan(",
+        "pub(crate) fn execute(",
+        "pub(crate) fn planned_effects(",
+    ] {
+        assert!(
+            !worktree.contains(hidden),
+            "topic worktree planning authority must remain private instead of exposing `{hidden}`"
+        );
+    }
+    for forbidden in [
+        "Snapshot::observe",
+        "worktree_plan::registered_plan(",
+        "worktree_plan::plan(",
+        "worktree_plan::execute_planned(",
+        "worktree_plan::execute(",
+        "worktree_plan::planned_effects(",
+        "PlanBlocker",
+        "Source::",
+        "setup::Observations",
+        "setup::Lifecycle",
+        "hook::execute",
+        "fn finish_setup(",
+    ] {
+        assert!(
+            !smart.contains(forbidden),
+            "the human adapter must not cross the topic worktree seam through `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn commit_adapters_enter_one_command_operation() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let commit = fs::read_to_string(source_root.join("commit.rs")).expect("commit source");
+
+    assert!(commit.contains("fn operation("));
+    assert!(!commit.contains("fn execute_json("));
+    assert!(!commit.contains("fn resolve_message_human("));
+    assert!(!commit.contains("fn resolve_message_json("));
+
+    let human = braced_item(&commit, "fn run_human(");
+    let json = braced_item(&commit, "fn run_json(");
+    for (name, adapter) in [("human", human), ("JSON", json)] {
+        assert!(
+            adapter.contains("operation("),
+            "the {name} commit adapter must enter the command operation"
+        );
+        for forbidden in [
+            "RepositoryObservation",
+            "LifecycleMutation",
+            "generator::run",
+            "context_for(",
+            "effect(",
+        ] {
+            assert!(
+                !adapter.contains(forbidden),
+                "the {name} commit adapter must not own semantic work through `{forbidden}`"
+            );
+        }
+    }
+
+    let operation = braced_item(&commit, "fn operation(");
+    assert!(operation.contains("RepositoryObservation"));
+    assert!(operation.contains("LifecycleMutation"));
+    assert!(operation.contains("generator::run") || commit.contains("fn run_generator("));
+    assert!(!operation.contains("protocol::write"));
+    assert!(!operation.contains("std::process::exit"));
+    assert!(!operation.contains("contains(\"approval\")"));
+    assert!(!operation.contains("contains(\"generator\")"));
 }
 
 #[test]
