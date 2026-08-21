@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub(crate) mod journaled_merge;
+mod merge_machine;
 
 use crate::{
     Condition, Worktree, WorktreeKind,
@@ -64,7 +65,7 @@ pub struct MergeContext {
     pub pre_remove_hooks_trusted: bool,
 }
 
-#[derive(Clone, Copy, Debug, JsonSchema, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MergePhase {
     Planned,
@@ -333,8 +334,8 @@ struct MergePlan {
     pub(crate) squash: squash::Assessment,
     resuming_squash: bool,
     integration_observed: bool,
-    /// Ordered lifecycle effects. Planning never attempts or completes one.
-    pub effects: Vec<Effect>,
+    /// Typed lifecycle effects. Planning never attempts or completes one.
+    effects: MergeEffects,
 }
 
 /// One diagnostic produced by a lifecycle phase.
@@ -378,19 +379,155 @@ impl MergeExecutionOutcome {
     }
 }
 
-fn merge_failure_code(kind: MergeExecutionFailureKind) -> &'static str {
-    match kind {
-        MergeExecutionFailureKind::StalePlan => "merge.stale_plan",
-        MergeExecutionFailureKind::Rebase => "merge.rebase_conflict",
-        MergeExecutionFailureKind::Squash | MergeExecutionFailureKind::Integration => {
-            "merge.execution_failed"
-        }
-        MergeExecutionFailureKind::Validation => "merge.validation_failed",
-        MergeExecutionFailureKind::Cleanup => "merge.cleanup_failed",
-        MergeExecutionFailureKind::Removal => "merge.remove_failed",
-        MergeExecutionFailureKind::Journal | MergeExecutionFailureKind::JournalCleanup => {
-            "merge.journal_failed"
-        }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MergeFailureMessage {
+    ReportedVerbatim,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MergeFailureRecovery {
+    RetryPinnedLifecycle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MergeFailureRule {
+    phase: MergePhase,
+    kind: MergeExecutionFailureKind,
+    code: &'static str,
+    message: MergeFailureMessage,
+    recovery: MergeFailureRecovery,
+}
+
+const fn failure_rule(
+    phase: MergePhase,
+    kind: MergeExecutionFailureKind,
+    code: &'static str,
+) -> MergeFailureRule {
+    MergeFailureRule {
+        phase,
+        kind,
+        code,
+        message: MergeFailureMessage::ReportedVerbatim,
+        recovery: MergeFailureRecovery::RetryPinnedLifecycle,
+    }
+}
+
+const MERGE_FAILURE_RULES: &[MergeFailureRule] = &[
+    failure_rule(
+        MergePhase::Planned,
+        MergeExecutionFailureKind::StalePlan,
+        "merge.stale_plan",
+    ),
+    failure_rule(
+        MergePhase::Planned,
+        MergeExecutionFailureKind::Journal,
+        "merge.journal_failed",
+    ),
+    failure_rule(
+        MergePhase::Rebase,
+        MergeExecutionFailureKind::Rebase,
+        "merge.rebase_conflict",
+    ),
+    failure_rule(
+        MergePhase::Rebase,
+        MergeExecutionFailureKind::StalePlan,
+        "merge.stale_plan",
+    ),
+    failure_rule(
+        MergePhase::Squash,
+        MergeExecutionFailureKind::Journal,
+        "merge.journal_failed",
+    ),
+    failure_rule(
+        MergePhase::Squash,
+        MergeExecutionFailureKind::Squash,
+        "merge.execution_failed",
+    ),
+    failure_rule(
+        MergePhase::Squash,
+        MergeExecutionFailureKind::StalePlan,
+        "merge.stale_plan",
+    ),
+    failure_rule(
+        MergePhase::Validation,
+        MergeExecutionFailureKind::Journal,
+        "merge.journal_failed",
+    ),
+    failure_rule(
+        MergePhase::Validation,
+        MergeExecutionFailureKind::StalePlan,
+        "merge.stale_plan",
+    ),
+    failure_rule(
+        MergePhase::Validation,
+        MergeExecutionFailureKind::Validation,
+        "merge.validation_failed",
+    ),
+    failure_rule(
+        MergePhase::Integration,
+        MergeExecutionFailureKind::Integration,
+        "merge.execution_failed",
+    ),
+    failure_rule(
+        MergePhase::Integration,
+        MergeExecutionFailureKind::Journal,
+        "merge.journal_failed",
+    ),
+    failure_rule(
+        MergePhase::Integration,
+        MergeExecutionFailureKind::StalePlan,
+        "merge.stale_plan",
+    ),
+    failure_rule(
+        MergePhase::Cleanup,
+        MergeExecutionFailureKind::StalePlan,
+        "merge.stale_plan",
+    ),
+    failure_rule(
+        MergePhase::Cleanup,
+        MergeExecutionFailureKind::Cleanup,
+        "merge.cleanup_failed",
+    ),
+    failure_rule(
+        MergePhase::Cleanup,
+        MergeExecutionFailureKind::Removal,
+        "merge.remove_failed",
+    ),
+    failure_rule(
+        MergePhase::Cleanup,
+        MergeExecutionFailureKind::JournalCleanup,
+        "merge.journal_failed",
+    ),
+    failure_rule(
+        MergePhase::Complete,
+        MergeExecutionFailureKind::JournalCleanup,
+        "merge.journal_failed",
+    ),
+];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClassifiedMergeFailure {
+    code: &'static str,
+    message: String,
+    recovery: MergeFailureRecovery,
+}
+
+fn classify_execution_failure(
+    phase: MergePhase,
+    kind: MergeExecutionFailureKind,
+    reported: impl std::fmt::Display,
+) -> ClassifiedMergeFailure {
+    let rule = MERGE_FAILURE_RULES
+        .iter()
+        .find(|rule| rule.phase == phase && rule.kind == kind)
+        .expect("every merge execution failure has one classification rule");
+    let message = match rule.message {
+        MergeFailureMessage::ReportedVerbatim => reported.to_string(),
+    };
+    ClassifiedMergeFailure {
+        code: rule.code,
+        message,
+        recovery: rule.recovery,
     }
 }
 
@@ -450,20 +587,14 @@ fn run_prepared_merge(
 ) -> MergeOutcome {
     let execution = execute_merge(plan, changes, observations);
     let diagnostics = merge_diagnostics(execution.diagnostics);
-    if let Some((kind, message)) = execution.failure {
+    if let Some((kind, reported)) = execution.failure {
+        let failure = classify_execution_failure(execution.context.phase, kind, reported);
         let working_directory = execution
             .destination
             .as_deref()
             .map_or_else(|| plan.context.topic_worktree.clone(), BytePath::path);
-        return MergeOutcome {
-            result: Err(MergeError {
-                code: merge_failure_code(kind).into(),
-                message,
-            }),
-            context: MergeOutcomeContext::Lifecycle(execution.context),
-            effects: execution.effects,
-            diagnostics,
-            recovery: vec![RecoveryAction {
+        let recovery = match failure.recovery {
+            MergeFailureRecovery::RetryPinnedLifecycle => vec![RecoveryAction {
                 action: "merge.retry".into(),
                 description: "Resolve the reported blocker and retry the journaled lifecycle with its pinned policy".into(),
                 mutation: MutationClass::Repository,
@@ -478,6 +609,16 @@ fn run_prepared_merge(
                     working_directory: Some(working_directory),
                 },
             }],
+        };
+        return MergeOutcome {
+            result: Err(MergeError {
+                code: failure.code.into(),
+                message: failure.message,
+            }),
+            context: MergeOutcomeContext::Lifecycle(execution.context),
+            effects: execution.effects,
+            diagnostics,
+            recovery,
             destination: execution.destination,
         };
     }
@@ -639,26 +780,41 @@ fn plan_merge(
     let target_commit = merge_target.target_commit;
     let mut integration_observed = false;
     if let Some(state) = journal.as_ref() {
-        if let (Some(validated_source), Some(validated_target)) =
-            (&state.validated_source, &state.validated_target)
-        {
-            if source_commit != *validated_source {
+        let validation_ancestry_observed = match (
+            state.validated_source.as_deref(),
+            state.validated_target.as_deref(),
+        ) {
+            (Some(validated_source), Some(validated_target))
+                if source_commit == validated_source && target_commit == validated_source =>
+            {
+                HistoryObservation::new(primary).is_ancestor(validated_target, validated_source)?
+            }
+            _ => true,
+        };
+        match merge_machine::integration_recovery(
+            state.validated_source.as_deref(),
+            state.validated_target.as_deref(),
+            &source_commit,
+            &target_commit,
+            state.cleanup_pending,
+            validation_ancestry_observed,
+        ) {
+            merge_machine::IntegrationRecovery::Unvalidated
+            | merge_machine::IntegrationRecovery::Pending => {}
+            merge_machine::IntegrationRecovery::Completed => integration_observed = true,
+            merge_machine::IntegrationRecovery::StaleSource => {
                 return Err(preflight(
                     PreflightFailureKind::StalePlan,
                     "the journaled source changed after validation; restore it or reconcile the lifecycle journal",
                 ));
             }
-            if target_commit == *validated_source {
-                if !HistoryObservation::new(primary)
-                    .is_ancestor(validated_target, validated_source)?
-                {
-                    return Err(preflight(
-                        PreflightFailureKind::StalePlan,
-                        "the journaled validation ancestry is no longer observable",
-                    ));
-                }
-                integration_observed = true;
-            } else if state.cleanup_pending || target_commit != *validated_target {
+            merge_machine::IntegrationRecovery::StaleValidationAncestry => {
+                return Err(preflight(
+                    PreflightFailureKind::StalePlan,
+                    "the journaled validation ancestry is no longer observable",
+                ));
+            }
+            merge_machine::IntegrationRecovery::StaleTarget => {
                 return Err(preflight(
                     PreflightFailureKind::StalePlan,
                     "the target changed after journaled validation; reconcile it before retrying",
@@ -762,50 +918,161 @@ fn plan_merge(
     })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MergeAction {
+    Journal,
+    Rebase,
+    Squash,
+    PreMergeHooks,
+    FastForwardMerge,
+    PreRemoveHooks,
+    RemoveWorktree,
+    Destination,
+    JournalCleanup,
+}
+
+impl MergeAction {
+    const ORDERED: [Self; 9] = [
+        Self::Journal,
+        Self::Rebase,
+        Self::Squash,
+        Self::PreMergeHooks,
+        Self::FastForwardMerge,
+        Self::PreRemoveHooks,
+        Self::RemoveWorktree,
+        Self::Destination,
+        Self::JournalCleanup,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Journal => "journal",
+            Self::Rebase => "rebase",
+            Self::Squash => "squash",
+            Self::PreMergeHooks => "pre_merge_hooks",
+            Self::FastForwardMerge => "fast_forward_merge",
+            Self::PreRemoveHooks => "pre_remove_hooks",
+            Self::RemoveWorktree => "remove_worktree",
+            Self::Destination => "destination",
+            Self::JournalCleanup => "journal_cleanup",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MergeEffectState {
+    attempted: bool,
+    completed: bool,
+    details: serde_json::Value,
+}
+
+impl MergeEffectState {
+    const fn planned(details: serde_json::Value) -> Self {
+        Self {
+            attempted: false,
+            completed: false,
+            details,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MergeEffects {
+    journal: MergeEffectState,
+    rebase: MergeEffectState,
+    squash: MergeEffectState,
+    pre_merge_hooks: MergeEffectState,
+    fast_forward_merge: MergeEffectState,
+    pre_remove_hooks: MergeEffectState,
+    remove_worktree: MergeEffectState,
+    destination: MergeEffectState,
+    journal_cleanup: MergeEffectState,
+}
+
+impl MergeEffects {
+    fn state(&self, action: MergeAction) -> &MergeEffectState {
+        match action {
+            MergeAction::Journal => &self.journal,
+            MergeAction::Rebase => &self.rebase,
+            MergeAction::Squash => &self.squash,
+            MergeAction::PreMergeHooks => &self.pre_merge_hooks,
+            MergeAction::FastForwardMerge => &self.fast_forward_merge,
+            MergeAction::PreRemoveHooks => &self.pre_remove_hooks,
+            MergeAction::RemoveWorktree => &self.remove_worktree,
+            MergeAction::Destination => &self.destination,
+            MergeAction::JournalCleanup => &self.journal_cleanup,
+        }
+    }
+
+    fn state_mut(&mut self, action: MergeAction) -> &mut MergeEffectState {
+        match action {
+            MergeAction::Journal => &mut self.journal,
+            MergeAction::Rebase => &mut self.rebase,
+            MergeAction::Squash => &mut self.squash,
+            MergeAction::PreMergeHooks => &mut self.pre_merge_hooks,
+            MergeAction::FastForwardMerge => &mut self.fast_forward_merge,
+            MergeAction::PreRemoveHooks => &mut self.pre_remove_hooks,
+            MergeAction::RemoveWorktree => &mut self.remove_worktree,
+            MergeAction::Destination => &mut self.destination,
+            MergeAction::JournalCleanup => &mut self.journal_cleanup,
+        }
+    }
+
+    fn mark(&mut self, action: MergeAction, attempted: bool, completed: bool) {
+        let state = self.state_mut(action);
+        state.attempted = attempted;
+        state.completed = completed;
+    }
+
+    fn completed(&self, action: MergeAction) -> bool {
+        self.state(action).completed
+    }
+
+    fn into_protocol(self) -> Vec<Effect> {
+        MergeAction::ORDERED
+            .into_iter()
+            .map(|action| {
+                let state = self.state(action);
+                Effect {
+                    action: action.name().into(),
+                    attempted: state.attempted,
+                    completed: state.completed,
+                    details: Some(state.details.clone()),
+                }
+            })
+            .collect()
+    }
+}
+
 fn planned_merge_effects(
     context: &MergeContext,
     config: &EffectiveConfig,
     needs_rebase: bool,
     removes: bool,
-) -> Vec<Effect> {
-    let effect = |action: &str, details| Effect {
-        action: action.into(),
-        attempted: false,
-        completed: false,
-        details: Some(details),
-    };
-    vec![
-        effect(
-            "journal",
-            serde_json::json!({"applicable":!context.journaled}),
-        ),
-        effect(
-            "rebase",
+) -> MergeEffects {
+    MergeEffects {
+        journal: MergeEffectState::planned(serde_json::json!({"applicable":!context.journaled})),
+        rebase: MergeEffectState::planned(
             serde_json::json!({"applicable":needs_rebase || context.rebase_active}),
         ),
-        effect(
-            "squash",
+        squash: MergeEffectState::planned(
             serde_json::json!({"applicable":context.squashes,"commits":context.squash_commits,"trusted":context.squash_generator_trusted}),
         ),
-        effect(
-            "pre_merge_hooks",
+        pre_merge_hooks: MergeEffectState::planned(
             serde_json::json!({"configured":!config.pre_merge.is_empty(),"trusted":context.pre_merge_hooks_trusted}),
         ),
-        effect(
-            "fast_forward_merge",
+        fast_forward_merge: MergeEffectState::planned(
             serde_json::json!({"applicable":!context.cleanup_pending}),
         ),
-        effect(
-            "pre_remove_hooks",
+        pre_remove_hooks: MergeEffectState::planned(
             serde_json::json!({"applicable":removes,"trusted":context.pre_remove_hooks_trusted}),
         ),
-        effect("remove_worktree", serde_json::json!({"applicable":removes})),
-        effect(
-            "destination",
+        remove_worktree: MergeEffectState::planned(serde_json::json!({"applicable":removes})),
+        destination: MergeEffectState::planned(
             serde_json::json!({"applicable":removes,"path":context.primary_worktree}),
         ),
-        effect("journal_cleanup", serde_json::json!({"applicable":true})),
-    ]
+        journal_cleanup: MergeEffectState::planned(serde_json::json!({"applicable":true})),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1716,15 +1983,6 @@ pub fn merge_dry_run(no_rebase: bool, no_remove: bool, no_squash: bool) -> Resul
     ))
 }
 
-fn mark_effect(effects: &mut [Effect], action: &str, attempted: bool, completed: bool) {
-    let effect = effects
-        .iter_mut()
-        .find(|effect| effect.action == action)
-        .expect("every lifecycle transition has a planned effect");
-    effect.attempted = attempted;
-    effect.completed = completed;
-}
-
 fn observe_merge_action<T>(
     observations: &mut journaled_merge::Observations,
     starting: &str,
@@ -1827,9 +2085,487 @@ fn execute_merge_hooks(
     }
 }
 
+fn merge_machine_snapshot(
+    plan: &MergePlan,
+    state: &MergeJournal,
+    effects: &MergeEffects,
+    changes: journaled_merge::ChangePolicy,
+) -> merge_machine::Snapshot {
+    let squash = match state.squash {
+        SquashStateV2::NotStarted => merge_machine::SquashResumeState::NotStarted,
+        SquashStateV2::Prepared { .. } => merge_machine::SquashResumeState::Prepared,
+        SquashStateV2::Skipped { .. } => merge_machine::SquashResumeState::Skipped,
+        SquashStateV2::Completed { .. } => merge_machine::SquashResumeState::Completed,
+        SquashStateV2::LegacyCompleted => merge_machine::SquashResumeState::LegacyCompleted,
+    };
+    merge_machine::Snapshot {
+        journaled: plan.context.journaled || effects.completed(MergeAction::Journal),
+        needs_rebase: plan.needs_rebase || plan.context.rebase_active,
+        squash,
+        cleanup_pending: state.cleanup_pending,
+        integration: if plan.integration_observed {
+            merge_machine::IntegrationRecovery::Completed
+        } else if state.validated_source.is_some() && state.validated_target.is_some() {
+            merge_machine::IntegrationRecovery::Pending
+        } else {
+            merge_machine::IntegrationRecovery::Unvalidated
+        },
+        removes_topic: plan.context.policy.removes_topic(plan.context.in_place),
+        stage_all: matches!(changes, journaled_merge::ChangePolicy::IncludeAll),
+    }
+}
+
+enum PostRebaseSquash {
+    Required(squash::RequiredSquash),
+    Skipped,
+}
+
+enum SquashRevalidationFailure {
+    Stale(anyhow::Error),
+    Squash(anyhow::Error),
+}
+
+impl SquashRevalidationFailure {
+    const fn kind(&self) -> MergeExecutionFailureKind {
+        match self {
+            Self::Stale(_) => MergeExecutionFailureKind::StalePlan,
+            Self::Squash(_) => MergeExecutionFailureKind::Squash,
+        }
+    }
+
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Stale(error) | Self::Squash(error) => error,
+        }
+    }
+}
+
+fn revalidate_post_rebase_squash(
+    plan: &MergePlan,
+    target: &str,
+    changes: journaled_merge::ChangePolicy,
+) -> std::result::Result<PostRebaseSquash, SquashRevalidationFailure> {
+    match squash::assess(squash::AssessRequest {
+        repository: &plan.repository,
+        config: &plan.config,
+        target,
+        enabled: true,
+        final_history: true,
+        include_staged: matches!(changes, journaled_merge::ChangePolicy::IncludeAll),
+    }) {
+        Ok(squash::Assessment::Required(required)) => Ok(PostRebaseSquash::Required(required)),
+        Ok(squash::Assessment::Skipped { .. }) => Ok(PostRebaseSquash::Skipped),
+        Ok(blocked @ squash::Assessment::Blocked { .. }) => Err(SquashRevalidationFailure::Stale(
+            blocked
+                .into_required()
+                .expect_err("blocked assessment has no capability"),
+        )),
+        Ok(squash::Assessment::PendingFinalHistory) => Err(SquashRevalidationFailure::Stale(
+            anyhow::anyhow!("final post-rebase history is required before squash preparation"),
+        )),
+        Err(error) => Err(SquashRevalidationFailure::Squash(error)),
+    }
+}
+
+struct DriverStepFailure {
+    kind: MergeExecutionFailureKind,
+    message: String,
+}
+
+impl DriverStepFailure {
+    fn new(kind: MergeExecutionFailureKind, error: impl std::fmt::Display) -> Self {
+        Self {
+            kind,
+            message: error.to_string(),
+        }
+    }
+}
+
+fn run_stage_step(
+    plan: &MergePlan,
+    state: &MergeJournal,
+    mutation: LifecycleMutation<'_>,
+    observations: &mut journaled_merge::Observations,
+) -> std::result::Result<(), DriverStepFailure> {
+    let current = plan.repository.current();
+    if HistoryObservation::new(&current.path)
+        .status()
+        .is_ok_and(|status| !status.is_dirty())
+    {
+        return Ok(());
+    }
+    observe_merge_action(
+        observations,
+        "Staging all changes...",
+        "Staged all changes",
+        "Failed to stage changes",
+        || mutation.stage_all(),
+    )
+    .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::StalePlan, error))?;
+    debug_assert!(state.squash.not_started());
+    Ok(())
+}
+
+fn run_rebase_step(
+    plan: &MergePlan,
+    state: &MergeJournal,
+    changes: journaled_merge::ChangePolicy,
+    mutation: LifecycleMutation<'_>,
+    effects: &mut MergeEffects,
+    diagnostics: &mut Vec<MergeDiagnostic>,
+    observations: &mut journaled_merge::Observations,
+) -> std::result::Result<(), DriverStepFailure> {
+    effects.mark(MergeAction::Rebase, true, false);
+    let rebase_result = if plan.context.rebase_active {
+        observe_merge_git(
+            observations,
+            "Continuing rebase...",
+            "Continued rebase",
+            "Failed to continue the rebase",
+            |output| mutation.continue_rebase(output),
+        )
+    } else {
+        observe_merge_git(
+            observations,
+            &format!("Rebasing onto {}...", state.target_branch),
+            &format!("Rebased onto {}", state.target_branch),
+            &format!("Failed to rebase onto {}", state.target_branch),
+            |output| {
+                if matches!(changes, journaled_merge::ChangePolicy::IncludeAll) {
+                    mutation.rebase_onto_autostash(&state.target_branch, output)
+                } else {
+                    mutation.rebase_onto(&state.target_branch, output)
+                }
+            },
+        )
+    };
+    match rebase_result {
+        Ok(transcript) => {
+            push_merge_diagnostic(diagnostics, "rebase", "stderr", transcript.as_bytes());
+            effects.mark(MergeAction::Rebase, true, true);
+            Ok(())
+        }
+        Err(error) => {
+            push_merge_diagnostic(
+                diagnostics,
+                "rebase",
+                "stderr",
+                error.to_string().as_bytes(),
+            );
+            Err(DriverStepFailure::new(
+                MergeExecutionFailureKind::Rebase,
+                error,
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run_squash_step(
+    plan: &MergePlan,
+    state: &mut MergeJournal,
+    changes: journaled_merge::ChangePolicy,
+    effects: &mut MergeEffects,
+    diagnostics: &mut Vec<MergeDiagnostic>,
+    observations: &mut journaled_merge::Observations,
+) -> std::result::Result<(), DriverStepFailure> {
+    let mut prepared_squash = if let SquashStateV2::Prepared { checkpoint } = &state.squash {
+        effects.mark(MergeAction::Squash, true, false);
+        let checkpoint = squash_checkpoint(checkpoint)
+            .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::Journal, error))?;
+        Some(
+            squash::resume(checkpoint).map_err(|error| {
+                DriverStepFailure::new(MergeExecutionFailureKind::Squash, error)
+            })?,
+        )
+    } else {
+        None
+    };
+
+    if plan.squash.applicable() && state.squash.not_started() {
+        effects.mark(MergeAction::Squash, true, false);
+        match revalidate_post_rebase_squash(plan, &state.target_branch, changes) {
+            Ok(PostRebaseSquash::Skipped) => {
+                state.squash = SquashStateV2::Skipped {
+                    reason: SquashSkipReasonV2::SingleCommit,
+                };
+                write_journal(&plan.repository.common_dir, state).map_err(|error| {
+                    DriverStepFailure::new(MergeExecutionFailureKind::Journal, error)
+                })?;
+                effects.mark(MergeAction::Squash, true, true);
+            }
+            Ok(PostRebaseSquash::Required(required)) => {
+                let preparation = observe_merge_action(
+                    observations,
+                    "Generating squash commit message...",
+                    "Generated squash commit message:",
+                    "Failed to generate the squash commit message",
+                    || {
+                        let preparation = squash::prepare(required)?;
+                        if let squash::Preparation::Prepared(prepared) = &preparation {
+                            state.squash = SquashStateV2::Prepared {
+                                checkpoint: squash_checkpoint_v2(&prepared.checkpoint()),
+                            };
+                            write_journal(&plan.repository.common_dir, state)?;
+                        }
+                        Ok(preparation)
+                    },
+                );
+                match preparation {
+                    Ok(squash::Preparation::Prepared(prepared)) => {
+                        prepared_squash = Some(prepared);
+                    }
+                    Ok(squash::Preparation::Skipped) => {
+                        state.squash = SquashStateV2::Skipped {
+                            reason: SquashSkipReasonV2::SingleCommit,
+                        };
+                        write_journal(&plan.repository.common_dir, state).map_err(|error| {
+                            DriverStepFailure::new(MergeExecutionFailureKind::Journal, error)
+                        })?;
+                        effects.mark(MergeAction::Squash, true, true);
+                    }
+                    Err(error) => {
+                        push_merge_diagnostic(
+                            diagnostics,
+                            "squash",
+                            "stderr",
+                            error.to_string().as_bytes(),
+                        );
+                        return Err(DriverStepFailure::new(
+                            MergeExecutionFailureKind::Squash,
+                            error,
+                        ));
+                    }
+                }
+            }
+            Err(failure) => {
+                let kind = failure.kind();
+                return Err(DriverStepFailure::new(kind, failure.into_error()));
+            }
+        }
+    }
+
+    let Some(prepared) = prepared_squash else {
+        return Ok(());
+    };
+    push_merge_diagnostic(
+        diagnostics,
+        "squash",
+        "stderr",
+        prepared.message().as_bytes(),
+    );
+    observations.commit_message(prepared.message());
+    let commit_count = prepared.commit_count();
+    let collapse = observe_merge_action(
+        observations,
+        &format!("Squashing {commit_count} commits..."),
+        "Squashed the topic into a single commit",
+        "Failed to squash the topic",
+        || squash::collapse(prepared).map_err(anyhow::Error::from),
+    );
+    let collapsed = collapse.map_err(|error| {
+        let detail = error.downcast_ref::<squash::CollapseFailure>().map_or_else(
+            || error.to_string(),
+            |failure| format!("collapse progress {:?}: {failure}", failure.progress()),
+        );
+        push_merge_diagnostic(diagnostics, "squash", "stderr", detail.as_bytes());
+        DriverStepFailure::new(MergeExecutionFailureKind::Squash, error)
+    })?;
+    state.squash = SquashStateV2::Completed {
+        resulting_commit: collapsed.commit().to_owned(),
+    };
+    write_journal(&plan.repository.common_dir, state)
+        .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::Journal, error))?;
+    effects.mark(MergeAction::Squash, true, true);
+    Ok(())
+}
+
+fn run_validation_step(
+    plan: &MergePlan,
+    state: &mut MergeJournal,
+    effects: &mut MergeEffects,
+    diagnostics: &mut Vec<MergeDiagnostic>,
+    observations: &mut journaled_merge::Observations,
+) -> std::result::Result<String, DriverStepFailure> {
+    let current = plan.repository.current();
+    let current_history = HistoryObservation::new(&current.path);
+    let primary = plan
+        .repository
+        .primary
+        .as_ref()
+        .expect("a merge plan always has a primary worktree");
+    let primary_history = HistoryObservation::new(primary);
+    let mut candidate = current_history
+        .head_commit()
+        .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::StalePlan, error))?;
+
+    loop {
+        match hook_approval::evaluate(
+            &plan.repository,
+            HookPhase::PreMerge,
+            &plan.config.pre_merge,
+        ) {
+            Ok(
+                hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted { .. },
+            ) => {}
+            Ok(hook_approval::Evaluation::ApprovalRequired(_)) => {
+                return Err(DriverStepFailure::new(
+                    MergeExecutionFailureKind::StalePlan,
+                    "pre-merge hook trust changed before execution; retry after approving the current commands",
+                ));
+            }
+            Err(error) => {
+                return Err(DriverStepFailure::new(
+                    MergeExecutionFailureKind::Validation,
+                    error,
+                ));
+            }
+        }
+        effects.mark(MergeAction::PreMergeHooks, true, false);
+        if let Err(error) = execute_merge_hooks(
+            HookPhase::PreMerge,
+            "validation",
+            &plan.config.pre_merge,
+            &current.path,
+            observations,
+            diagnostics,
+        ) {
+            push_merge_diagnostic(
+                diagnostics,
+                "validation",
+                "stderr",
+                error.to_string().as_bytes(),
+            );
+            return Err(DriverStepFailure::new(
+                MergeExecutionFailureKind::Validation,
+                error,
+            ));
+        }
+        if current_history
+            .status()
+            .map_or(true, |status| status.is_dirty())
+        {
+            return Err(DriverStepFailure::new(
+                MergeExecutionFailureKind::StalePlan,
+                "pre-merge hooks left the candidate worktree dirty; clean it before retrying",
+            ));
+        }
+        let refreshed = current_history
+            .head_commit()
+            .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::StalePlan, error))?;
+        if !primary_history
+            .commit(&plan.context.target_branch)
+            .is_ok_and(|head| head == plan.context.target_commit)
+        {
+            return Err(DriverStepFailure::new(
+                MergeExecutionFailureKind::StalePlan,
+                "the target advanced during validation; retry to validate the new candidate",
+            ));
+        }
+        if refreshed == candidate {
+            break;
+        }
+        candidate = refreshed;
+    }
+    effects.mark(MergeAction::PreMergeHooks, true, true);
+    state.validated_source = Some(candidate.clone());
+    state.validated_target = Some(plan.context.target_commit.clone());
+    write_journal(&plan.repository.common_dir, state)
+        .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::Journal, error))?;
+    Ok(candidate)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run_integration_step(
+    plan: &MergePlan,
+    state: &mut MergeJournal,
+    candidate: &str,
+    mutation: LifecycleMutation<'_>,
+    effects: &mut MergeEffects,
+    diagnostics: &mut Vec<MergeDiagnostic>,
+    observations: &mut journaled_merge::Observations,
+) -> std::result::Result<(), DriverStepFailure> {
+    let current = plan.repository.current();
+    let current_history = HistoryObservation::new(&current.path);
+    let primary = plan
+        .repository
+        .primary
+        .as_ref()
+        .expect("a merge plan always has a primary worktree");
+    let primary_history = HistoryObservation::new(primary);
+    if !current_history
+        .head_commit()
+        .is_ok_and(|head| head == candidate)
+        || !primary_history
+            .commit(&plan.context.source_branch)
+            .is_ok_and(|head| head == candidate)
+        || !primary_history
+            .commit(&plan.context.target_branch)
+            .is_ok_and(|head| head == plan.context.target_commit)
+        || !primary_history
+            .is_ancestor(&plan.context.target_branch, candidate)
+            .unwrap_or(false)
+    {
+        return Err(DriverStepFailure::new(
+            MergeExecutionFailureKind::StalePlan,
+            "repository state changed after validation; retry before fast-forwarding",
+        ));
+    }
+    if plan.context.in_place {
+        observe_merge_git(
+            observations,
+            &format!("Switching to {}...", state.target_branch),
+            &format!("Switched to {}", state.target_branch),
+            &format!("Failed to switch to {}", state.target_branch),
+            |output| mutation.switch_branch(&state.target_branch, output),
+        )
+        .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::Integration, error))?;
+    }
+    let refreshed_repository = RepositoryObservation::new(primary)
+        .repository()
+        .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::StalePlan, error))?;
+    if !refreshed_repository
+        .worktrees
+        .iter()
+        .any(|worktree| worktree.path == current.path)
+        || refreshed_repository.current_branch().ok() != Some(state.target_branch.as_str())
+        || !primary_history
+            .commit(&state.source_branch)
+            .is_ok_and(|head| head == candidate)
+        || !primary_history
+            .commit(&state.target_branch)
+            .is_ok_and(|head| head == plan.context.target_commit)
+        || !primary_history
+            .is_ancestor(&state.target_branch, candidate)
+            .unwrap_or(false)
+    {
+        return Err(DriverStepFailure::new(
+            MergeExecutionFailureKind::StalePlan,
+            "source, target, checkout, ancestry, or worktree registration changed before integration; retry",
+        ));
+    }
+    effects.mark(MergeAction::FastForwardMerge, true, false);
+    let transcript = observe_merge_git(
+        observations,
+        &format!("Merging into {}...", state.target_branch),
+        &format!("Merged into {}", state.target_branch),
+        &format!("Failed to merge into {}", state.target_branch),
+        |output| mutation.fast_forward(&state.source_branch, output),
+    )
+    .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::Integration, error))?;
+    push_merge_diagnostic(diagnostics, "integration", "stderr", transcript.as_bytes());
+    effects.mark(MergeAction::FastForwardMerge, true, true);
+    if plan.context.policy.removes_topic(plan.context.in_place) {
+        state.cleanup_pending = true;
+        write_journal(&plan.repository.common_dir, state)
+            .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::Journal, error))?;
+    }
+    Ok(())
+}
+
 fn execution_failure(
     plan: &MergePlan,
-    effects: Vec<Effect>,
+    effects: MergeEffects,
     diagnostics: Vec<MergeDiagnostic>,
     phase: MergePhase,
     kind: MergeExecutionFailureKind,
@@ -1837,14 +2573,10 @@ fn execution_failure(
 ) -> MergeExecutionOutcome {
     let mut context = plan.context.clone();
     context.phase = phase;
-    context.journaled = effects
-        .iter()
-        .find(|effect| effect.action == "journal")
-        .is_some_and(|effect| effect.completed)
-        || plan.context.journaled;
+    context.journaled = effects.completed(MergeAction::Journal) || plan.context.journaled;
     MergeExecutionOutcome {
         context,
-        effects,
+        effects: effects.into_protocol(),
         diagnostics,
         destination: None,
         failure: Some((kind, error.to_string())),
@@ -1857,8 +2589,8 @@ fn execution_failure(
 /// updated beside their transitions so adapters never infer progress.
 ///
 /// # Panics
-/// Panics if the validated plan lacks a primary worktree or a planned lifecycle
-/// effect, both of which are planner invariants.
+/// Panics if the validated plan lacks a primary worktree, which is a planner
+/// invariant.
 #[must_use]
 #[allow(clippy::too_many_lines)]
 fn execute_merge(
@@ -1876,6 +2608,8 @@ fn execute_merge(
         .expect("a merge plan always has a primary worktree");
     let current_history = HistoryObservation::new(&current.path);
     let primary_history = HistoryObservation::new(primary);
+    let current_mutation = LifecycleMutation::new(&current.path);
+    let primary_mutation = LifecycleMutation::new(primary);
     if !current_history
         .head_commit()
         .is_ok_and(|head| head == plan.context.source_commit)
@@ -1954,643 +2688,140 @@ fn execute_merge(
             validated_target: None,
         }
     };
-    if plan.integration_observed {
-        mark_effect(&mut effects, "fast_forward_merge", false, true);
-        if plan.context.policy.removes_topic(plan.context.in_place) {
-            state.cleanup_pending = true;
-            if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Integration,
-                    MergeExecutionFailureKind::Journal,
-                    error,
-                );
-            }
-            return execute_merge_cleanup(plan, &state, effects, diagnostics, observations);
-        }
-        return finish_retained_merge(plan, &state, effects, diagnostics);
-    }
-    if plan.context.cleanup_pending {
-        return execute_merge_cleanup(plan, &state, effects, diagnostics, observations);
-    }
-    if !plan.context.journaled {
-        mark_effect(&mut effects, "journal", true, false);
-        if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Planned,
-                MergeExecutionFailureKind::Journal,
-                error,
-            );
-        }
-        mark_effect(&mut effects, "journal", true, true);
-    }
-
-    if matches!(changes, journaled_merge::ChangePolicy::IncludeAll)
-        && state.squash.not_started()
-        && current_history
-            .status()
-            .is_ok_and(|status| status.is_dirty())
-    {
-        if let Err(error) = observe_merge_action(
-            observations,
-            "Staging all changes...",
-            "Staged all changes",
-            "Failed to stage changes",
-            || LifecycleMutation::new(&current.path).stage_all(),
-        ) {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Planned,
-                MergeExecutionFailureKind::StalePlan,
-                error,
-            );
-        }
-    }
-
-    if plan.needs_rebase || plan.context.rebase_active {
-        mark_effect(&mut effects, "rebase", true, false);
-        let rebase_result = if plan.context.rebase_active {
-            observe_merge_git(
-                observations,
-                "Continuing rebase...",
-                "Continued rebase",
-                "Failed to continue the rebase",
-                |output| LifecycleMutation::new(&current.path).continue_rebase(output),
-            )
-        } else {
-            observe_merge_git(
-                observations,
-                &format!("Rebasing onto {}...", state.target_branch),
-                &format!("Rebased onto {}", state.target_branch),
-                &format!("Failed to rebase onto {}", state.target_branch),
-                |output| {
-                    if matches!(changes, journaled_merge::ChangePolicy::IncludeAll) {
-                        LifecycleMutation::new(&current.path)
-                            .rebase_onto_autostash(&state.target_branch, output)
-                    } else {
-                        LifecycleMutation::new(&current.path)
-                            .rebase_onto(&state.target_branch, output)
-                    }
-                },
-            )
-        };
-        match rebase_result {
-            Ok(transcript) => {
-                push_merge_diagnostic(&mut diagnostics, "rebase", "stderr", transcript.as_bytes());
-                mark_effect(&mut effects, "rebase", true, true);
-            }
-            Err(error) => {
-                push_merge_diagnostic(
-                    &mut diagnostics,
-                    "rebase",
-                    "stderr",
-                    error.to_string().as_bytes(),
-                );
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Rebase,
-                    MergeExecutionFailureKind::Rebase,
-                    error,
-                );
-            }
-        }
-    }
-    if matches!(changes, journaled_merge::ChangePolicy::IncludeAll)
-        && state.squash.not_started()
-        && current_history
-            .status()
-            .is_ok_and(|status| status.is_dirty())
-    {
-        if let Err(error) = observe_merge_action(
-            observations,
-            "Staging all changes...",
-            "Staged all changes",
-            "Failed to stage changes",
-            || LifecycleMutation::new(&current.path).stage_all(),
-        ) {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Rebase,
-                MergeExecutionFailureKind::StalePlan,
-                error,
-            );
-        }
-    }
-    if let SquashStateV2::Prepared { checkpoint } = &state.squash {
-        mark_effect(&mut effects, "squash", true, false);
-        let checkpoint = match squash_checkpoint(checkpoint) {
-            Ok(checkpoint) => checkpoint,
-            Err(error) => {
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Squash,
-                    MergeExecutionFailureKind::Journal,
-                    error,
-                );
-            }
-        };
-        let prepared = match squash::resume(checkpoint) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Squash,
-                    MergeExecutionFailureKind::Squash,
-                    error,
-                );
-            }
-        };
-        push_merge_diagnostic(
-            &mut diagnostics,
-            "squash",
-            "stderr",
-            prepared.message().as_bytes(),
-        );
-        observations.commit_message(prepared.message());
-        let commit_count = prepared.commit_count();
-        let collapse = observe_merge_action(
-            observations,
-            &format!("Resuming squash of {commit_count} commits..."),
-            "Squashed the topic into a single commit",
-            "Failed to resume the squash",
-            || squash::collapse(prepared).map_err(anyhow::Error::from),
-        );
-        let collapsed = match collapse {
-            Ok(collapsed) => collapsed,
-            Err(error) => {
-                let detail = error.downcast_ref::<squash::CollapseFailure>().map_or_else(
-                    || error.to_string(),
-                    |failure| format!("collapse progress {:?}: {failure}", failure.progress()),
-                );
-                push_merge_diagnostic(&mut diagnostics, "squash", "stderr", detail.as_bytes());
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Squash,
-                    MergeExecutionFailureKind::Squash,
-                    error,
-                );
-            }
-        };
-        state.squash = SquashStateV2::Completed {
-            resulting_commit: collapsed.commit().to_owned(),
-        };
-        if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Squash,
-                MergeExecutionFailureKind::Journal,
-                error,
-            );
-        }
-        mark_effect(&mut effects, "squash", true, true);
-    }
-    if plan.squash.applicable() && state.squash.not_started() {
-        'squash_phase: {
-            mark_effect(&mut effects, "squash", true, false);
-            let assessment = squash::assess(squash::AssessRequest {
-                repository: &plan.repository,
-                config: &plan.config,
-                target: &state.target_branch,
-                enabled: true,
-                final_history: true,
-                include_staged: matches!(changes, journaled_merge::ChangePolicy::IncludeAll),
-            });
-            let required = match assessment {
-                Ok(squash::Assessment::Required(required)) => required,
-                Ok(squash::Assessment::Skipped { .. }) => {
-                    state.squash = SquashStateV2::Skipped {
-                        reason: SquashSkipReasonV2::SingleCommit,
-                    };
-                    if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
-                        return execution_failure(
-                            plan,
-                            effects,
-                            diagnostics,
-                            MergePhase::Squash,
-                            MergeExecutionFailureKind::Journal,
-                            error,
-                        );
-                    }
-                    mark_effect(&mut effects, "squash", true, true);
-                    break 'squash_phase;
-                }
-                Ok(blocked @ squash::Assessment::Blocked { .. }) => {
-                    let error = blocked
-                        .into_required()
-                        .expect_err("blocked assessment has no capability");
-                    return execution_failure(
-                        plan,
-                        effects,
-                        diagnostics,
-                        MergePhase::Squash,
-                        MergeExecutionFailureKind::StalePlan,
-                        error,
-                    );
-                }
-                Ok(squash::Assessment::PendingFinalHistory) => {
-                    return execution_failure(
-                        plan,
-                        effects,
-                        diagnostics,
-                        MergePhase::Squash,
-                        MergeExecutionFailureKind::StalePlan,
-                        anyhow::anyhow!(
-                            "final post-rebase history is required before squash preparation"
-                        ),
-                    );
-                }
-                Err(error) => {
-                    return execution_failure(
-                        plan,
-                        effects,
-                        diagnostics,
-                        MergePhase::Squash,
-                        MergeExecutionFailureKind::Squash,
-                        error,
-                    );
-                }
-            };
-            let preparation = observe_merge_action(
-                observations,
-                "Generating squash commit message...",
-                "Generated squash commit message:",
-                "Failed to generate the squash commit message",
-                || {
-                    let preparation = squash::prepare(required)?;
-                    if let squash::Preparation::Prepared(prepared) = &preparation {
-                        state.squash = SquashStateV2::Prepared {
-                            checkpoint: squash_checkpoint_v2(&prepared.checkpoint()),
-                        };
-                        write_journal(&plan.repository.common_dir, &state)?;
-                    }
-                    Ok(preparation)
-                },
-            );
-            let prepared = match preparation {
-                Ok(squash::Preparation::Prepared(prepared)) => prepared,
-                Ok(squash::Preparation::Skipped) => {
-                    state.squash = SquashStateV2::Skipped {
-                        reason: SquashSkipReasonV2::SingleCommit,
-                    };
-                    if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
-                        return execution_failure(
-                            plan,
-                            effects,
-                            diagnostics,
-                            MergePhase::Squash,
-                            MergeExecutionFailureKind::Journal,
-                            error,
-                        );
-                    }
-                    mark_effect(&mut effects, "squash", true, true);
-                    break 'squash_phase;
-                }
-                Err(error) => {
-                    push_merge_diagnostic(
-                        &mut diagnostics,
-                        "squash",
-                        "stderr",
-                        error.to_string().as_bytes(),
-                    );
-                    return execution_failure(
-                        plan,
-                        effects,
-                        diagnostics,
-                        MergePhase::Squash,
-                        MergeExecutionFailureKind::Squash,
-                        error,
-                    );
-                }
-            };
-            push_merge_diagnostic(
-                &mut diagnostics,
-                "squash",
-                "stderr",
-                prepared.message().as_bytes(),
-            );
-            observations.commit_message(prepared.message());
-            let commit_count = prepared.commit_count();
-            let collapse = observe_merge_action(
-                observations,
-                &format!("Squashing {commit_count} commits..."),
-                "Squashed the topic into a single commit",
-                "Failed to squash the topic",
-                || squash::collapse(prepared).map_err(anyhow::Error::from),
-            );
-            let collapsed = match collapse {
-                Ok(collapsed) => collapsed,
-                Err(error) => {
-                    push_merge_diagnostic(
-                        &mut diagnostics,
-                        "squash",
-                        "stderr",
-                        error.to_string().as_bytes(),
-                    );
-                    return execution_failure(
-                        plan,
-                        effects,
-                        diagnostics,
-                        MergePhase::Squash,
-                        MergeExecutionFailureKind::Squash,
-                        error,
-                    );
-                }
-            };
-            state.squash = SquashStateV2::Completed {
-                resulting_commit: collapsed.commit().to_owned(),
-            };
-            if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Squash,
-                    MergeExecutionFailureKind::Journal,
-                    error,
-                );
-            }
-            mark_effect(&mut effects, "squash", true, true);
-        }
-    }
-    let mut candidate = match current_history.head_commit() {
-        Ok(candidate) => candidate,
-        Err(error) => {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Squash,
-                MergeExecutionFailureKind::StalePlan,
-                error,
-            );
-        }
-    };
-
+    let mut machine_result = merge_machine::StepResult::Start;
+    let mut validated_candidate = None;
+    let mut terminal_outcome = None;
     loop {
-        match hook_approval::evaluate(
-            &plan.repository,
-            HookPhase::PreMerge,
-            &plan.config.pre_merge,
-        ) {
-            Ok(
-                hook_approval::Evaluation::NoCommands | hook_approval::Evaluation::Trusted { .. },
-            ) => {}
-            Ok(hook_approval::Evaluation::ApprovalRequired(_)) => {
+        let snapshot = merge_machine_snapshot(plan, &state, &effects, changes);
+        match merge_machine::transition(snapshot, machine_result) {
+            merge_machine::Instruction::ExitFailure(failure) => {
+                if let Some(outcome) = terminal_outcome {
+                    return outcome;
+                }
                 return execution_failure(
                     plan,
                     effects,
                     diagnostics,
-                    MergePhase::Validation,
-                    MergeExecutionFailureKind::StalePlan,
-                    "pre-merge hook trust changed before execution; retry after approving the current commands",
+                    failure.phase,
+                    failure.kind,
+                    failure.message,
                 );
             }
-            Err(error) => {
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Validation,
-                    MergeExecutionFailureKind::Validation,
-                    error,
-                );
+            merge_machine::Instruction::ExitSuccess => {
+                return terminal_outcome
+                    .expect("a successful terminal transition follows a terminal driver step");
             }
-        }
-        mark_effect(&mut effects, "pre_merge_hooks", true, false);
-        let hook_result = execute_merge_hooks(
-            HookPhase::PreMerge,
-            "validation",
-            &plan.config.pre_merge,
-            &current.path,
-            observations,
-            &mut diagnostics,
-        );
-        if let Err(error) = hook_result {
-            push_merge_diagnostic(
-                &mut diagnostics,
-                "validation",
-                "stderr",
-                error.to_string().as_bytes(),
-            );
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Validation,
-                MergeExecutionFailureKind::Validation,
-                error,
-            );
-        }
-        if current_history
-            .status()
-            .map_or(true, |status| status.is_dirty())
-        {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Validation,
-                MergeExecutionFailureKind::StalePlan,
-                "pre-merge hooks left the candidate worktree dirty; clean it before retrying",
-            );
-        }
-        let refreshed = match current_history.head_commit() {
-            Ok(refreshed) => refreshed,
-            Err(error) => {
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Validation,
-                    MergeExecutionFailureKind::StalePlan,
-                    error,
-                );
-            }
-        };
-        if !primary_history
-            .commit(&plan.context.target_branch)
-            .is_ok_and(|head| head == plan.context.target_commit)
-        {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Validation,
-                MergeExecutionFailureKind::StalePlan,
-                "the target advanced during validation; retry to validate the new candidate",
-            );
-        }
-        if refreshed == candidate {
-            break;
-        }
-        candidate = refreshed;
-    }
-    mark_effect(&mut effects, "pre_merge_hooks", true, true);
-    state.validated_source = Some(candidate.clone());
-    state.validated_target = Some(plan.context.target_commit.clone());
-    if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
-        return execution_failure(
-            plan,
-            effects,
-            diagnostics,
-            MergePhase::Validation,
-            MergeExecutionFailureKind::Journal,
-            error,
-        );
-    }
-
-    if !current_history
-        .head_commit()
-        .is_ok_and(|head| head == candidate)
-        || !primary_history
-            .commit(&plan.context.source_branch)
-            .is_ok_and(|head| head == candidate)
-        || !primary_history
-            .commit(&plan.context.target_branch)
-            .is_ok_and(|head| head == plan.context.target_commit)
-        || !primary_history
-            .is_ancestor(&plan.context.target_branch, &candidate)
-            .unwrap_or(false)
-    {
-        return execution_failure(
-            plan,
-            effects,
-            diagnostics,
-            MergePhase::Validation,
-            MergeExecutionFailureKind::StalePlan,
-            "repository state changed after validation; retry before fast-forwarding",
-        );
-    }
-    if plan.context.in_place {
-        let switch_result = observe_merge_git(
-            observations,
-            &format!("Switching to {}...", state.target_branch),
-            &format!("Switched to {}", state.target_branch),
-            &format!("Failed to switch to {}", state.target_branch),
-            |output| LifecycleMutation::new(primary).switch_branch(&state.target_branch, output),
-        );
-        match switch_result {
-            Ok(_) => {}
-            Err(error) => {
-                return execution_failure(
-                    plan,
-                    effects,
-                    diagnostics,
-                    MergePhase::Integration,
-                    MergeExecutionFailureKind::Integration,
-                    error,
-                );
+            merge_machine::Instruction::Run(step) => {
+                let result = match step {
+                    merge_machine::Step::PersistJournal => {
+                        effects.mark(MergeAction::Journal, true, false);
+                        write_journal(&plan.repository.common_dir, &state)
+                            .map_err(|error| {
+                                DriverStepFailure::new(MergeExecutionFailureKind::Journal, error)
+                            })
+                            .map(|()| {
+                                effects.mark(MergeAction::Journal, true, true);
+                            })
+                    }
+                    merge_machine::Step::StageBeforeRebase
+                    | merge_machine::Step::StageAfterRebase => {
+                        run_stage_step(plan, &state, current_mutation, observations)
+                    }
+                    merge_machine::Step::Rebase => run_rebase_step(
+                        plan,
+                        &state,
+                        changes,
+                        current_mutation,
+                        &mut effects,
+                        &mut diagnostics,
+                        observations,
+                    ),
+                    merge_machine::Step::Squash => run_squash_step(
+                        plan,
+                        &mut state,
+                        changes,
+                        &mut effects,
+                        &mut diagnostics,
+                        observations,
+                    ),
+                    merge_machine::Step::Validation => run_validation_step(
+                        plan,
+                        &mut state,
+                        &mut effects,
+                        &mut diagnostics,
+                        observations,
+                    )
+                    .map(|candidate| {
+                        validated_candidate = Some(candidate);
+                    }),
+                    merge_machine::Step::Integration => run_integration_step(
+                        plan,
+                        &mut state,
+                        validated_candidate
+                            .as_deref()
+                            .expect("validation always supplies the integration candidate"),
+                        primary_mutation,
+                        &mut effects,
+                        &mut diagnostics,
+                        observations,
+                    ),
+                    merge_machine::Step::RecordObservedIntegration => {
+                        effects.mark(MergeAction::FastForwardMerge, false, true);
+                        if plan.context.policy.removes_topic(plan.context.in_place) {
+                            state.cleanup_pending = true;
+                            write_journal(&plan.repository.common_dir, &state).map_err(|error| {
+                                DriverStepFailure::new(MergeExecutionFailureKind::Journal, error)
+                            })
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    merge_machine::Step::Cleanup => {
+                        let outcome = execute_merge_cleanup(
+                            plan,
+                            &state,
+                            effects.clone(),
+                            diagnostics.clone(),
+                            observations,
+                        );
+                        let result = outcome.failure.as_ref().map_or(Ok(()), |(kind, message)| {
+                            Err(DriverStepFailure::new(*kind, message))
+                        });
+                        terminal_outcome = Some(outcome);
+                        result
+                    }
+                    merge_machine::Step::FinishRetained => {
+                        let outcome = finish_retained_merge(
+                            plan,
+                            &state,
+                            effects.clone(),
+                            diagnostics.clone(),
+                        );
+                        let result = outcome.failure.as_ref().map_or(Ok(()), |(kind, message)| {
+                            Err(DriverStepFailure::new(*kind, message))
+                        });
+                        terminal_outcome = Some(outcome);
+                        result
+                    }
+                };
+                machine_result = match result {
+                    Ok(()) => merge_machine::StepResult::Completed(step),
+                    Err(failure) => {
+                        merge_machine::StepResult::failed(step, failure.kind, failure.message)
+                    }
+                };
             }
         }
     }
-    let refreshed_repository = match RepositoryObservation::new(primary).repository() {
-        Ok(repository) => repository,
-        Err(error) => {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Integration,
-                MergeExecutionFailureKind::StalePlan,
-                error,
-            );
-        }
-    };
-    if !refreshed_repository
-        .worktrees
-        .iter()
-        .any(|worktree| worktree.path == current.path)
-        || refreshed_repository.current_branch().ok() != Some(state.target_branch.as_str())
-        || !primary_history
-            .commit(&state.source_branch)
-            .is_ok_and(|head| head == candidate)
-        || !primary_history
-            .commit(&state.target_branch)
-            .is_ok_and(|head| head == plan.context.target_commit)
-        || !primary_history
-            .is_ancestor(&state.target_branch, &candidate)
-            .unwrap_or(false)
-    {
-        return execution_failure(
-            plan,
-            effects,
-            diagnostics,
-            MergePhase::Integration,
-            MergeExecutionFailureKind::StalePlan,
-            "source, target, checkout, ancestry, or worktree registration changed before integration; retry",
-        );
-    }
-    mark_effect(&mut effects, "fast_forward_merge", true, false);
-    let merge_result = observe_merge_git(
-        observations,
-        &format!("Merging into {}...", state.target_branch),
-        &format!("Merged into {}", state.target_branch),
-        &format!("Failed to merge into {}", state.target_branch),
-        |output| LifecycleMutation::new(primary).fast_forward(&state.source_branch, output),
-    );
-    let transcript = match merge_result {
-        Ok(transcript) => transcript,
-        Err(error) => {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Integration,
-                MergeExecutionFailureKind::Integration,
-                error,
-            );
-        }
-    };
-    push_merge_diagnostic(
-        &mut diagnostics,
-        "integration",
-        "stderr",
-        transcript.as_bytes(),
-    );
-    mark_effect(&mut effects, "fast_forward_merge", true, true);
-    if plan.context.policy.removes_topic(plan.context.in_place) {
-        state.cleanup_pending = true;
-        if let Err(error) = write_journal(&plan.repository.common_dir, &state) {
-            return execution_failure(
-                plan,
-                effects,
-                diagnostics,
-                MergePhase::Integration,
-                MergeExecutionFailureKind::Journal,
-                error,
-            );
-        }
-        return execute_merge_cleanup(plan, &state, effects, diagnostics, observations);
-    }
-    finish_retained_merge(plan, &state, effects, diagnostics)
 }
 
 fn finish_retained_merge(
     plan: &MergePlan,
     state: &MergeJournal,
-    mut effects: Vec<Effect>,
+    mut effects: MergeEffects,
     diagnostics: Vec<MergeDiagnostic>,
 ) -> MergeExecutionOutcome {
-    mark_effect(&mut effects, "journal_cleanup", true, false);
+    effects.mark(MergeAction::JournalCleanup, true, false);
     if let Err(error) = remove_journal(&plan.repository.common_dir, &state.topic_identity) {
         return execution_failure(
             plan,
@@ -2601,14 +2832,14 @@ fn finish_retained_merge(
             error,
         );
     }
-    mark_effect(&mut effects, "journal_cleanup", true, true);
+    effects.mark(MergeAction::JournalCleanup, true, true);
     let mut context = plan.context.clone();
     context.phase = MergePhase::Complete;
     context.cleanup_pending = false;
     context.journaled = false;
     MergeExecutionOutcome {
         context,
-        effects,
+        effects: effects.into_protocol(),
         diagnostics,
         destination: None,
         failure: None,
@@ -2619,7 +2850,7 @@ fn finish_retained_merge(
 fn execute_merge_cleanup(
     plan: &MergePlan,
     state: &MergeJournal,
-    mut effects: Vec<Effect>,
+    mut effects: MergeEffects,
     mut diagnostics: Vec<MergeDiagnostic>,
     observations: &mut journaled_merge::Observations,
 ) -> MergeExecutionOutcome {
@@ -2651,7 +2882,7 @@ fn execute_merge_cleanup(
             );
         }
     }
-    mark_effect(&mut effects, "pre_remove_hooks", true, false);
+    effects.mark(MergeAction::PreRemoveHooks, true, false);
     let hook_result = execute_merge_hooks(
         HookPhase::PreRemove,
         "cleanup",
@@ -2674,7 +2905,7 @@ fn execute_merge_cleanup(
             error,
         );
     }
-    mark_effect(&mut effects, "pre_remove_hooks", true, true);
+    effects.mark(MergeAction::PreRemoveHooks, true, true);
 
     let Some(worktree) = plan
         .repository
@@ -2702,7 +2933,7 @@ fn execute_merge_cleanup(
         .primary
         .as_ref()
         .expect("a merge plan always has a primary worktree");
-    mark_effect(&mut effects, "remove_worktree", true, false);
+    effects.mark(MergeAction::RemoveWorktree, true, false);
     let mutation = git::WorktreeMutation::new(primary);
     let removal = mutation.remove(&state.topic_path, git::RemovalMode::Safe);
     let removal = match removal {
@@ -2740,11 +2971,11 @@ fn execute_merge_cleanup(
             anyhow::anyhow!("git worktree remove failed"),
         );
     }
-    mark_effect(&mut effects, "remove_worktree", true, true);
-    mark_effect(&mut effects, "destination", true, true);
+    effects.mark(MergeAction::RemoveWorktree, true, true);
+    effects.mark(MergeAction::Destination, true, true);
     let destination = Some(primary.clone());
 
-    mark_effect(&mut effects, "journal_cleanup", true, false);
+    effects.mark(MergeAction::JournalCleanup, true, false);
     if let Err(error) = remove_journal(&plan.repository.common_dir, &state.topic_identity) {
         let mut outcome = failure(
             effects,
@@ -2755,14 +2986,14 @@ fn execute_merge_cleanup(
         outcome.destination = destination;
         return outcome;
     }
-    mark_effect(&mut effects, "journal_cleanup", true, true);
+    effects.mark(MergeAction::JournalCleanup, true, true);
     let mut context = plan.context.clone();
     context.phase = MergePhase::Complete;
     context.cleanup_pending = false;
     context.journaled = false;
     MergeExecutionOutcome {
         context,
-        effects,
+        effects: effects.into_protocol(),
         diagnostics,
         destination,
         failure: None,
@@ -3340,6 +3571,113 @@ mod journal_tests {
 
     const V1: &str = r#"{"version":1,"topic_path":"/tmp/topic","topic_identity":"/tmp/id","source_branch":"topic","target_branch":"main","no_rebase":false,"no_remove":false,"no_squash":false,"yolo_stage_all":false,"squashed":false,"cleanup_pending":false,"validated_source":null,"validated_target":null}"#;
     const V2: &str = r#"{"version":2,"topic_path":{"encoding":"base64","value":"L3RtcC90b3BpYw==","display":"/tmp/topic"},"topic_identity":{"encoding":"base64","value":"L3RtcC9pZA==","display":"/tmp/id"},"source_branch":"topic","target_branch":"main","no_rebase":false,"no_remove":false,"no_squash":false,"yolo_stage_all":false,"squashed":{"state":"not_started"},"cleanup_pending":false,"validated_source":null,"validated_target":null}"#;
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Exact protocol compatibility matrix stays visible in one test.
+    fn execution_failure_table_preserves_all_stable_classifications() {
+        let expected = [
+            (
+                MergePhase::Planned,
+                MergeExecutionFailureKind::StalePlan,
+                "merge.stale_plan",
+            ),
+            (
+                MergePhase::Planned,
+                MergeExecutionFailureKind::Journal,
+                "merge.journal_failed",
+            ),
+            (
+                MergePhase::Rebase,
+                MergeExecutionFailureKind::Rebase,
+                "merge.rebase_conflict",
+            ),
+            (
+                MergePhase::Rebase,
+                MergeExecutionFailureKind::StalePlan,
+                "merge.stale_plan",
+            ),
+            (
+                MergePhase::Squash,
+                MergeExecutionFailureKind::Journal,
+                "merge.journal_failed",
+            ),
+            (
+                MergePhase::Squash,
+                MergeExecutionFailureKind::Squash,
+                "merge.execution_failed",
+            ),
+            (
+                MergePhase::Squash,
+                MergeExecutionFailureKind::StalePlan,
+                "merge.stale_plan",
+            ),
+            (
+                MergePhase::Validation,
+                MergeExecutionFailureKind::Journal,
+                "merge.journal_failed",
+            ),
+            (
+                MergePhase::Validation,
+                MergeExecutionFailureKind::StalePlan,
+                "merge.stale_plan",
+            ),
+            (
+                MergePhase::Validation,
+                MergeExecutionFailureKind::Validation,
+                "merge.validation_failed",
+            ),
+            (
+                MergePhase::Integration,
+                MergeExecutionFailureKind::Integration,
+                "merge.execution_failed",
+            ),
+            (
+                MergePhase::Integration,
+                MergeExecutionFailureKind::Journal,
+                "merge.journal_failed",
+            ),
+            (
+                MergePhase::Integration,
+                MergeExecutionFailureKind::StalePlan,
+                "merge.stale_plan",
+            ),
+            (
+                MergePhase::Cleanup,
+                MergeExecutionFailureKind::StalePlan,
+                "merge.stale_plan",
+            ),
+            (
+                MergePhase::Cleanup,
+                MergeExecutionFailureKind::Cleanup,
+                "merge.cleanup_failed",
+            ),
+            (
+                MergePhase::Cleanup,
+                MergeExecutionFailureKind::Removal,
+                "merge.remove_failed",
+            ),
+            (
+                MergePhase::Cleanup,
+                MergeExecutionFailureKind::JournalCleanup,
+                "merge.journal_failed",
+            ),
+            (
+                MergePhase::Complete,
+                MergeExecutionFailureKind::JournalCleanup,
+                "merge.journal_failed",
+            ),
+        ];
+
+        assert_eq!(MERGE_FAILURE_RULES.len(), expected.len());
+        for (phase, kind, code) in expected {
+            let fresh = classify_execution_failure(phase, kind, "reported failure");
+            let resumed = classify_execution_failure(phase, kind, "reported failure");
+            assert_eq!(fresh, resumed);
+            assert_eq!(fresh.code, code);
+            assert_eq!(fresh.message, "reported failure");
+            assert_eq!(fresh.recovery, MergeFailureRecovery::RetryPinnedLifecycle);
+        }
+    }
 
     #[test]
     fn merge_action_result_is_independent_from_observation_delivery() {

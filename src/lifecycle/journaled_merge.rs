@@ -318,7 +318,7 @@ pub(crate) fn prepare(request: MergeRequest) -> Preparation {
                     message: format!("{error:#}"),
                 }),
                 context: MergeOutcomeContext::Lifecycle(plan.context.clone()),
-                effects: plan.effects.clone(),
+                effects: plan.effects.clone().into_protocol(),
                 diagnostics: Vec::new(),
                 recovery: Vec::new(),
                 destination: None,
@@ -399,7 +399,7 @@ fn dry_run_outcome(
             approval_required,
         }),
         context: outcome_context(plan, requirement),
-        effects: plan.effects.clone(),
+        effects: plan.effects.clone().into_protocol(),
         diagnostics: Vec::new(),
         recovery: requirement.map_or_else(Vec::new, |requirement| {
             vec![merge_trust_recovery(
@@ -429,7 +429,7 @@ fn approval_outcome(plan: &MergePlan, requirement: &PendingRequirement) -> Merge
             .into(),
         }),
         context: outcome_context(plan, Some(requirement)),
-        effects: plan.effects.clone(),
+        effects: plan.effects.clone().into_protocol(),
         diagnostics: Vec::new(),
         recovery: vec![merge_trust_recovery(plan, squash_blocked)],
         destination: None,
