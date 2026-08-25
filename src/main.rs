@@ -299,6 +299,7 @@ fn run(cli: Cli) -> Result<()> {
             request_mode,
             property.map(|p| match p {
                 GetProperty::Branch => "branch",
+                GetProperty::Slug => "slug",
                 GetProperty::Port => "port",
                 GetProperty::WorktreePath => "worktree-path",
                 GetProperty::PrimaryWorktreePath => "primary-worktree-path",

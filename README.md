@@ -338,6 +338,7 @@ Every successful `get` command writes exactly one value and a newline:
 
 ```sh
 branch=$(pando get branch)
+slug=$(pando get slug)
 path=$(pando get worktree-path)
 main=$(pando get primary-worktree-path)
 root=$(pando get worktree-root)
@@ -345,6 +346,7 @@ port=$(pando get port)
 ```
 
 - `branch` — full named branch of the containing worktree;
+- `slug` — lowercase branch name with runs of characters outside `[a-z0-9]` replaced by `-` and trimmed at both ends;
 - `worktree-path` — resolved absolute containing worktree root;
 - `primary-worktree-path` — resolved absolute primary worktree path;
 - `worktree-root` — resolved absolute effective configured creation root;

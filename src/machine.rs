@@ -293,6 +293,7 @@ pub fn get(request_mode: bool, argv: Option<&str>) -> Result<()> {
             None,
             match argv.unwrap_or("") {
                 "branch" => GetProperty::Branch,
+                "slug" => GetProperty::Slug,
                 "port" => GetProperty::Port,
                 "worktree-path" => GetProperty::WorktreePath,
                 "primary-worktree-path" => GetProperty::PrimaryWorktreePath,

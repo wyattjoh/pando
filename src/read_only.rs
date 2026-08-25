@@ -302,6 +302,7 @@ pub fn list_branches() -> Result<BranchListOutcome, QueryFailure> {
 #[serde(rename_all = "snake_case")]
 pub enum GetProperty {
     Branch,
+    Slug,
     Port,
     WorktreePath,
     PrimaryWorktreePath,
@@ -383,6 +384,10 @@ pub fn get(property: GetProperty) -> Result<GetResult, QueryFailure> {
             WorktreeKind::Branch(branch) => ("branch", PropertyValue::Text(branch.clone())),
             _ => return Err(detached_failure(&repository)),
         },
+        GetProperty::Slug => match &repository.current().kind {
+            WorktreeKind::Branch(branch) => ("slug", PropertyValue::Text(slug_for_branch(branch))),
+            _ => return Err(detached_failure(&repository)),
+        },
         GetProperty::Port => match &repository.current().kind {
             WorktreeKind::Branch(branch) => ("port", PropertyValue::Port(port_for_branch(branch))),
             _ => return Err(detached_failure(&repository)),
@@ -429,6 +434,15 @@ pub fn get(property: GetProperty) -> Result<GetResult, QueryFailure> {
     })
 }
 
+fn slug_for_branch(branch: &str) -> String {
+    branch
+        .to_lowercase()
+        .split(|character: char| !character.is_ascii_lowercase() && !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 fn detached_failure(repository: &git::Repository) -> QueryFailure {
     QueryFailure {
         code: "repository.detached",
@@ -446,4 +460,16 @@ fn resolved_path(path: &std::path::Path) -> Result<PathBuf, QueryFailure> {
         message: format!("failed to resolve path {}: {error}", path.display()),
         human_message: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slug_for_branch;
+
+    #[test]
+    fn slug_normalizes_branch_names() {
+        assert_eq!(slug_for_branch("Feature/Login__API"), "feature-login-api");
+        assert_eq!(slug_for_branch("--Feature/Login--"), "feature-login");
+        assert_eq!(slug_for_branch("FØØ/分支"), "f");
+    }
 }

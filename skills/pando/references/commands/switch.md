@@ -212,6 +212,7 @@ Usage: pando get [OPTIONS] <PROPERTY>
 | Value | Meaning |
 |---|---|
 | `branch` | Full name of the branch checked out in the containing worktree |
+| `slug` | Lowercase branch name with runs of characters outside `[a-z0-9]` replaced by `-` and trimmed at both ends |
 | `port` | Deterministic branch-only port in `10000..=19999` (pinned `SipHasher13`, compatible with Worktrunk v0.66.0 — golden values are asserted in tests; treat as a compatibility contract) |
 | `worktree-path` | Resolved absolute path of the containing worktree |
 | `primary-worktree-path` | Resolved absolute path of the primary worktree |
@@ -225,6 +226,7 @@ Both JSON modes are supported; agents use versioned request mode.
 
 ```sh
 branch=$(pando get branch)
+slug=$(pando get slug)
 path=$(pando get worktree-path)
 primary=$(pando get primary-worktree-path)
 root=$(pando get worktree-root)
@@ -239,7 +241,7 @@ echo "PORT=$(pando get port)" > .env.local
 
 ## Structured JSON contract
 
-Agents use `--input-output json`. `list` accepts `{"schema_version":1,"request_id":"…"}` with omitted `input`, or an empty `input` object. `get` requires `input.property`; JSON names are `branch`, `port`, `worktree_path`, `primary_worktree_path`, and `worktree_root`. `switch` accepts `input.branch`, `input.remote`, `input.fetch`, and `input.dry_run`. `create` accepts those fields plus optional `input.description`; `input.branch` is required (`create.branch_required`) and its error codes are namespaced `create.*`. Request mode rejects simultaneous command arguments or flags.
+Agents use `--input-output json`. `list` accepts `{"schema_version":1,"request_id":"…"}` with omitted `input`, or an empty `input` object. `get` requires `input.property`; JSON names are `branch`, `slug`, `port`, `worktree_path`, `primary_worktree_path`, and `worktree_root`. `switch` accepts `input.branch`, `input.remote`, `input.fetch`, and `input.dry_run`. `create` accepts those fields plus optional `input.description`; `input.branch` is required (`create.branch_required`) and its error codes are namespaced `create.*`. Request mode rejects simultaneous command arguments or flags.
 
 Responses identify as `list`, `get`, `switch`, or `create`; paths are UTF-8/base64 tagged objects. JSON help derives the `list` and `get` result schemas and their error catalogs from the same typed query contracts used at runtime. Every structured `list` worktree and `switch.selection_required` choice includes nullable `last_commit_at`, an RFC 3339 HEAD committer timestamp with an explicit offset. These arrays retain Git discovery order under every personal default sort. A systemic metadata failure leaves timestamps null and adds one bounded diagnostic without ordinary stderr. Switch may return an existing destination, a creation plan, or typed selection/remote/approval errors with retry context. A registered worktree whose post-create setup is incomplete returns `switch.setup_incomplete`, no successful destination result, and a human-only `switch.recover_setup` next step identifying that worktree; human switching retains its retry/enter/complete recovery menu. Create returns a `created` or `creation_plan` result carrying `kind`, `start_point`, a `base_ref` when the effective base is `fresh`, and both `create_branch` and `create_worktree` effects for a genuinely new branch, or fails with `create.branch_registered` plus a `switch` next step. `input.description` adds a `set_branch_description` effect and may fail after creation with `create.description_failed`, which returns the completed creation effects and a `git.set_branch_description` recovery step. `input.fetch` adds a `fetch_base_ref` effect naming the single refreshed ref; it is rejected as `switch.fetch_not_applicable` / `create.fetch_not_applicable` in `head` mode or when the branch is not genuinely new, and an unresolvable or never-fetched base is `switch.base_unavailable` / `create.base_unavailable`. Dry runs perform no creation, configuration, or hooks and report unattempted effects. Exact-leaf `--help --output json` returns runtime request, response, and operation-result schemas plus the complete switch/create error and action catalogs. JSON writes one document to stdout and no ordinary stderr unless `--verbose` explicitly enables diagnostics; every `status:"error"` response exits nonzero.
 

@@ -218,11 +218,13 @@ Source: README.md ("Shared project setup", "Trust")
 ### Query current-worktree properties (e.g. from a hook script)
 ```sh
 branch=$(pando get branch)
+slug=$(pando get slug)
 path=$(pando get worktree-path)
 primary=$(pando get primary-worktree-path)
 root=$(pando get worktree-root)
 port=$(pando get port)
 ```
+`slug` is the lowercase branch name with runs of characters outside `[a-z0-9]` replaced by `-` and trimmed at both ends.
 Source: README.md ("get")
 
 ### Handle a `commit` JSON error response

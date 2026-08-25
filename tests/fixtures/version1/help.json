@@ -504,6 +504,7 @@
           "GetProperty": {
             "enum": [
               "branch",
+              "slug",
               "port",
               "worktree_path",
               "primary_worktree_path",

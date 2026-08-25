@@ -5822,6 +5822,7 @@ fn get_prints_exact_current_context_values_and_stable_ports() {
 
     for (property, expected) in [
         ("branch", "feature".to_owned()),
+        ("slug", "feature".to_owned()),
         (
             "worktree-path",
             repo.linked.canonicalize().unwrap().display().to_string(),
@@ -5853,6 +5854,28 @@ fn get_prints_exact_current_context_values_and_stable_ports() {
             "{property}: get writes only the requested value"
         );
     }
+}
+
+#[test]
+fn get_slug_normalizes_the_current_branch_name() {
+    let repo = Repository::new();
+    let worktree = repo.add_worktree("slug", "Feature_Some.Branch");
+
+    let human = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["get", "slug"])
+        .current_dir(&worktree)
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    assert_eq!(human.stdout, b"feature-some-branch\n");
+    assert!(human.stderr.is_empty());
+
+    let json = json_command(&worktree, &["get", "slug", "--output", "json"], None);
+    assert!(json.status.success());
+    let json = assert_json_pure(&json);
+    assert_eq!(json["result"]["property"], "slug");
+    assert_eq!(json["result"]["value"], "feature-some-branch");
 }
 
 #[cfg(target_os = "linux")]
@@ -8970,6 +8993,7 @@ fn human_and_json_get_preserve_the_same_natural_values() {
     .unwrap();
     for (property, expected_type) in [
         ("branch", "string"),
+        ("slug", "string"),
         ("port", "number"),
         ("worktree-path", "object"),
         ("primary-worktree-path", "object"),
@@ -9005,7 +9029,7 @@ fn human_and_json_get_preserve_the_same_natural_values() {
             expected_type
         );
         match property {
-            "branch" => assert_eq!(
+            "branch" | "slug" => assert_eq!(
                 value.as_str().unwrap().as_bytes(),
                 &human.stdout[..human.stdout.len() - 1]
             ),
