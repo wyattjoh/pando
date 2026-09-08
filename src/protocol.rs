@@ -214,8 +214,12 @@ pub fn read_request<I: DeserializeOwned>() -> std::result::Result<Request<I>, St
 
 /// Reads a strict request whose input member may be omitted.
 ///
+/// Empty stdin is equivalent to an omitted request and uses the current schema
+/// version. This supports no-input status leaves without requiring callers to
+/// manufacture an otherwise empty JSON document.
+///
 /// # Errors
-/// Returns a descriptive protocol error for unreadable, empty, malformed, or trailing input.
+/// Returns a descriptive protocol error for unreadable, malformed, or trailing input.
 pub fn read_optional_request<I: DeserializeOwned + Default>()
 -> std::result::Result<OptionalInputRequest<I>, String> {
     let mut bytes = Vec::new();
@@ -223,7 +227,11 @@ pub fn read_optional_request<I: DeserializeOwned + Default>()
         .read_to_end(&mut bytes)
         .map_err(|e| format!("failed to read JSON request: {e}"))?;
     if bytes.iter().all(u8::is_ascii_whitespace) {
-        return Err("JSON request stdin is empty".into());
+        return Ok(OptionalInputRequest {
+            schema_version: SCHEMA_VERSION,
+            request_id: None,
+            input: None,
+        });
     }
     let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
     let request = OptionalInputRequest::deserialize(&mut deserializer)

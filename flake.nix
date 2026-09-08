@@ -17,9 +17,7 @@
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-        in
-        {
-          default = pkgs.rustPlatform.buildRustPackage {
+          project = pkgs.rustPlatform.buildRustPackage {
             pname = "pando";
             version = "0.2.0";
             src = ./.;
@@ -28,10 +26,12 @@
               pkgs.which
               pkgs.zsh
             ]
-            ++ pkgs.lib.optional pkgs.stdenv.isLinux pkgs.procps
-            ++ pkgs.lib.optional pkgs.stdenv.isDarwin pkgs.unixtools.ps;
+            ++ pkgs.lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.procps
+            ++ pkgs.lib.optional pkgs.stdenv.hostPlatform.isDarwin pkgs.unixtools.ps;
             preCheck = ''
               export HOME="$TMPDIR/home"
+              export LANG=C.UTF-8
+              export LC_ALL=C.UTF-8
               mkdir -p "$HOME"
             '';
             cargoLock.lockFile = ./Cargo.lock;
@@ -43,6 +43,10 @@
               mainProgram = "pando";
             };
           };
+        in
+        {
+          inherit project;
+          default = project;
         }
       );
     };

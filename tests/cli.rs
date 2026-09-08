@@ -770,10 +770,12 @@ fn metadata_uses_one_batch_and_is_skipped_for_get() {
 
     let fake_bin = repo.temp.path().join("metadata-batch-bin");
     fs::create_dir(&fake_bin).unwrap();
+    let real_cat = find_executable("cat");
+    std::os::unix::fs::symlink(real_cat, fake_bin.join("cat")).unwrap();
     let fake_git = fake_bin.join("git");
     fs::write(
         &fake_git,
-        "#!/bin/sh\nif [ \"$1\" = cat-file ]; then printf 'call\\n' >> \"$CALL_LOG\"; /bin/cat > \"$INPUT_LOG\"; exec \"$REAL_GIT\" \"$@\" < \"$INPUT_LOG\"; fi\nexec \"$REAL_GIT\" \"$@\"\n",
+        "#!/bin/sh\nif [ \"$1\" = cat-file ]; then printf 'call\\n' >> \"$CALL_LOG\"; cat > \"$INPUT_LOG\"; exec \"$REAL_GIT\" \"$@\" < \"$INPUT_LOG\"; fi\nexec \"$REAL_GIT\" \"$@\"\n",
     )
     .unwrap();
     fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
@@ -7811,7 +7813,7 @@ fn commit_streams_and_clears_successful_pre_commit_hook_output() {
     let hook = repo.main.join(".git/hooks/pre-commit");
     fs::write(
         &hook,
-        "#!/bin/sh\nprintf 'pre-commit stdout\\n'\nprintf 'pre-commit stderr\\n' >&2\nsleep 2\nprintf 'pre-commit finished\\n'\n",
+        "#!/bin/sh\nprintf 'pre-commit stdout\\n'\nprintf 'pre-commit stderr\\n' >&2\nsleep 5\nprintf 'pre-commit finished\\n'\n",
     )
     .unwrap();
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
@@ -7858,7 +7860,7 @@ fn commit_streams_and_clears_successful_pre_commit_hook_output() {
     });
 
     started_receiver
-        .recv_timeout(std::time::Duration::from_secs(1))
+        .recv_timeout(std::time::Duration::from_secs(4))
         .expect("pre-commit output was buffered until the hook completed");
     assert!(child.try_wait().unwrap().is_none());
     let output = finish_pty_command(child, reader);
@@ -7897,7 +7899,7 @@ fn commit_streams_and_clears_successful_pre_commit_hook_output() {
         output.stderr
     );
     assert!(
-        elapsed_seconds_after(&output.stderr, "Created commit").is_some_and(|seconds| seconds >= 2),
+        elapsed_seconds_after(&output.stderr, "Created commit").is_some_and(|seconds| seconds >= 5),
         "commit completion did not report hook duration: {}",
         output.stderr
     );

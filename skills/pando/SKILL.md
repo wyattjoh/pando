@@ -57,10 +57,11 @@ the four operations above must go through `pando`, not `git`.
 
 **Agents must use `--input-output json` for every normal operation.** Put the
 leaf command (and trust subcommand) in argv and the complete command input in
-the strict version-1 stdin envelope. Do not parse human tables, messages, or
-scalar stdout. Read `status`, typed `result`/`error`, `effects`, bounded
-`diagnostics`, and executable `next_steps` instead. Use human commands only
-when a returned next step explicitly requires a person's approval.
+the strict version-1 stdin envelope. No-input status leaves may omit the
+otherwise empty document. Do not parse human tables, messages, or scalar
+stdout. Read `status`, typed `result`/`error`, `effects`, bounded `diagnostics`,
+and executable `next_steps` instead. Use human commands only when a returned
+next step explicitly requires a person's approval.
 
 Requests reject unknown fields, trailing data, unsupported versions, and
 mixed command flags. Every response with `status:"error"` exits nonzero.

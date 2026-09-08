@@ -831,7 +831,8 @@ enum ConditionObservation {
 fn discover_worktrees(cwd: &Path, observation: ConditionObservation) -> Result<Vec<Worktree>> {
     let output = run_git(cwd, ["worktree", "list", "--porcelain", "-z"])
         .context("failed to list Git worktrees for the current repository")?;
-    ensure_success(&output, "git worktree list")?;
+    ensure_success(&output, "git worktree list")
+        .context("failed to list Git worktrees for the current repository")?;
 
     let mut worktrees = parse_porcelain(&output.stdout)?;
     let current = current_record(&worktrees, cwd);
