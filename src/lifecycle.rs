@@ -1856,6 +1856,48 @@ fn push_removal_git_diagnostic(
 ///
 /// Returns an error when preflight, hook execution, or Git deletion fails.
 pub fn remove(branches: &[String], force: bool) -> Result<()> {
+    remove_reported(branches, force, &RemovalReport::for_remove())
+}
+
+/// How one removal batch reports itself on the human rail.
+///
+/// Both `remove` and `clean` drive the same execution, so the wording that
+/// differs between them travels here rather than forking the operation.
+#[derive(Clone, Copy, Debug)]
+pub struct RemovalReport<'wording> {
+    /// Appended to the success outro, such as the disk a cleanup reclaimed.
+    pub summary: Option<&'wording str>,
+    /// The command to suggest rerunning after a batch stops partway.
+    pub rerun: &'wording str,
+}
+
+impl RemovalReport<'static> {
+    /// Returns the wording used by `pando remove`.
+    #[must_use]
+    pub const fn for_remove() -> Self {
+        Self {
+            summary: None,
+            rerun: "pando remove",
+        }
+    }
+}
+
+/// Removes worktrees, appending `report.summary` to the success outro.
+///
+/// # Errors
+/// Returns an error when preflight, hook approval, or removal fails.
+pub fn remove_summarized(branches: &[String], force: bool, summary: Option<&str>) -> Result<()> {
+    remove_reported(
+        branches,
+        force,
+        &RemovalReport {
+            summary,
+            rerun: "pando clean",
+        },
+    )
+}
+
+fn remove_reported(branches: &[String], force: bool, report: &RemovalReport<'_>) -> Result<()> {
     let plan = plan_remove(branches, force)?;
     for target in &plan.targets {
         hook_approval::approve_interactively(
@@ -1876,17 +1918,48 @@ pub fn remove(branches: &[String], force: bool) -> Result<()> {
     drop(observations.finish());
     render_removal_git_diagnostics(&outcome);
     if let Err(error) = &outcome.result {
+        render_removal_status(&outcome.context, report.rerun);
         bail!(error.message.clone());
     }
     if plan.context.destination.is_some() {
         write_destination(&plan.primary)?;
     }
     let count = plan.targets.len();
-    let _ = ui::finish(ui::success_style().apply_to(format!(
+    let mut completed = format!(
         "Removed {count} worktree{}; branches retained.",
         plural(count)
-    )));
+    );
+    if let Some(summary) = report.summary {
+        completed.push(' ');
+        completed.push_str(summary);
+    }
+    let _ = ui::finish(ui::success_style().apply_to(completed));
     Ok(())
+}
+
+/// Reports every target's state after a batch removal stops partway.
+///
+/// Removal is fail-fast, so a failed run can leave earlier targets removed and
+/// later ones untouched. Without this the error names only the target that
+/// failed, which is ambiguous once more than one was requested.
+fn render_removal_status(context: &RemovalOutcomeContext, rerun: &str) {
+    let states = [
+        ("removed", &context.completed_targets),
+        ("failed", &context.failed_targets),
+        ("not attempted", &context.pending_targets),
+    ];
+    let total: usize = states.iter().map(|(_, targets)| targets.len()).sum();
+    if total <= 1 {
+        return;
+    }
+    let mut lines: Vec<String> = Vec::with_capacity(total + 1);
+    for (state, targets) in states {
+        for target in targets {
+            lines.push(format!("{}: {state}", target.branch));
+        }
+    }
+    lines.push(format!("Rerun {rerun} to retry the rest."));
+    let _ = ui::warning(lines.join("\n"));
 }
 
 fn render_removal_git_diagnostics(outcome: &RemovalOutcome) {

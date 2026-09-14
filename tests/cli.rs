@@ -11569,3 +11569,329 @@ fn branch_completion_outside_a_repository_is_silent() {
         "no error text may reach the completion line: {stdout}"
     );
 }
+
+fn run_clean(cwd: &Path, args: &[&str], input: &[u8]) -> PtyOutput {
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command.arg("clean").args(args).current_dir(cwd);
+    run_pty_command(command, input)
+}
+
+fn has_branch(dir: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
+        .current_dir(dir)
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+#[test]
+fn clean_without_a_terminal_points_at_remove() {
+    let repo = Repository::new();
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .arg("clean")
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires an interactive terminal"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("pando remove"), "{stderr}");
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn clean_rejects_structured_output() {
+    let repo = Repository::new();
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["clean", "--output", "json"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("only supports human output"), "{stdout}");
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn clean_lists_topic_worktrees_with_a_size_column_and_omits_the_primary() {
+    let repo = Repository::new();
+
+    let output = run_clean(&repo.main, &[], b"\x1b");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(stderr.contains("Select worktrees to remove"), "{stderr}");
+    assert!(stderr.contains("SIZE"), "{stderr}");
+    assert!(stderr.contains("feature"), "{stderr}");
+    assert!(!stderr.contains("main"), "{stderr}");
+    assert!(stderr.contains("cleanup cancelled"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn clean_fills_the_size_column_after_the_first_frame() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("payload"), vec![0u8; 512 * 1024]).unwrap();
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command.arg("clean").current_dir(&repo.main);
+    let PtySession {
+        child,
+        mut master_writer,
+        mut master_reader,
+    } = start_pty_command(
+        command,
+        Winsize {
+            ws_row: 24,
+            ws_col: 600,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        },
+    );
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = master_reader.read_to_end(&mut bytes);
+        bytes
+    });
+
+    thread::sleep(Duration::from_millis(500));
+    master_writer.write_all(b"\x1b").unwrap();
+    master_writer.flush().unwrap();
+    drop(master_writer);
+    let output = finish_pty_command(child, reader);
+
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(stderr.contains("KiB") || stderr.contains("MiB"), "{stderr}");
+}
+
+#[test]
+fn clean_applied_with_nothing_selected_removes_nothing() {
+    let repo = Repository::new();
+
+    let output = run_clean(&repo.main, &[], b"\r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(stderr.contains("No worktrees were selected."), "{stderr}");
+    assert!(stderr.contains("Nothing removed."), "{stderr}");
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn clean_declined_at_the_confirmation_removes_nothing() {
+    let repo = Repository::new();
+
+    let output = run_clean(&repo.main, &[], b" \rn");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(stderr.contains("Cleanup declined."), "{stderr}");
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn clean_removes_the_selected_worktree_and_reports_the_space_reclaimed() {
+    let repo = Repository::new();
+
+    let output = run_clean(&repo.main, &[], b" \ry");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(
+        stderr.contains("Removed 1 worktree; branches retained."),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Reclaimed"), "{stderr}");
+    assert!(!repo.linked.exists(), "{stderr}");
+    assert!(has_branch(&repo.main, "feature"), "{stderr}");
+}
+
+#[test]
+fn clean_selects_every_visible_worktree_with_ctrl_a() {
+    let repo = Repository::new();
+    let second = repo.add_worktree("second-clean", "second-clean");
+
+    let output = run_clean(&repo.main, &[], b"\x01\ry");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(
+        stderr.contains("Removed 2 worktrees; branches retained."),
+        "{stderr}"
+    );
+    assert!(!repo.linked.exists(), "{stderr}");
+    assert!(!second.exists(), "{stderr}");
+    assert!(has_branch(&repo.main, "feature"), "{stderr}");
+    assert!(has_branch(&repo.main, "second-clean"), "{stderr}");
+}
+
+#[test]
+fn clean_confirmation_names_the_worktrees_whose_changes_are_discarded() {
+    let repo = Repository::new();
+    fs::write(repo.linked.join("dirty.txt"), "dirty\n").unwrap();
+
+    let output = run_clean(&repo.main, &[], b" \ry");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(
+        stderr.contains("Removing feature discards uncommitted changes."),
+        "{stderr}"
+    );
+    assert!(!repo.linked.exists(), "{stderr}");
+}
+
+#[test]
+fn clean_dry_run_previews_the_plan_without_removing_anything() {
+    let repo = Repository::new();
+
+    let output = run_clean(&repo.main, &["--dry-run"], b" \ry");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(stderr.contains("Would reclaim"), "{stderr}");
+    assert!(
+        stderr.contains("Would remove worktree for feature"),
+        "{stderr}"
+    );
+    assert!(repo.linked.exists(), "{stderr}");
+}
+
+#[test]
+fn clean_removing_the_current_worktree_writes_the_primary_path_to_stdout() {
+    let repo = Repository::new();
+
+    let output = run_clean(&repo.linked, &[], b" \ry");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", repo.main.canonicalize().unwrap().display())
+    );
+    assert!(!repo.linked.exists(), "{}", output.stderr);
+}
+
+#[test]
+fn clean_refuses_to_select_a_worktree_that_cannot_be_removed() {
+    let repo = Repository::new();
+    git(
+        &repo.main,
+        [
+            "worktree",
+            "lock",
+            repo.linked.to_str().unwrap(),
+            "--reason",
+            "pinned",
+        ],
+    );
+
+    let output = run_clean(&repo.main, &[], b" \r");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(stderr.contains("locked: pinned"), "{stderr}");
+    assert!(stderr.contains("No worktrees were selected."), "{stderr}");
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn clean_picker_fits_a_narrow_terminal() {
+    let repo = Repository::new();
+    repo.add_worktree(
+        &format!("worktree-{}", "very-long-path-segment-".repeat(8)),
+        "long-path-clean",
+    );
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .arg("clean")
+        .current_dir(&repo.main)
+        .env("NO_COLOR", "1");
+
+    let terminal_columns = 40;
+    let output = run_pty_command_with_size(command, b"\x1b", 24, terminal_columns);
+
+    assert!(!output.status.success());
+    let frame_start = output
+        .stderr
+        .rfind("◆  Select")
+        .expect("the frame should retain its header");
+    let frame_end = output.stderr[frame_start..]
+        .find("\x1b[?25h")
+        .map_or(output.stderr.len(), |offset| frame_start + offset);
+    let frame = &output.stderr[frame_start..frame_end];
+    assert!(frame.contains("└"), "{frame}");
+    assert!(
+        frame.lines().all(|line| {
+            unicode_width::UnicodeWidthStr::width(console::strip_ansi_codes(line).as_ref())
+                <= usize::from(terminal_columns)
+        }),
+        "{frame}"
+    );
+}
+
+#[test]
+fn remove_reports_every_target_when_a_batch_stops_partway() {
+    let repo = Repository::new();
+    let holder = repo.temp.path().join("holder");
+    fs::create_dir(&holder).unwrap();
+    let second = holder.join("second-remove");
+    add_worktree(&repo.main, &second, "second-remove");
+    // Clearing the second worktree needs write access to a directory that
+    // denies it, so Git fails after the first target is already gone.
+    fs::set_permissions(&holder, fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(holder.join("probe"), "probe").is_ok() {
+        // A privileged run writes anyway, which is not what this asserts.
+        fs::set_permissions(&holder, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["remove", "feature", "second-remove"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+
+    fs::set_permissions(&holder, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!output.status.success());
+    let stderr = console::strip_ansi_codes(&String::from_utf8_lossy(&output.stderr)).into_owned();
+    assert!(stderr.contains("feature: removed"), "{stderr}");
+    assert!(stderr.contains("second-remove: failed"), "{stderr}");
+    assert!(stderr.contains("Rerun pando remove"), "{stderr}");
+    assert!(!repo.linked.exists(), "{stderr}");
+}
+
+#[test]
+fn clean_ctrl_s_cycles_the_sort_through_size() {
+    let repo = Repository::new();
+    repo.add_worktree("second-sort", "second-sort");
+
+    // Git order, branch A-Z, last commit newest-first, path A-Z, then size.
+    let output = run_clean(&repo.main, &[], b"\x13\x13\x13\x13\x1b");
+
+    assert!(!output.status.success());
+    let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(stderr.contains("(Git order)"), "{stderr}");
+    assert!(stderr.contains("(branch A-Z)"), "{stderr}");
+    assert!(stderr.contains("(size largest-first)"), "{stderr}");
+    assert!(stderr.contains("SIZE ↓"), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+}

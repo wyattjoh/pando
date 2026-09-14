@@ -3,6 +3,11 @@ use unicode_width::UnicodeWidthStr;
 use crate::{Row, SortMode, sorted_row_indices, ui};
 
 const LAST_COMMIT_WIDTH: usize = 16;
+const SIZE_HEADER: &str = "SIZE";
+/// Wide enough for every realistic value, so the column cannot shift width as
+/// background measurements land and re-lay the rows out under the cursor.
+const SIZE_WIDTH: usize = 9;
+const SIZE_SORTED_HEADER: &str = "SIZE ↓";
 
 #[must_use]
 pub fn table(rows: &[Row], sort: SortMode) -> String {
@@ -48,6 +53,64 @@ pub fn menu_header(rows: &[&Row], sort: SortMode) -> String {
         pad(last_commit_header(sort), LAST_COMMIT_WIDTH),
         path_header(sort),
     )
+}
+
+/// Renders the cleanup picker's column header and menu labels together.
+///
+/// `sizes` is parallel to `rows` and already formatted; `order` is the display
+/// order the caller resolved, which path abbreviation follows so the relative
+/// anchors match the order the user actually reads. `sort` is `None` when the
+/// caller ordered by size, which no shared [`SortMode`] expresses — size is
+/// measured per run and never a configurable default.
+///
+/// Header and labels are produced in one call because they must agree on the
+/// branch and size column widths, which depend on the data in both.
+#[must_use]
+pub fn sized_menu(
+    rows: &[&Row],
+    sizes: &[String],
+    order: &[usize],
+    sort: Option<SortMode>,
+) -> (String, Vec<String>) {
+    let branch_width = branch_width(rows);
+    let size_header = if sort.is_none() {
+        SIZE_SORTED_HEADER
+    } else {
+        SIZE_HEADER
+    };
+    let size_width = sizes
+        .iter()
+        .map(|size| UnicodeWidthStr::width(size.as_str()))
+        .max()
+        .unwrap_or(0)
+        .max(UnicodeWidthStr::width(size_header))
+        .max(SIZE_WIDTH);
+    let paths = display_paths_in_order(rows, order);
+    let header = format!(
+        "{}  {}  {}  {}",
+        pad(sort.map_or("BRANCH", branch_header), branch_width),
+        pad(
+            sort.map_or("LAST COMMIT AT", last_commit_header),
+            LAST_COMMIT_WIDTH
+        ),
+        pad_start(size_header, size_width),
+        sort.map_or("PATH", path_header),
+    );
+    let labels = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            format!(
+                "{}  {}  {}  {}",
+                styled_branch_label(row, branch_width, true),
+                ui::interactive(ui::muted_style())
+                    .apply_to(pad(&row.human_last_commit_at(), LAST_COMMIT_WIDTH)),
+                ui::interactive(ui::muted_style()).apply_to(pad_start(&sizes[index], size_width)),
+                ui::interactive(ui::worktree_data_style()).apply_to(&paths[index]),
+            )
+        })
+        .collect();
+    (header, labels)
 }
 
 /// Styles a commit message for the rail: bold subject, plain body.
@@ -163,9 +226,13 @@ fn marked_branch_label(row: &Row) -> String {
 }
 
 fn display_paths(rows: &[&Row], sort: SortMode) -> Vec<String> {
+    display_paths_in_order(rows, &sorted_row_indices(rows, sort))
+}
+
+fn display_paths_in_order(rows: &[&Row], order: &[usize]) -> Vec<String> {
     let mut paths = vec![String::new(); rows.len()];
     let mut path_anchor = None;
-    for index in sorted_row_indices(rows, sort) {
+    for index in order.iter().copied() {
         let row = rows[index];
         paths[index] = table_path(row.path.as_deref(), path_anchor);
         if relative_to_anchor(row.path.as_deref(), path_anchor).is_none() {
@@ -213,4 +280,9 @@ fn abbreviated_path(path: Option<&std::path::Path>) -> String {
 fn pad(value: &str, width: usize) -> String {
     let padding = width.saturating_sub(UnicodeWidthStr::width(value));
     format!("{value}{}", " ".repeat(padding))
+}
+
+fn pad_start(value: &str, width: usize) -> String {
+    let padding = width.saturating_sub(UnicodeWidthStr::width(value));
+    format!("{}{value}", " ".repeat(padding))
 }

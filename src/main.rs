@@ -87,6 +87,12 @@ enum Commands {
         #[arg(add = ArgValueCandidates::new(completion::remove_candidates))]
         branches: Vec<String>,
     },
+    /// Interactively select topic worktrees to remove, showing their disk size.
+    Clean {
+        /// Validate and preview without mutation.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Integrate the current topic into the configured target branch.
     Merge {
         #[arg(long)]
@@ -337,6 +343,10 @@ fn run(cli: Cli) -> Result<()> {
             dry_run: true,
             branches,
         } => pando::lifecycle::remove_dry_run(&branches, force),
+        Commands::Clean { .. } if json => anyhow::bail!(
+            "clean only supports human output; use `pando remove <branch>` for scripted removal"
+        ),
+        Commands::Clean { dry_run } => pando::clean::run(dry_run),
         Commands::Merge {
             yolo: true,
             dry_run: false,

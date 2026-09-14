@@ -446,7 +446,9 @@ fn human_presentation_preserves_git_diagnostics_and_timed_streaming() {
         .expect("journaled merge source");
     let git = fs::read_to_string(source_root.join("git.rs")).expect("git source");
 
-    let remove = without_whitespace(braced_item(&lifecycle, "pub fn remove("));
+    // `pub fn remove` delegates; `remove_reported` owns the shared human rail
+    // for both `pando remove` and `pando clean`.
+    let remove = without_whitespace(braced_item(&lifecycle, "fn remove_reported("));
     let render = remove
         .find("render_removal_git_diagnostics(&outcome)")
         .expect("human removal must render captured Git diagnostics");

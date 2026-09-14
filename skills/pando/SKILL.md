@@ -1,6 +1,6 @@
 ---
 name: pando
-description: 'Kickstart usage of the `pando` CLI — inspecting, creating, and navigating Git worktrees. Triggers on "pando", "worktrees", "pando switch", "pando create", "pando commit", "pando get", "pando trust", "pando merge", "pando install", ".pando.yaml", ".pando.local.yaml", "pando config.yaml".'
+description: 'Kickstart usage of the `pando` CLI — inspecting, creating, and navigating Git worktrees. Triggers on "pando", "worktrees", "pando switch", "pando create", "pando commit", "pando get", "pando trust", "pando clean", "pando merge", "pando install", ".pando.yaml", ".pando.local.yaml", "pando config.yaml".'
 allowed-tools: Bash, Read
 effort: medium
 ---
@@ -23,7 +23,7 @@ often "work":
 |---|---|---|
 | `git worktree add ...` / `git checkout -b ...` | `pando switch [--dry-run] [branch]`, or `pando create [--dry-run] <branch>` to skip the new-branch confirmation | Applies the branch-resolution order, the configured root, and post-create hooks/trust |
 | `git commit -m "<message you wrote>"` | `pando commit --input-output json` (omit a message in the request to let the **configured generator** write it) | If the user didn't give you a message, do not invent one yourself — let the generator write it. Only supply a literal message when the user gave you that exact text |
-| `git worktree remove ...` | `pando remove [--force] [--dry-run] [branch...]` | Keeps the local branch ref; runs `pre-remove` hooks |
+| `git worktree remove ...` | `pando remove [--force] [--dry-run] [branch...]`, or `pando clean` to pick interactively | Keeps the local branch ref; runs `pre-remove` hooks |
 | `git merge ...` / `git rebase ...` onto the target | `pando merge [--no-rebase] [--no-remove] [--no-squash] [--yolo] [--dry-run]` | Resolves the configured target branch, or origin/HEAD, main, then master without fetching, squashes the topic into one generated-message commit by default, runs `pre-merge` hooks, and is crash-recoverable |
 
 `git add`/`git add --patch` are still the right tool for **staging** — only
@@ -34,8 +34,9 @@ the four operations above must go through `pando`, not `git`.
 - Binaries: `pando` and its `pd` symlink on `PATH` when installed with Homebrew or `just install` (current contract: **v0.2.0**).
 - Runtime support: Linux and macOS; macOS is supported but is not currently CI-verified while the repository is private. Source builds require Rust 1.85 or newer, and CI checks 1.85 explicitly.
 - The installed zsh integration wraps both `pando` and `pd` so
-  `switch`/`create`/`remove`/`merge` can `cd` to the destination the selected binary
-  prints. `command pando ...` and `command pd ...` bypass the wrappers.
+  `switch`/`create`/`remove`/`clean`/`merge` can `cd` to the destination the selected binary
+  prints. A shell whose integration predates `clean` needs one `pando install`
+  re-run before `clean` can `cd` out of a worktree it removed. `command pando ...` and `command pd ...` bypass the wrappers.
 - Config files the CLI reads (see `references/config.md`):
   `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml`,
   `.pando.yaml`, `.pando.local.yaml`.
@@ -98,6 +99,7 @@ for leaf contracts and approval rules.
 | `create [--fetch] [--dry-run] <branch>` | Create a worktree and print its path, without confirming a new branch | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `get <property>` | Print one current-worktree property | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `remove [--force] [--dry-run] [branches...]` | Remove one or more topic worktrees while retaining their branches | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
+| `clean [--dry-run]` | Interactively select topic worktrees to remove, showing the disk each occupies. Human output only | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `merge [--no-rebase] [--no-remove] [--no-squash] [--yolo] [--dry-run]` | Integrate the current topic into the configured target branch, squashing it into one commit by default | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `commit [-m MSG] [--stage-all] [--dry-run]` | Commit the existing index, optionally staging every change first | [`references/commands/commit.md`](references/commands/commit.md) |
 | `trust [--dry-run] <subcommand>` | Inspect, approve, or revoke hook-phase, commit-generation, squash-message-generation, or PR-generation trust. Subcommands: `status`, `reset`, `commit-status`, `commit-reset`, `commit-approve`, `merge-status`, `merge-reset`, `merge-approve`, `pr-status`, `pr-reset`, `pr-approve` | [`references/commands/trust.md`](references/commands/trust.md) |
@@ -259,6 +261,22 @@ winning over shared, then global. Set it to `github` or `tea` to require one
 adapter. Pando represents Tea draft status by adding the default `WIP:` title
 prefix for compatibility across Tea versions.
 
+### Reclaim disk by removing finished worktrees
+```zsh
+pando clean            # pick worktrees to remove, sorted and sized
+pando clean --dry-run  # same selection, printed as a plan
+```
+`clean` is `remove` with a multi-select picker: Space checks a worktree, Enter
+removes the checked set, `Ctrl-S` cycles the sort (including size,
+largest-first), and `Ctrl-A` checks everything matching the filter. The `SIZE`
+column fills in as background measurement completes; it counts allocated
+blocks, excludes nested registered worktrees, and never follows symlinks.
+Branches are always retained, `pre-remove` hooks still run, and a checked
+worktree with uncommitted changes is named in the confirmation before its
+changes are discarded. Human output only — agents use `remove` with explicit
+branch names.
+Source: `src/clean.rs`; removal contract in `src/lifecycle.rs`
+
 ### Merge a topic back into the target (squashes by default)
 ```sh
 pando merge --dry-run             # preview, including how many commits collapse
@@ -297,7 +315,7 @@ Source: README.md ("Structured JSON")
 ## References
 
 - [`references/commands/switch.md`](references/commands/switch.md) — navigation commands: `list`, `switch`, `create`, `get`
-- [`references/commands/lifecycle.md`](references/commands/lifecycle.md) — `remove`, `merge`
+- [`references/commands/lifecycle.md`](references/commands/lifecycle.md) — `remove`, `clean`, `merge`
 - [`references/commands/commit.md`](references/commands/commit.md) — `commit`, including the JSON request/response contract
 - [`references/commands/trust.md`](references/commands/trust.md) — `trust` and its subcommands
 - [`references/commands/install.md`](references/commands/install.md) — `install`

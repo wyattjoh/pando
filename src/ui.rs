@@ -9,9 +9,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use cliclack::{ProgressBar, Theme, ThemeState, log, outro, outro_cancel, set_theme, spinner};
 use console::{
-    Style, colors_enabled_stderr, set_colors_enabled, set_true_colors_enabled,
-    true_colors_enabled_stderr,
+    Style, colors_enabled_stderr, set_colors_enabled, set_true_colors_enabled, strip_ansi_codes,
+    true_colors_enabled_stderr, truncate_str,
 };
+use unicode_width::UnicodeWidthStr;
 
 struct PandoTheme;
 
@@ -202,11 +203,20 @@ pub fn error_style() -> Style {
 ///
 /// Returns an error when either stdin or stderr is not an interactive terminal.
 pub fn ensure_interactive(reason: &str) -> Result<()> {
-    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+    if is_interactive() {
         Ok(())
     } else {
         bail!("{reason}, but no interactive terminal is available")
     }
+}
+
+/// Reports whether both prompt input and presentation output are terminals.
+///
+/// Commands that must phrase their own guidance for a non-interactive run ask
+/// this instead of wrapping [`ensure_interactive`]'s fixed sentence.
+#[must_use]
+pub fn is_interactive() -> bool {
+    io::stdin().is_terminal() && io::stderr().is_terminal()
 }
 
 /// Maps Cliclack prompt results into user-directed or operational outcomes.
@@ -511,6 +521,50 @@ pub fn finish_open_sequence(message: impl Display) -> Result<()> {
 /// Returns an error when the terminal cannot be written.
 pub fn cancel(message: impl Display) -> Result<()> {
     outro_cancel(message).context("failed to write terminal cancellation")
+}
+
+/// Truncates styled content to `max_width` display columns with an ellipsis.
+///
+/// Shared by every custom redraw loop so no rendered line can wrap and desync
+/// the row count used to clear the previous frame.
+pub(crate) fn truncate_styled(value: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        String::new()
+    } else {
+        truncate_str(value, max_width, "…").into_owned()
+    }
+}
+
+/// Fits a rail prefix plus its content inside the terminal's display width.
+pub(crate) fn fit_line(prefix: &str, content: &str, terminal_columns: Option<usize>) -> String {
+    let Some(terminal_columns) = terminal_columns else {
+        return format!("{prefix}{content}");
+    };
+    let plain_prefix = strip_ansi_codes(prefix);
+    let prefix_width = UnicodeWidthStr::width(plain_prefix.as_ref());
+    if prefix_width >= terminal_columns {
+        return truncate_styled(content, terminal_columns);
+    }
+    let available_width = terminal_columns - prefix_width;
+    format!("{prefix}{}", truncate_styled(content, available_width))
+}
+
+/// Counts the physical rows a rendered frame occupies at the given width.
+///
+/// Clearing uses physical rows rather than logical lines so a wrapped line is
+/// fully erased instead of leaving its continuation behind.
+pub(crate) fn rendered_physical_rows(frame: &str, terminal_columns: Option<usize>) -> usize {
+    let Some(terminal_columns) = terminal_columns.filter(|columns| *columns > 0) else {
+        return frame.lines().count();
+    };
+    frame
+        .lines()
+        .map(|line| {
+            let plain = strip_ansi_codes(line);
+            let width = UnicodeWidthStr::width(plain.as_ref());
+            width.saturating_sub(1) / terminal_columns + 1
+        })
+        .sum()
 }
 
 #[cfg(test)]

@@ -1,8 +1,9 @@
-# `remove`, `merge` — topic worktree lifecycle
+# `remove`, `clean`, `merge` — topic worktree lifecycle
 
 **Never use raw `git worktree remove` or `git merge`/`git rebase` for these
 operations.** `pando remove` keeps the local branch ref and runs
-`pre-remove` hooks; `pando merge` resolves the configured target
+`pre-remove` hooks; `pando clean` is its interactive front end;
+`pando merge` resolves the configured target
 branch, runs `pre-merge` hooks, and is crash-recoverable across
 invocations — a plain `git merge` skips all of that.
 
@@ -32,6 +33,53 @@ pando remove --force feature/login    # (inferred) force-remove a dirty topic
 No literal example ships in README.md for `remove` — only prose describing
 the flags and no-argument behavior; the invocations above combine the
 documented flag/positional spellings and are marked **(inferred)**.
+
+## `pando clean [--dry-run]`
+
+```
+Usage: pando clean [OPTIONS]
+```
+
+| Flag | Purpose |
+|---|---|
+| `--dry-run` | Open the picker and confirmation as usual, then print the plan instead of mutating |
+
+An interactive multi-select front end over the same removal `pando remove`
+performs: same `pre-remove` hooks, same branch retention, same destination on
+stdout when the current worktree is among the targets. Human output only —
+`--output json` is a hard error, because agents should call `remove` with
+explicit branch names instead.
+
+The picker lists every registered worktree except the primary, with a `SIZE`
+column giving the disk each one occupies. Sizes are measured in the
+background and appear as they land; they count allocated blocks, count a file
+reached through a second hard link once, never follow symlinks, and exclude
+any nested registered worktree, so a value is the space the removal actually
+returns. `~` marks a total that skipped an unreadable subtree.
+
+| Key | Action |
+|---|---|
+| `↑`/`↓` | Move the cursor |
+| `Space` | Toggle the highlighted worktree |
+| `Ctrl-A` | Toggle every worktree matching the current filter |
+| `Ctrl-S` | Cycle Git order, branch A-Z, last commit newest-first, path A-Z, size largest-first. Size ordering is recomputed only on this key, never as a background measurement lands |
+| *(typing)* | Filter by branch, state, or path |
+| `Enter` | Remove the checked worktrees; with none checked it exits without removing anything |
+| `Esc`/`Ctrl-C` | Cancel |
+
+Locked, prunable, detached, missing, and inaccessible worktrees are listed
+with their state but cannot be checked. A worktree with uncommitted changes
+*can* be checked; the confirmation then names every such worktree before
+discarding its changes, and defaults to "no".
+
+On success the outro reports the space reclaimed. Removal is fail-fast, so a
+batch that stops partway reports each target as removed, failed, or not
+attempted, and suggests rerunning.
+
+```sh
+pando clean            # (inferred) pick worktrees to remove
+pando clean --dry-run  # (inferred) preview the same selection
+```
 
 ## `pando merge [OPTIONS]`
 

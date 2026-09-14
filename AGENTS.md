@@ -37,13 +37,14 @@ Edition 2024, MSRV 1.85. Unix-only: the code uses `std::os::unix` APIs directly 
 | `pr.rs`, `pr/provider.rs` | PR orchestration and metadata generation; pluggable `gh` and `tea` forge adapters |
 | `commit.rs` | Command-owned commit preparation, staging, generation, Git mutation, effects, diagnostics, recovery, and final outcome; human and JSON adapters share one operation |
 | `worktree_plan.rs` | Opaque topic worktree preparation and single-use execution authority shared by human and JSON `switch`/`create` adapters |
+| `clean.rs` | Interactive multi-select worktree cleanup: background disk measurement, the picker loop, and the confirmation that hands selected branches to `lifecycle` |
 | `smart.rs` | Interactive prompts and human rendering for `switch`/`create`/`get`/`trust`, plus picker presentation |
 | `squash.rs` | Merge-time branch collapse: squash planning, prompt rendering, generator subprocess, `reset --soft` plus commit |
 | `trust.rs` | Post-create hook approval: command hashing, XDG `trust.json`, atomic writes |
 | `setup.rs` | Post-create hook execution and the incomplete-setup journal |
 | `install.rs` | Managed zsh integration, marker-block rewriting, connected-agent detection, and LLM-guided global configuration |
 | `completion.rs` | Best-effort candidate producers for dynamic zsh completion of branch arguments |
-| `render.rs` | Column alignment shared by `list` output and the picker's menu labels, plus the shared styling for captured Git output and commit messages |
+| `render.rs` | Column alignment shared by `list` output, the picker's menu labels, and the cleanup picker's sized menu, plus the shared styling for captured Git output and commit messages |
 | `generator.rs` | Bounded concurrent stdin/stdout/stderr execution for commit, squash, and PR generators |
 | `hash.rs` | Hex encoding shared by `trust.rs` and `setup.rs` |
 
@@ -86,6 +87,8 @@ Shared hooks run before local hooks; the local root and default sort override th
 **One planner owns the new-branch start point.** `git::plan_new_branch_base` is the single place any interface resolves it, so human `switch`/`create`, their dry runs, and both JSON variants cannot drift. Dry runs call it with fetching disabled and report the refresh as an unattempted effect instead.
 
 **Worktree mutation consumes semantic plans.** `git::WorktreeMutation` is the only interface for creating, describing, or removing worktrees. Callers select `WorktreeSource` and `RemovalMode`; they never assemble `git worktree` arguments or expose generic stream booleans. Git remains the destination-safety authority, descriptions stay after creation callbacks, and removal always retains the branch.
+
+**`clean` is an interactive adapter over one removal.** `clean.rs` owns the multi-select picker, background disk measurement, and the confirmation; `lifecycle::remove` still owns planning, hook approval, mutation, branch retention, the destination write, and the itemized per-target report a fail-fast batch produces, so `remove` and `clean` cannot drift. Measurement is presentation-only: a size never authorizes, blocks, or reorders a removal, and every worker is cancelled and joined before mutation begins so no walk is live while Git deletes a tree. Size ordering is recomputed only on the sort key, never when a measurement lands, so rows cannot shuffle under the cursor mid-selection. Size is deliberately not a `SortMode`: it is measured per run and must never become a configurable `default-sort`. The picker reads keys on demand through a request channel instead of parking a thread inside a terminal read, which is what leaves stdin free for the confirmation prompt that follows — do not replace it with a free-running reader. Sizes count allocated blocks, count a hard-linked file once, never follow symlinks, and exclude nested registered worktrees. `clean` has no JSON leaf; `--output json` is refused and scripted removal goes through `remove`.
 
 **In-flight observations are presentation-only.** Hook, setup, journaled merge, and install execution emit concrete crate-private observation enums to human or captured delivery. Observations may announce steps, progress, subprocess text, or generated messages, but they never carry effects, recovery, destinations, approvals, transitions, or final errors. Delivery and replay are best-effort: rendering or relay failures cannot authorize mutation, classify the command, or replace its result. The command's final typed outcome alone owns result/error, effects, diagnostics, recovery, destination, and adapter exit/serialization decisions. Do not add a generic observer/workflow trait or let a presentation policy change the final outcome shape.
 

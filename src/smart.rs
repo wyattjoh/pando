@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use cliclack::{confirm, input, select};
-use console::{Key, Term, strip_ansi_codes, truncate_str};
+use console::{Key, Term, strip_ansi_codes};
 use siphasher::sip::SipHasher13;
 use unicode_width::UnicodeWidthStr;
 
@@ -885,7 +885,7 @@ impl WorktreePicker {
             let displayed_start = self.displayed_start(&visible);
             let displayed = self.displayed(&visible, displayed_start);
             let frame = self.render(displayed, displayed_start, visible.len());
-            term.clear_last_lines(rendered_physical_rows(
+            term.clear_last_lines(ui::rendered_physical_rows(
                 &previous_frame,
                 self.terminal_columns,
             ))?;
@@ -1183,44 +1183,13 @@ impl WorktreePicker {
     fn write_compact_line(&self, output: &mut String, content: &str) {
         let content = self.terminal_columns.map_or_else(
             || content.to_owned(),
-            |columns| truncate_styled(content, columns),
+            |columns| ui::truncate_styled(content, columns),
         );
         writeln!(output, "{content}").expect("writing to a string cannot fail");
     }
 
     fn fit_line(&self, prefix: &str, content: &str) -> String {
-        let Some(terminal_columns) = self.terminal_columns else {
-            return format!("{prefix}{content}");
-        };
-        let plain_prefix = strip_ansi_codes(prefix);
-        let prefix_width = UnicodeWidthStr::width(plain_prefix.as_ref());
-        if prefix_width >= terminal_columns {
-            return truncate_styled(content, terminal_columns);
-        }
-        let available_width = terminal_columns - prefix_width;
-        format!("{prefix}{}", truncate_styled(content, available_width))
-    }
-}
-
-fn rendered_physical_rows(frame: &str, terminal_columns: Option<usize>) -> usize {
-    let Some(terminal_columns) = terminal_columns.filter(|columns| *columns > 0) else {
-        return frame.lines().count();
-    };
-    frame
-        .lines()
-        .map(|line| {
-            let plain = strip_ansi_codes(line);
-            let width = UnicodeWidthStr::width(plain.as_ref());
-            width.saturating_sub(1) / terminal_columns + 1
-        })
-        .sum()
-}
-
-fn truncate_styled(value: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        String::new()
-    } else {
-        truncate_str(value, max_width, "…").into_owned()
+        ui::fit_line(prefix, content, self.terminal_columns)
     }
 }
 
@@ -1516,7 +1485,7 @@ mod tests {
 
     use super::{
         PickerChoice, PickerItem, PickerView, WorktreePicker, picker_help, picker_viewport_rows,
-        port_for_branch, rendered_physical_rows,
+        port_for_branch,
     };
     use crate::{
         Condition, SortMode, Worktree, WorktreeKind,
@@ -1736,7 +1705,7 @@ mod tests {
 
     #[test]
     fn picker_counts_wrapped_physical_rows_at_the_current_width() {
-        assert_eq!(rendered_physical_rows("12345\n12\n", Some(4)), 3);
+        assert_eq!(ui::rendered_physical_rows("12345\n12\n", Some(4)), 3);
     }
 
     #[test]
