@@ -34,7 +34,7 @@ use crate::{
 };
 
 const CLEAN_FRAME_ROWS: usize = 6;
-const CHOICE_PREFIX: &str = "      ";
+const CHOICE_PREFIX: &str = "    ";
 
 /// Runs the cleanup picker and removes whatever the user confirms.
 ///
@@ -665,15 +665,15 @@ impl CleanPicker {
     fn render_choice(&self, output: &mut String, index: usize, label: &str, position: usize) {
         let candidate = &self.candidates[index];
         let focused = position == self.cursor;
-        let cursor = if focused {
-            ui::interactive(ui::accent_style()).apply_to("●")
-        } else {
-            ui::interactive(ui::muted_style()).apply_to("○")
-        };
-        let checkbox = match (candidate.selectable(), candidate.selected) {
-            (false, _) => ui::interactive(ui::muted_style()).apply_to("✕"),
-            (true, true) => ui::interactive(ui::accent_style().bold()).apply_to("◼"),
-            (true, false) => ui::interactive(ui::muted_style()).apply_to("◻"),
+        // One glyph carries both cursor and checked state, as Cliclack's own
+        // multiselect does: filled when checked, accented when it is the
+        // cursor, muted otherwise. A second cursor column would only repeat
+        // what the highlighted label already says.
+        let checkbox = match (candidate.selectable(), candidate.selected, focused) {
+            (false, _, _) => ui::interactive(ui::muted_style()).apply_to("✕"),
+            (true, true, _) => ui::interactive(ui::accent_style().bold()).apply_to("◼"),
+            (true, false, true) => ui::interactive(ui::worktree_data_style()).apply_to("◻"),
+            (true, false, false) => ui::interactive(ui::muted_style()).apply_to("◻"),
         };
         let current = if candidate.worktree.current {
             ui::interactive(ui::accent_style().bold())
@@ -697,10 +697,15 @@ impl CleanPicker {
             )
             .expect("writing to a string cannot fail");
         }
-        let prefix = format!(
-            "{}  {cursor} {checkbox} {current} ",
-            ui::interactive(ui::accent_style()).apply_to("│"),
-        );
+        // The cursor rides the rail rather than taking a column of its own, so
+        // it stays distinguishable by shape on a terminal without color, where
+        // both unchecked states would otherwise render an identical box.
+        let rail = if focused {
+            ui::interactive(ui::accent_style().bold()).apply_to("❯")
+        } else {
+            ui::interactive(ui::accent_style()).apply_to("│")
+        };
+        let prefix = format!("{rail}  {checkbox} {current} ");
         self.write_line(output, &prefix, &content);
     }
 

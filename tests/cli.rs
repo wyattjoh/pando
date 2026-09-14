@@ -11944,3 +11944,39 @@ fn remove_reports_progress_and_size_for_every_target() {
     assert!(!repo.linked.exists(), "{plain}");
     assert!(!second.exists(), "{plain}");
 }
+
+#[test]
+fn clean_puts_the_cursor_on_the_rail_and_state_in_one_column() {
+    let repo = Repository::new();
+    repo.add_worktree("second-cursor", "second-cursor");
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .arg("clean")
+        .current_dir(&repo.main)
+        .env("NO_COLOR", "1");
+
+    // Check the first worktree, move the cursor to the second, then cancel.
+    let output = run_pty_command(command, b" \x1b[B\x1b");
+
+    assert!(!output.status.success());
+    let frame_start = output
+        .stderr
+        .rfind("◆  Select")
+        .expect("the frame should retain its header");
+    let frame_end = output.stderr[frame_start..]
+        .find("\x1b[?25h")
+        .map_or(output.stderr.len(), |offset| frame_start + offset);
+    let frame = &output.stderr[frame_start..frame_end];
+    // One glyph carries checked state; the cursor rides the rail, so both stay
+    // legible with color disabled.
+    assert!(
+        frame.lines().any(|line| line.starts_with("│  ◼")),
+        "{frame}"
+    );
+    assert!(
+        frame.lines().any(|line| line.starts_with("❯  ◻")),
+        "{frame}"
+    );
+    assert!(!frame.contains('●'), "{frame}");
+    assert!(!frame.contains('○'), "{frame}");
+}

@@ -64,6 +64,10 @@ reached through a second hard link once, never follow symlinks, and exclude
 any nested registered worktree, so a value is the space the removal actually
 returns. `~` marks a total that skipped an unreadable subtree.
 
+Each row carries one state glyph — `◼` checked, `◻` unchecked, `✕` not
+removable — and the cursor rides the rail as `❯`, so both stay legible with
+color disabled.
+
 | Key | Action |
 |---|---|
 | `↑`/`↓` | Move the cursor |
