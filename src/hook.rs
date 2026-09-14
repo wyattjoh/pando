@@ -31,6 +31,14 @@ pub(crate) enum Observation {
         label: String,
         command: String,
     },
+    /// One timed step whose terminal state a later observation selects.
+    ProgressStarted {
+        starting: String,
+        completed: String,
+        failed: String,
+    },
+    ProgressCompleted,
+    ProgressFailed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,10 +47,16 @@ enum Delivery {
     Captured,
 }
 
-#[derive(Debug)]
+struct ActiveProgress {
+    progress: ui::TimedProgress,
+    completed: String,
+    failed: String,
+}
+
 pub(crate) struct Observations {
     delivery: Delivery,
     events: Vec<Observation>,
+    active: Option<ActiveProgress>,
 }
 
 impl Observations {
@@ -51,6 +65,7 @@ impl Observations {
         Self {
             delivery: Delivery::Human,
             events: Vec::new(),
+            active: None,
         }
     }
 
@@ -59,6 +74,7 @@ impl Observations {
         Self {
             delivery: Delivery::Captured,
             events: Vec::new(),
+            active: None,
         }
     }
 
@@ -69,9 +85,65 @@ impl Observations {
 
     pub(crate) fn emit(&mut self, observation: Observation) {
         if self.is_human() {
-            let _ = render_observation(&observation);
+            self.render(&observation);
         }
         self.events.push(observation);
+    }
+
+    /// Opens one timed step whose terminal state a later observation selects.
+    pub(crate) fn progress_started(&mut self, starting: &str, completed: &str, failed: &str) {
+        self.emit(Observation::ProgressStarted {
+            starting: starting.into(),
+            completed: completed.into(),
+            failed: failed.into(),
+        });
+    }
+
+    pub(crate) fn progress_completed(&mut self) {
+        self.emit(Observation::ProgressCompleted);
+    }
+
+    pub(crate) fn progress_failed(&mut self) {
+        self.emit(Observation::ProgressFailed);
+    }
+
+    fn render(&mut self, observation: &Observation) {
+        match observation {
+            Observation::StepStarted {
+                phase,
+                label,
+                command,
+            } => {
+                let _ = ui::step(format!("Running {} {label}:\n{command}", phase.key()));
+            }
+            Observation::ProgressStarted {
+                starting,
+                completed,
+                failed,
+            } => {
+                if self.active.is_none() {
+                    if let Ok(progress) = ui::TimedProgress::start(true, starting) {
+                        self.active = Some(ActiveProgress {
+                            progress,
+                            completed: completed.clone(),
+                            failed: failed.clone(),
+                        });
+                    }
+                }
+            }
+            Observation::ProgressCompleted => {
+                if let Some(active) = self.active.take() {
+                    let _ = active
+                        .progress
+                        .complete(&active.completed, ui::Completion::Step);
+                }
+            }
+            Observation::ProgressFailed => {
+                if let Some(active) = self.active.take() {
+                    let _ = active.progress.fail(&active.failed);
+                }
+            }
+        }
     }
 
     fn relay(&self) -> Option<fs::File> {
@@ -81,19 +153,15 @@ impl Observations {
     }
 
     /// Completes infallible, presentation-only observation delivery.
+    ///
+    /// A step still open here never completed, so it closes as failed rather
+    /// than leaving a spinner animating over whatever the command prints next.
     #[must_use]
-    pub(crate) fn finish(self) -> Vec<Observation> {
+    pub(crate) fn finish(mut self) -> Vec<Observation> {
+        if let Some(active) = self.active.take() {
+            let _ = active.progress.fail(&active.failed);
+        }
         self.events
-    }
-}
-
-fn render_observation(observation: &Observation) -> Result<()> {
-    match observation {
-        Observation::StepStarted {
-            phase,
-            label,
-            command,
-        } => ui::step(format!("Running {} {label}:\n{command}", phase.key())),
     }
 }
 

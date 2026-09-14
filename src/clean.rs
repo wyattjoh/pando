@@ -13,12 +13,10 @@
 use std::{
     collections::HashSet,
     env,
-    fmt::{self, Write as _},
-    fs,
+    fmt::Write as _,
     io::{self, Write as _},
     num::NonZeroUsize,
-    os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -32,11 +30,9 @@ use console::{Key, Term, strip_ansi_codes};
 
 use crate::{
     Condition, Row, SortMode, Worktree, WorktreeKind, config::EffectiveConfig,
-    git::RepositoryObservation, lifecycle, render, sorted_row_indices, ui,
+    git::RepositoryObservation, lifecycle, render, size, size::Size, sorted_row_indices, ui,
 };
 
-/// `st_blocks` is reported in 512-byte units on every supported platform.
-const BLOCK_SIZE: u64 = 512;
 const CLEAN_FRAME_ROWS: usize = 6;
 const CHOICE_PREFIX: &str = "      ";
 
@@ -115,7 +111,7 @@ fn apply(picker: &CleanPicker, selected: &[usize], dry_run: bool) -> Result<()> 
     // A worktree that turned dirty after observation fails preflight instead,
     // because the confirmation the user answered never named it.
     let force = chosen.iter().any(|candidate| candidate.row.is_dirty());
-    let reclaim = Reclaim::of(&chosen);
+    let reclaim = size::Total::of(chosen.iter().map(|candidate| &candidate.size));
     let dirty: Vec<&str> = chosen
         .iter()
         .filter(|candidate| candidate.row.is_dirty())
@@ -144,7 +140,24 @@ fn apply(picker: &CleanPicker, selected: &[usize], dry_run: bool) -> Result<()> 
         ui::info(format!("Would reclaim {reclaim}."))?;
         return lifecycle::remove_dry_run(&branches, force);
     }
-    lifecycle::remove_summarized(&branches, force, Some(&format!("Reclaimed {reclaim}.")))
+    // The picker already walked these trees, so removal reuses the measurements
+    // instead of paying for a second walk of the same directories.
+    let measured: Vec<(String, Size)> = chosen
+        .iter()
+        .filter_map(|candidate| {
+            candidate
+                .branch()
+                .map(|branch| (branch.to_owned(), candidate.size))
+        })
+        .collect();
+    lifecycle::remove_reported(
+        &branches,
+        force,
+        &lifecycle::RemovalReport {
+            rerun: "pando clean",
+            measured: &measured,
+        },
+    )
 }
 
 fn join_labels(labels: &[&str]) -> String {
@@ -217,98 +230,6 @@ fn blocker(worktree: &Worktree) -> Option<String> {
     None
 }
 
-/// How much disk one worktree occupies.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Size {
-    /// Not measured yet; a worker is still walking the directory.
-    Pending,
-    Measured {
-        bytes: u64,
-        /// Whether an unreadable subtree was skipped, so the total under-reports.
-        partial: bool,
-    },
-    /// The directory could not be read at all.
-    Unavailable,
-}
-
-impl Size {
-    const fn bytes(self) -> Option<u64> {
-        match self {
-            Self::Measured { bytes, .. } => Some(bytes),
-            Self::Pending | Self::Unavailable => None,
-        }
-    }
-}
-
-impl fmt::Display for Size {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Pending => formatter.write_str("…"),
-            Self::Unavailable => formatter.write_str("—"),
-            Self::Measured { bytes, partial } => {
-                if *partial {
-                    formatter.write_str("~")?;
-                }
-                formatter.write_str(&format_bytes(*bytes))
-            }
-        }
-    }
-}
-
-/// The total a confirmed cleanup expects to return to the filesystem.
-struct Reclaim {
-    bytes: u64,
-    /// Whether any selected worktree was unmeasured or only partly readable.
-    approximate: bool,
-}
-
-impl Reclaim {
-    fn of(selected: &[&Candidate]) -> Self {
-        let mut bytes: u64 = 0;
-        let mut approximate = false;
-        for candidate in selected {
-            match candidate.size {
-                Size::Measured {
-                    bytes: measured,
-                    partial,
-                } => {
-                    bytes = bytes.saturating_add(measured);
-                    approximate |= partial;
-                }
-                Size::Pending | Size::Unavailable => approximate = true,
-            }
-        }
-        Self { bytes, approximate }
-    }
-}
-
-impl fmt::Display for Reclaim {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.approximate {
-            formatter.write_str("~")?;
-        }
-        formatter.write_str(&format_bytes(self.bytes))
-    }
-}
-
-const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-
-// The scaled value is only ever rendered to one decimal place, so the precision
-// lost converting a byte count to a float can never change what is displayed.
-#[allow(clippy::cast_precision_loss)]
-fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    format!("{value:.1} {}", UNITS[unit])
-}
-
 /// What the picker is waiting on: the next keystroke or the next measurement.
 enum Event {
     Key(io::Result<Key>),
@@ -354,7 +275,7 @@ impl Sizer {
                         if cancel.load(Ordering::Relaxed) {
                             break;
                         }
-                        let Some(size) = measure(path, &excluded, &cancel) else {
+                        let Some(size) = size::measure(path, &excluded, &cancel) else {
                             break;
                         };
                         if events.send(Event::Measured(*index, size)).is_err() {
@@ -374,60 +295,6 @@ impl Sizer {
             let _ = worker.join();
         }
     }
-}
-
-/// Sums the disk a worktree occupies, excluding nested registered worktrees.
-///
-/// Allocated blocks rather than apparent file lengths, so the total is the space
-/// a removal actually returns; a file reached through a second hard link is
-/// counted once; symlinks are never followed. Unreadable subtrees are skipped
-/// and reported as a partial total rather than failing the measurement.
-///
-/// Returns `None` when cancellation interrupted the walk, which discards the
-/// incomplete total instead of presenting it.
-fn measure(root: &Path, excluded: &HashSet<PathBuf>, cancel: &AtomicBool) -> Option<Size> {
-    let Ok(metadata) = fs::symlink_metadata(root) else {
-        return Some(Size::Unavailable);
-    };
-    if !metadata.is_dir() {
-        return Some(Size::Unavailable);
-    }
-    let mut bytes = metadata.blocks().saturating_mul(BLOCK_SIZE);
-    let mut partial = false;
-    let mut linked: HashSet<(u64, u64)> = HashSet::new();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        let Ok(entries) = fs::read_dir(&directory) else {
-            partial = true;
-            continue;
-        };
-        for entry in entries {
-            if cancel.load(Ordering::Relaxed) {
-                return None;
-            }
-            let Ok(entry) = entry else {
-                partial = true;
-                continue;
-            };
-            // `DirEntry::metadata` does not traverse a symlink, so a link is
-            // counted as the link itself and never as the tree it points at.
-            let Ok(metadata) = entry.metadata() else {
-                partial = true;
-                continue;
-            };
-            let path = entry.path();
-            if metadata.is_dir() {
-                if excluded.contains(&path) {
-                    continue;
-                }
-                pending.push(path);
-            } else if metadata.nlink() > 1 && !linked.insert((metadata.dev(), metadata.ino())) {
-                continue;
-            }
-            bytes = bytes.saturating_add(metadata.blocks().saturating_mul(BLOCK_SIZE));
-        }
-    }
-    Some(Size::Measured { bytes, partial })
 }
 
 /// Reads one key per request so no thread holds the terminal between frames.
@@ -896,123 +763,8 @@ fn clean_help() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashSet,
-        fs,
-        os::unix::fs::{PermissionsExt, symlink},
-        path::PathBuf,
-        sync::atomic::AtomicBool,
-    };
-
-    use super::{CleanSort, Size, format_bytes, join_labels, measure};
+    use super::{CleanSort, join_labels};
     use crate::SortMode;
-
-    fn measured(root: &std::path::Path, excluded: &HashSet<PathBuf>) -> Size {
-        measure(root, excluded, &AtomicBool::new(false))
-            .expect("an uncancelled walk reports a size")
-    }
-
-    #[test]
-    fn byte_counts_scale_to_binary_units_with_one_decimal() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(1023), "1023 B");
-        assert_eq!(format_bytes(1024), "1.0 KiB");
-        assert_eq!(format_bytes(1024 * 1024 * 3 / 2), "1.5 MiB");
-        assert_eq!(format_bytes(1024 * 1024 * 1024 * 2), "2.0 GiB");
-    }
-
-    #[test]
-    fn a_file_reached_through_two_hard_links_is_counted_once() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        fs::write(root.join("original"), vec![0u8; 128 * 1024]).unwrap();
-        let single = measured(root, &HashSet::new());
-
-        fs::hard_link(root.join("original"), root.join("linked")).unwrap();
-        let linked = measured(root, &HashSet::new());
-
-        assert_eq!(single, linked);
-    }
-
-    #[test]
-    fn a_nested_registered_worktree_is_excluded_from_its_parents_total() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let nested = root.join("worktrees").join("topic");
-        fs::create_dir_all(&nested).unwrap();
-        fs::write(nested.join("payload"), vec![0u8; 512 * 1024]).unwrap();
-
-        let including = measured(root, &HashSet::new());
-        let excluding = measured(root, &HashSet::from([nested]));
-
-        let (Size::Measured { bytes: with, .. }, Size::Measured { bytes: without, .. }) =
-            (including, excluding)
-        else {
-            panic!("both walks measure a readable directory");
-        };
-        assert!(with > without + 256 * 1024, "{with} vs {without}");
-    }
-
-    #[test]
-    fn a_symlinked_tree_is_counted_as_the_link_not_its_target() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let outside = temp.path().join("outside");
-        fs::create_dir_all(outside.join("deep")).unwrap();
-        fs::write(outside.join("deep/payload"), vec![0u8; 512 * 1024]).unwrap();
-        let worktree = root.join("worktree");
-        fs::create_dir(&worktree).unwrap();
-        let empty = measured(&worktree, &HashSet::new());
-
-        symlink(&outside, worktree.join("link")).unwrap();
-        let linked = measured(&worktree, &HashSet::new());
-
-        let (Size::Measured { bytes: before, .. }, Size::Measured { bytes: after, .. }) =
-            (empty, linked)
-        else {
-            panic!("both walks measure a readable directory");
-        };
-        assert!(after < before + 128 * 1024, "{before} vs {after}");
-    }
-
-    #[test]
-    fn an_unreadable_subtree_yields_a_partial_total() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let blocked = root.join("blocked");
-        fs::create_dir(&blocked).unwrap();
-        fs::write(blocked.join("payload"), vec![0u8; 1024]).unwrap();
-        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
-        if fs::read_dir(&blocked).is_ok() {
-            // A privileged run reads it anyway, which is not what this asserts.
-            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
-            return;
-        }
-
-        let size = measured(root, &HashSet::new());
-
-        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(
-            matches!(size, Size::Measured { partial: true, .. }),
-            "{size:?}"
-        );
-        assert_eq!(size.to_string().chars().next(), Some('~'));
-    }
-
-    #[test]
-    fn a_missing_or_non_directory_path_has_no_measurable_size() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("file");
-        fs::write(&file, "contents").unwrap();
-
-        assert_eq!(
-            measured(&temp.path().join("absent"), &HashSet::new()),
-            Size::Unavailable
-        );
-        assert_eq!(measured(&file, &HashSet::new()), Size::Unavailable);
-        assert_eq!(Size::Unavailable.to_string(), "—");
-        assert_eq!(Size::Pending.to_string(), "…");
-    }
 
     #[test]
     fn sort_cycles_through_the_shared_modes_and_back_through_size() {

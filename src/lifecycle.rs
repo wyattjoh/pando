@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     env, fs,
     fs::OpenOptions,
     io::{self, Write},
@@ -31,7 +32,7 @@ use crate::{
         self, BytePath, Diagnostic, Effect, ErrorBody, MutationClass, RecoveryAction,
         RecoveryInvocation,
     },
-    render, squash, trust, ui,
+    render, size, squash, trust, ui,
 };
 
 /// Stable, journal-aware merge state exposed to command adapters.
@@ -1443,7 +1444,7 @@ impl RemovalExecutionOutcome {
 #[allow(clippy::too_many_lines)]
 pub fn execute_removal(plan: &RemovalPlan) -> RemovalExecutionOutcome {
     let mut observations = hook::Observations::captured();
-    let outcome = execute_removal_with_observations(plan, &mut observations);
+    let outcome = execute_removal_with_observations(plan, &[], &mut observations);
     drop(observations.finish());
     outcome
 }
@@ -1453,6 +1454,7 @@ pub fn execute_removal(plan: &RemovalPlan) -> RemovalExecutionOutcome {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn execute_removal_with_observations(
     plan: &RemovalPlan,
+    sizes: &[(String, size::Size)],
     observations: &mut hook::Observations,
 ) -> RemovalExecutionOutcome {
     let mut effects = plan.effects.clone();
@@ -1590,11 +1592,20 @@ pub(crate) fn execute_removal_with_observations(
         } else {
             git::RemovalMode::Safe
         };
+        let branch = target.worktree.branch_label();
+        let scale =
+            measured_size(sizes, branch).map_or_else(String::new, |size| format!(" ({size})"));
+        observations.progress_started(
+            &format!("Removing {branch}{scale}"),
+            &format!("Removed {branch}{scale}"),
+            &format!("Failed to remove {branch}"),
+        );
         let removal =
             git::WorktreeMutation::new(&plan.primary).remove(&target.worktree.path, removal_mode);
         let captured = match removal {
             Ok(captured) => captured,
             Err(error) => {
+                observations.progress_failed();
                 targets[index].status = RemovalTargetStatus::Failed;
                 return removal_failure(
                     plan,
@@ -1609,6 +1620,7 @@ pub(crate) fn execute_removal_with_observations(
         push_removal_git_diagnostic(&mut diagnostics, "stdout", &captured.stdout);
         push_removal_git_diagnostic(&mut diagnostics, "stderr", &captured.stderr);
         if !captured.status.success() {
+            observations.progress_failed();
             targets[index].status = RemovalTargetStatus::Failed;
             return removal_failure(
                 plan,
@@ -1619,6 +1631,7 @@ pub(crate) fn execute_removal_with_observations(
                 format!("git worktree remove failed with {}", captured.status),
             );
         }
+        observations.progress_completed();
         effects[remove_effect].completed = true;
         targets[index].status = RemovalTargetStatus::Completed;
     }
@@ -1669,7 +1682,7 @@ pub(crate) fn execute_removal_request(
         });
     }
     let mut observations = hook::Observations::captured();
-    let execution = execute_removal_with_observations(&plan, &mut observations);
+    let execution = execute_removal_with_observations(&plan, &[], &mut observations);
     drop(observations.finish());
     Ok(removal_outcome(execution, input))
 }
@@ -1861,43 +1874,36 @@ pub fn remove(branches: &[String], force: bool) -> Result<()> {
 
 /// How one removal batch reports itself on the human rail.
 ///
-/// Both `remove` and `clean` drive the same execution, so the wording that
-/// differs between them travels here rather than forking the operation.
+/// Both `remove` and `clean` drive the same execution, so what differs between
+/// them travels here rather than forking the operation.
 #[derive(Clone, Copy, Debug)]
-pub struct RemovalReport<'wording> {
-    /// Appended to the success outro, such as the disk a cleanup reclaimed.
-    pub summary: Option<&'wording str>,
+pub(crate) struct RemovalReport<'caller> {
     /// The command to suggest rerunning after a batch stops partway.
-    pub rerun: &'wording str,
+    pub(crate) rerun: &'caller str,
+    /// Worktree sizes the caller already measured, keyed by branch, so an
+    /// interactive selection does not pay to walk the same trees twice.
+    pub(crate) measured: &'caller [(String, size::Size)],
 }
 
 impl RemovalReport<'static> {
-    /// Returns the wording used by `pando remove`.
-    #[must_use]
-    pub const fn for_remove() -> Self {
+    /// Returns the wording and (absent) measurements used by `pando remove`.
+    pub(crate) const fn for_remove() -> Self {
         Self {
-            summary: None,
             rerun: "pando remove",
+            measured: &[],
         }
     }
 }
 
-/// Removes worktrees, appending `report.summary` to the success outro.
+/// Removes worktrees, reporting each one's size as it goes.
 ///
 /// # Errors
 /// Returns an error when preflight, hook approval, or removal fails.
-pub fn remove_summarized(branches: &[String], force: bool, summary: Option<&str>) -> Result<()> {
-    remove_reported(
-        branches,
-        force,
-        &RemovalReport {
-            summary,
-            rerun: "pando clean",
-        },
-    )
-}
-
-fn remove_reported(branches: &[String], force: bool, report: &RemovalReport<'_>) -> Result<()> {
+pub(crate) fn remove_reported(
+    branches: &[String],
+    force: bool,
+    report: &RemovalReport<'_>,
+) -> Result<()> {
     let plan = plan_remove(branches, force)?;
     for target in &plan.targets {
         hook_approval::approve_interactively(
@@ -1906,13 +1912,14 @@ fn remove_reported(branches: &[String], force: bool, report: &RemovalReport<'_>)
             &target.config.pre_remove,
         )?;
     }
+    let sizes = measure_targets(&plan, report.measured);
     let input = RemovalInput {
         branches: branches.to_vec(),
         dry_run: false,
     };
     let mut observations = hook::Observations::human();
     let outcome = removal_outcome(
-        execute_removal_with_observations(&plan, &mut observations),
+        execute_removal_with_observations(&plan, &sizes, &mut observations),
         &input,
     );
     drop(observations.finish());
@@ -1925,16 +1932,73 @@ fn remove_reported(branches: &[String], force: bool, report: &RemovalReport<'_>)
         write_destination(&plan.primary)?;
     }
     let count = plan.targets.len();
-    let mut completed = format!(
-        "Removed {count} worktree{}; branches retained.",
+    let reclaimed = size::Total::of(sizes.iter().map(|(_, size)| size));
+    let _ = ui::finish(ui::success_style().apply_to(format!(
+        "Removed {count} worktree{}; branches retained. Reclaimed {reclaimed}.",
         plural(count)
-    );
-    if let Some(summary) = report.summary {
-        completed.push(' ');
-        completed.push_str(summary);
-    }
-    let _ = ui::finish(ui::success_style().apply_to(completed));
+    )));
     Ok(())
+}
+
+/// Measures every target the caller has not already measured.
+///
+/// Sizes are presentation-only: they name how much data each removal is about
+/// to delete and never decide whether it happens. Measuring up front rather
+/// than per target keeps one timed step in front of the removals instead of
+/// interleaving a walk between each pair of them.
+fn measure_targets(
+    plan: &RemovalPlan,
+    supplied: &[(String, size::Size)],
+) -> Vec<(String, size::Size)> {
+    let excluded: HashSet<PathBuf> = plan
+        .repository
+        .worktrees
+        .iter()
+        .map(|worktree| worktree.path.clone())
+        .collect();
+    let outstanding = plan
+        .targets
+        .iter()
+        .filter(|target| measured_size(supplied, target.worktree.branch_label()).is_none())
+        .count();
+    let progress = (outstanding > 0)
+        .then(|| {
+            ui::TimedProgress::start(
+                true,
+                &format!("Measuring {outstanding} worktree{}", plural(outstanding)),
+            )
+            .ok()
+        })
+        .flatten();
+    let sizes: Vec<(String, size::Size)> = plan
+        .targets
+        .iter()
+        .map(|target| {
+            let branch = target.worktree.branch_label().to_owned();
+            let size = measured_size(supplied, &branch)
+                .unwrap_or_else(|| size::measure_now(&target.worktree.path, &excluded));
+            (branch, size)
+        })
+        .collect();
+    if let Some(progress) = progress {
+        let total = size::Total::of(sizes.iter().map(|(_, size)| size));
+        let _ = progress.complete(
+            &format!(
+                "Measured {} worktree{} ({total})",
+                sizes.len(),
+                plural(sizes.len())
+            ),
+            ui::Completion::Step,
+        );
+    }
+    sizes
+}
+
+fn measured_size(measured: &[(String, size::Size)], branch: &str) -> Option<size::Size> {
+    measured
+        .iter()
+        .find(|(name, _)| name == branch)
+        .map(|(_, size)| *size)
 }
 
 /// Reports every target's state after a batch removal stops partway.

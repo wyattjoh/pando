@@ -1436,14 +1436,21 @@ fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
 
     assert!(removed.status.success(), "{}", removed.stderr);
     assert!(removed.stdout.is_empty());
+    // The outro names the space reclaimed, which varies per run, so the styling
+    // is asserted by the sequence that opens it rather than a whole string.
+    let styled = forced_style(pando::ui::success_style(), "\u{0}");
+    let (open, _) = styled.split_once('\u{0}').unwrap();
     assert!(
-        removed.stderr.contains(&forced_style(
-            pando::ui::success_style(),
-            "Removed 1 worktree; branches retained."
+        removed.stderr.contains(&format!(
+            "{open}Removed 1 worktree; branches retained. Reclaimed "
         )),
         "{}",
         removed.stderr
     );
+    let plain = console::strip_ansi_codes(&removed.stderr).into_owned();
+    assert!(plain.contains("Measured 1 worktree ("), "{plain}");
+    assert!(plain.contains("Removing feature ("), "{plain}");
+    assert!(plain.contains("Removed feature ("), "{plain}");
     git(&repo.main, ["show-ref", "--verify", "refs/heads/feature"]);
 
     let topic = repo.add_worktree("merge-topic", "merge-topic");
@@ -11894,4 +11901,46 @@ fn clean_ctrl_s_cycles_the_sort_through_size() {
     assert!(stderr.contains("(size largest-first)"), "{stderr}");
     assert!(stderr.contains("SIZE ↓"), "{stderr}");
     assert!(!stderr.contains("panicked"), "{stderr}");
+}
+
+#[test]
+fn clean_reuses_its_own_measurements_instead_of_walking_again() {
+    let repo = Repository::new();
+
+    let output = run_clean(&repo.main, &[], b" \ry");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    let plain = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(!plain.contains("Measuring"), "{plain}");
+    assert!(plain.contains("Removing feature ("), "{plain}");
+    assert!(plain.contains("Removed feature ("), "{plain}");
+    assert!(!repo.linked.exists(), "{plain}");
+}
+
+#[test]
+fn remove_reports_progress_and_size_for_every_target() {
+    let repo = Repository::new();
+    let second = repo.add_worktree("second-progress", "second-progress");
+    fs::write(second.join("payload"), vec![0u8; 512 * 1024]).unwrap();
+    git(&second, ["add", "payload"]);
+    git(&second, ["commit", "-m", "payload"]);
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["remove", "feature", "second-progress"])
+        .current_dir(&repo.main);
+
+    let output = run_pty_command(command, b"");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    let plain = console::strip_ansi_codes(&output.stderr).into_owned();
+    assert!(plain.contains("Measuring 2 worktrees"), "{plain}");
+    assert!(plain.contains("Removing feature ("), "{plain}");
+    assert!(plain.contains("Removing second-progress (5"), "{plain}");
+    assert!(
+        plain.contains("Removed 2 worktrees; branches retained. Reclaimed "),
+        "{plain}"
+    );
+    assert!(!repo.linked.exists(), "{plain}");
+    assert!(!second.exists(), "{plain}");
 }

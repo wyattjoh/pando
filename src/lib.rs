@@ -17,6 +17,7 @@ pub mod protocol;
 pub mod read_only;
 pub mod render;
 pub(crate) mod setup;
+pub(crate) mod size;
 pub mod smart;
 pub mod squash;
 pub mod trust;

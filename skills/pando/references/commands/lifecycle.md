@@ -24,6 +24,13 @@ only the primary worktree's byte-preserving path plus a trailing newline, so
 the zsh wrapper can `cd` there. Removing only other worktrees emits no stdout
 destination.
 
+Human runs measure every target in one timed step before mutating, then show a
+timed step per removal naming the worktree and how much data is going, and
+close with the total reclaimed. Sizes count allocated blocks, count a
+hard-linked file once, never follow symlinks, and exclude nested registered
+worktrees; `~` marks a total that skipped an unreadable subtree. JSON removal
+measures nothing and its contract is unchanged.
+
 Both JSON modes are supported; agents use versioned request mode.
 
 ```sh
@@ -72,8 +79,10 @@ with their state but cannot be checked. A worktree with uncommitted changes
 *can* be checked; the confirmation then names every such worktree before
 discarding its changes, and defaults to "no".
 
-On success the outro reports the space reclaimed. Removal is fail-fast, so a
-batch that stops partway reports each target as removed, failed, or not
+Removal then reports a timed step per worktree naming its size, and the outro
+reports the total reclaimed. The picker's measurements are handed to the
+removal, so `clean` never walks the same trees twice. Removal is fail-fast, so
+a batch that stops partway reports each target as removed, failed, or not
 attempted, and suggests rerunning.
 
 ```sh

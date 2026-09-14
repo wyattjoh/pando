@@ -98,7 +98,7 @@ for leaf contracts and approval rules.
 | `switch [-b\|--branches] [--fetch] [--dry-run] [branch]` | Choose, create, or switch to a worktree and print its path; `--branches` opens the picker in branch view, `--fetch` refreshes the fresh base ref | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `create [--fetch] [--dry-run] <branch>` | Create a worktree and print its path, without confirming a new branch | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `get <property>` | Print one current-worktree property | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
-| `remove [--force] [--dry-run] [branches...]` | Remove one or more topic worktrees while retaining their branches | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
+| `remove [--force] [--dry-run] [branches...]` | Remove one or more topic worktrees while retaining their branches, reporting each one's size as it goes | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `clean [--dry-run]` | Interactively select topic worktrees to remove, showing the disk each occupies. Human output only | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `merge [--no-rebase] [--no-remove] [--no-squash] [--yolo] [--dry-run]` | Integrate the current topic into the configured target branch, squashing it into one commit by default | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `commit [-m MSG] [--stage-all] [--dry-run]` | Commit the existing index, optionally staging every change first | [`references/commands/commit.md`](references/commands/commit.md) |
