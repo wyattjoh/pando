@@ -1,0 +1,98 @@
+{
+  "nodes": {
+    "agents": {
+      "inputs": {
+        "claude-status-line": "claude-status-line",
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1789841236,
+        "narHash": "sha256-+2PMneblDf/PacNL3V6lc6LCgEAMTPyhAuC6lbTmGAk=",
+        "ref": "refs/heads/main",
+        "rev": "6957d958a740b78bdc6c3bb6612af1f5712d6248",
+        "revCount": 51,
+        "type": "git",
+        "url": "ssh://git@github.com/wyattjoh/devenv-agents.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "ssh://git@github.com/wyattjoh/devenv-agents.git"
+      }
+    },
+    "claude-status-line": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1788553033,
+        "narHash": "sha256-l6aWPKTiZW+ZSDJZ/OhO8N8sst/15GitKxSrGAUeYp8=",
+        "owner": "wyattjoh",
+        "repo": "claude-status-line",
+        "rev": "370f4ccbcdbe3ebe6dd9ce6ed2a8941f95f9c362",
+        "type": "github"
+      },
+      "original": {
+        "owner": "wyattjoh",
+        "repo": "claude-status-line",
+        "rev": "370f4ccbcdbe3ebe6dd9ce6ed2a8941f95f9c362",
+        "type": "github"
+      }
+    },
+    "devenv": {
+      "locked": {
+        "dir": "src/modules",
+        "lastModified": 1789838634,
+        "narHash": "sha256-y2ksQa9nNo2lFEJ99uzwdLS+6xtkh8kxPu46gwOQJ6c=",
+        "owner": "cachix",
+        "repo": "devenv",
+        "rev": "87edd1692507101de0c72f602bed65ec044d92c9",
+        "type": "github"
+      },
+      "original": {
+        "dir": "src/modules",
+        "owner": "cachix",
+        "repo": "devenv",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1789370336,
+        "narHash": "sha256-6RSEDHIWQtesQKWSu5qRai8L2h4KgCgMEfJHstW99G4=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "c7def046b9a883d46974757852106483d741586f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_2": {
+      "locked": {
+        "lastModified": 1789632929,
+        "narHash": "sha256-RjR8AyvGlWuw16XRj7C1YDEw4E27ciuyPeB2nDMzgTU=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "a32edd7654519351e48e80372a928df336394670",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "agents": "agents",
+        "devenv": "devenv",
+        "nixpkgs": "nixpkgs_2"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

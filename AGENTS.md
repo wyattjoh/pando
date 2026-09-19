@@ -5,6 +5,8 @@ Guidance for coding agents working in this repository. `CLAUDE.md` is a symlink 
 ## Commands
 
 ```sh
+devenv shell          # enter the pinned Rust/tooling environment
+devenv test           # run lint and tests in that environment
 just build            # cargo build --all-features
 just lint             # cargo fmt --check, then Clippy with CI settings
 just test             # cargo test --all-features

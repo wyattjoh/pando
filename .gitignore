@@ -1,3 +1,9 @@
 /target
 .scratch
 .DS_Store
+
+# Devenv
+/.devenv*
+/.direnv/
+/devenv.local.nix
+/devenv.local.yaml

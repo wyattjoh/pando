@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+inputs:
+  nixpkgs:
+    url: github:NixOS/nixpkgs/nixpkgs-unstable
+  agents:
+    url: git+ssh://git@github.com/wyattjoh/devenv-agents.git
+imports:
+  - agents
+allowUnfree: true

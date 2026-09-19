@@ -376,14 +376,22 @@ pando list --branches
 
 ## Development
 
-Install [prek](https://prek.j178.dev/installation/) from a prebuilt binary, then install the repository's pre-commit hooks. For example, with Homebrew:
+With [Nix](https://nixos.org/) and [devenv](https://devenv.sh/) installed, enter the pinned development environment and install the repository's pre-commit hooks:
 
 ```sh
-brew install prek
+devenv shell
 just install-hooks
 ```
 
-The hooks check staged Rust changes with the same formatting and lint commands used by CI. Run the complete checks manually with:
+Alternatively, install [Rust](https://www.rust-lang.org/tools/install), [just](https://github.com/casey/just), and [prek](https://prek.j178.dev/installation/) directly. The hooks check staged Rust changes with the same formatting and lint commands used by CI.
+
+Run the complete checks with devenv:
+
+```sh
+devenv test
+```
+
+Or run the underlying recipes directly:
 
 ```sh
 just lint
