@@ -66,6 +66,8 @@ struct LocalWorktreesConfig {
     default_sort: Option<SortMode>,
     #[serde(default)]
     base: Option<BaseMode>,
+    #[serde(default)]
+    include: Option<bool>,
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,6 +80,8 @@ struct WorktreesConfig {
     default_sort: Option<SortMode>,
     #[serde(default)]
     base: Option<BaseMode>,
+    #[serde(default)]
+    include: Option<bool>,
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,6 +90,8 @@ struct TargetConfig {
     target_branch: Option<String>,
     #[serde(default)]
     base: Option<BaseMode>,
+    #[serde(default)]
+    include: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -234,6 +240,8 @@ pub struct EffectiveConfig {
     pub target_branch: Option<String>,
     pub default_sort: SortMode,
     pub base: BaseMode,
+    /// Whether creation copies the files `.worktreeinclude` selects. Defaults to true.
+    pub include: bool,
     pub post_create: Vec<HookStep>,
     pub pre_merge: Vec<HookStep>,
     pub pre_remove: Vec<HookStep>,
@@ -429,6 +437,24 @@ impl EffectiveConfig {
             .or_else(|| shared.worktrees.as_ref().and_then(|section| section.base))
             .or_else(|| global.worktrees.as_ref().and_then(|section| section.base))
             .unwrap_or_default();
+        // The include switch resolves like the base: local, shared, global.
+        let include = local
+            .worktrees
+            .as_ref()
+            .and_then(|section| section.include)
+            .or_else(|| {
+                shared
+                    .worktrees
+                    .as_ref()
+                    .and_then(|section| section.include)
+            })
+            .or_else(|| {
+                global
+                    .worktrees
+                    .as_ref()
+                    .and_then(|section| section.include)
+            })
+            .unwrap_or(true);
         let target_branch_source = if local
             .worktrees
             .as_ref()
@@ -449,6 +475,7 @@ impl EffectiveConfig {
             target_branch,
             default_sort,
             base,
+            include,
             post_create: combine(&shared_hooks, &local_hooks, HookPhase::PostCreate),
             pre_merge: combine(&shared_hooks, &local_hooks, HookPhase::PreMerge),
             pre_remove: combine(&shared_hooks, &local_hooks, HookPhase::PreRemove),

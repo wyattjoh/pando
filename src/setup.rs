@@ -36,6 +36,7 @@ pub(crate) struct SetupTarget<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Observation {
     WorktreeCreated,
+    IncludedFilesCopied(usize),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +76,11 @@ impl Observations {
         if self.is_human() {
             let _ = match observation {
                 Observation::WorktreeCreated => ui::step("Created worktree"),
+                Observation::IncludedFilesCopied(count) => ui::step(format!(
+                    "Copied {count} {} from {}",
+                    if count == 1 { "file" } else { "files" },
+                    crate::include::FILE_NAME
+                )),
             };
         }
         self.events.push(observation);

@@ -152,6 +152,17 @@ hooks:
 
 Each step runs sequentially from the new worktree root through `/bin/sh -c`. Steps inherit the ordinary environment and `PATH`, stop at the first failure, and stream both stdout and stderr to the CLI's stderr. If a hook invokes `pando`, the installed binary must already be on `PATH`.
 
+### Copying ignored files into new worktrees
+
+When `switch` or `create` makes a new worktree, Pando copies the files that a `.worktreeinclude` in the invoking worktree selects. It uses gitignore syntax, and only untracked files that Git also ignores are copied, which suits `.env` files and local configuration:
+
+```gitignore
+.env*
+config/local.yaml
+```
+
+The copy runs before post-create hooks, never overwrites a file that already exists in the new worktree, recreates symbolic links rather than following them, and needs no trust approval. It is on by default; set `worktrees.include: false` in the global, shared, or local configuration to turn it off.
+
 ### Personal per-clone overlay
 
 A `.pando.local.yaml` in the primary worktree can override placement, the merge target branch, and the new-branch base, and append personal hooks:

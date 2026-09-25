@@ -802,7 +802,8 @@
       "actions": [
         "fetch_base_ref",
         "create_branch",
-        "create_worktree"
+        "create_worktree",
+        "copy_included_files"
       ],
       "error_codes": [
         "json.invalid_request",
@@ -824,6 +825,7 @@
         "switch.approval_required",
         "switch.plan_stale",
         "switch.creation_failed",
+        "switch.include_failed",
         "switch.setup_failed",
         "switch.setup_incomplete",
         "trust.approval_required"
@@ -1584,7 +1586,8 @@
         "fetch_base_ref",
         "create_branch",
         "create_worktree",
-        "set_branch_description"
+        "set_branch_description",
+        "copy_included_files"
       ],
       "error_codes": [
         "json.invalid_request",
@@ -1607,6 +1610,7 @@
         "create.plan_stale",
         "create.creation_failed",
         "create.description_failed",
+        "create.include_failed",
         "create.setup_failed",
         "trust.approval_required"
       ],

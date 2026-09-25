@@ -25,7 +25,7 @@ use crate::{
     debug,
     git::{self, HistoryObservation, Repository, RepositoryObservation},
     hook::{self, CapturedStep, HookOutcome},
-    hook_approval, setup, ui,
+    hook_approval, include, setup, ui,
 };
 
 /// Stable error codes advertised by the switch protocol.
@@ -49,6 +49,7 @@ pub(crate) const SWITCH_ERRORS: &[&str] = &[
     "switch.approval_required",
     "switch.plan_stale",
     "switch.creation_failed",
+    "switch.include_failed",
     "switch.setup_failed",
     "switch.setup_incomplete",
     "trust.approval_required",
@@ -76,16 +77,23 @@ pub(crate) const CREATE_ERRORS: &[&str] = &[
     "create.plan_stale",
     "create.creation_failed",
     "create.description_failed",
+    "create.include_failed",
     "create.setup_failed",
     "trust.approval_required",
 ];
 
-pub(crate) const SWITCH_ACTIONS: &[&str] = &["fetch_base_ref", "create_branch", "create_worktree"];
+pub(crate) const SWITCH_ACTIONS: &[&str] = &[
+    "fetch_base_ref",
+    "create_branch",
+    "create_worktree",
+    "copy_included_files",
+];
 pub(crate) const CREATE_ACTIONS: &[&str] = &[
     "fetch_base_ref",
     "create_branch",
     "create_worktree",
     "set_branch_description",
+    "copy_included_files",
 ];
 
 /// Strict machine request for switching worktrees.
@@ -255,6 +263,8 @@ struct Plan {
     source: Source,
     config: Option<EffectiveConfig>,
     description: Option<String>,
+    /// The `.worktreeinclude` file to copy from, when enabled and present.
+    include_file: Option<PathBuf>,
     fetch: FetchIntent,
     dry_run: bool,
 }
@@ -1454,7 +1464,15 @@ pub(crate) fn execute_prepared(
             if outcome.result.is_err() {
                 let _ = progress.fail("Failed to create worktree");
             } else {
-                let _ = progress.complete("Created worktree", ui::Completion::Outro);
+                let message = match copied_count(&outcome.effects) {
+                    Some(0) | None => "Created worktree".to_owned(),
+                    Some(count) => format!(
+                        "Created worktree and copied {count} {} from {}",
+                        if count == 1 { "file" } else { "files" },
+                        include::FILE_NAME
+                    ),
+                };
+                let _ = progress.complete(&message, ui::Completion::Outro);
             }
         }
         return outcome;
@@ -1470,6 +1488,15 @@ pub(crate) fn execute_prepared(
         let _ = ui::finish("Post-create setup complete");
     }
     outcome
+}
+
+fn copied_count(effects: &[Effect]) -> Option<u64> {
+    effects
+        .iter()
+        .find(|effect| effect.action == "copy_included_files")
+        .and_then(|effect| effect.details.as_ref())
+        .and_then(|details| details.get("copied"))
+        .and_then(serde_json::Value::as_u64)
 }
 
 fn execute_registered(
@@ -1917,6 +1944,7 @@ fn execution_failure_outcome(
 ) -> OperationOutcome {
     let code = match failure.code {
         "description_failed" => "create.description_failed".into(),
+        "include_failed" => format!("{command}.include_failed"),
         "setup_failed" => format!("{command}.setup_failed"),
         "plan_stale" => format!("{command}.plan_stale"),
         _ => format!("{command}.creation_failed"),
@@ -2042,6 +2070,7 @@ fn registered_plan(
         source: Source::Registered(worktree),
         config: None,
         description,
+        include_file: None,
         fetch,
         dry_run,
     }))
@@ -2193,6 +2222,12 @@ fn plan(
         }
     }
 
+    // Included files come from the invoking worktree, where `.pando.yaml` is
+    // also read, so creation follows the checkout it branches from.
+    let include_file = config
+        .include
+        .then(|| include::include_file(&repository.current().path))
+        .flatten();
     let plan = Plan {
         intent,
         branch: branch.to_owned(),
@@ -2200,6 +2235,7 @@ fn plan(
         source,
         config: Some(config),
         description,
+        include_file,
         fetch,
         dry_run,
     };
@@ -2445,6 +2481,38 @@ fn execute(
         }
         effects[index].completed = true;
     }
+    if let Some(include_file) = plan.include_file.as_deref() {
+        let index = effects
+            .iter()
+            .position(|effect| effect.action == "copy_included_files")
+            .expect("include plans carry a copy effect");
+        effects[index].attempted = true;
+        let source = include_file
+            .parent()
+            .expect("the include file lives in its source worktree");
+        match include::copy(source, &plan.destination, include_file) {
+            Ok(copied) => {
+                effects[index].completed = true;
+                if let Some(details) = effects[index]
+                    .details
+                    .as_mut()
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    details.insert("copied".into(), json!(copied));
+                }
+                if copied > 0 {
+                    observations.emit(setup::Observation::IncludedFilesCopied(copied));
+                }
+            }
+            Err(error) => {
+                if let Some(incomplete) = incomplete {
+                    let value = incomplete.post_creation_failed(error);
+                    return Err(failure("include_failed", value.error, effects, true, true));
+                }
+                return Err(failure("include_failed", error, effects, true, false));
+            }
+        }
+    }
     if let Some(incomplete) = incomplete {
         let mut hook_observations = if observations.is_human() {
             hook::Observations::human()
@@ -2569,6 +2637,14 @@ fn planned_effects(plan: &Plan) -> Vec<Effect> {
             attempted: false,
             completed: false,
             details: Some(json!({"branch":plan.branch,"description":description})),
+        });
+    }
+    if let Some(include_file) = &plan.include_file {
+        effects.push(Effect {
+            action: "copy_included_files".into(),
+            attempted: false,
+            completed: false,
+            details: Some(json!({"include_file":crate::protocol::BytePath::path(include_file)})),
         });
     }
     effects

@@ -737,6 +737,16 @@ impl<'cwd> RepositoryObservation<'cwd> {
         would_be_ignored(self.cwd, path)
     }
 
+    /// Lists untracked files, relative to this worktree's root, that both match
+    /// the gitignore-syntax patterns in `include_file` and are ignored by Git.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Git cannot list untracked files or evaluate ignore rules.
+    pub(crate) fn included_ignored_files(self, include_file: &Path) -> Result<Vec<PathBuf>> {
+        included_ignored_files(self.cwd, include_file)
+    }
+
     pub(crate) fn resolve_path(path: &Path) -> Result<PathBuf> {
         canonical_or_normalized(path)
     }
@@ -1769,6 +1779,57 @@ fn is_ignored(cwd: &Path, path: &Path) -> Result<bool> {
 /// Returns an error when Git cannot inspect ignore rules.
 fn would_be_ignored(cwd: &Path, path: &Path) -> Result<bool> {
     check_ignored(cwd, path, true)
+}
+
+fn included_ignored_files(cwd: &Path, include_file: &Path) -> Result<Vec<PathBuf>> {
+    let listing = GitProcess::new(
+        cwd,
+        [
+            OsStr::new("ls-files"),
+            OsStr::new("-z"),
+            OsStr::new("--others"),
+            OsStr::new("--ignored"),
+            OsStr::new("--exclude-from"),
+            include_file.as_os_str(),
+        ],
+    )
+    .captured()
+    .context("failed to list files selected by the include file")?;
+    ensure_success(&listing, "git ls-files")?;
+    // Nested repositories are reported as a directory entry; only files copy.
+    let candidates: Vec<&[u8]> = listing
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty() && !entry.ends_with(b"/"))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut input = Vec::new();
+    for candidate in &candidates {
+        input.extend_from_slice(candidate);
+        input.push(0);
+    }
+    let output = GitProcess::new(cwd, ["check-ignore", "-z", "--stdin"]).piped(
+        input,
+        &PipedContexts {
+            start: "failed to start git check-ignore",
+            open_input: "failed to open git check-ignore input",
+            write_input: "failed to write git check-ignore input",
+            writer_panicked: "git check-ignore input writer panicked",
+            await_output: "failed to read git check-ignore output",
+        },
+    )?;
+    match output.status.code() {
+        Some(0) => Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| PathBuf::from(OsString::from_vec(entry.to_vec())))
+            .collect()),
+        Some(1) => Ok(Vec::new()),
+        _ => bail!("git check-ignore failed: {}", stderr_detail(&output)),
+    }
 }
 
 fn check_ignored(cwd: &Path, path: &Path, no_index: bool) -> Result<bool> {

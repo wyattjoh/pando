@@ -4,10 +4,10 @@ All three files are strict YAML (`deny_unknown_fields` on every struct):
 malformed files, duplicate/unknown keys, wrong types, empty `command`
 strings, and empty `name` strings are all hard errors with file context.
 
-| Layer | Path | Can set placement (`worktrees.root`) | Can set `worktrees.default-sort` | Can set `worktrees.base` | Can set `install.command` | Can set hooks | Can set `commit.generation.*` | Can set `merge.*` | Can set `pr.*` |
+| Layer | Path | Can set placement (`worktrees.root`) | Can set `worktrees.default-sort` | Can set `worktrees.base` and `worktrees.include` | Can set `install.command` | Can set hooks | Can set `commit.generation.*` | Can set `merge.*` | Can set `pr.*` |
 |---|---|---|---|---|---|---|---|---|---|
 | Global | `${XDG_CONFIG_HOME:-$HOME/.config}/pando/config.yaml` | yes | yes | yes | yes | **no** | yes | yes | yes |
-| Shared | `.pando.yaml` in the **invoking** worktree | **no** (only `target-branch` and `base`) | **no** | yes | **no** | yes | yes (untrusted, needs `pando trust commit-approve`) | yes (untrusted, needs `pando trust merge-approve`) | yes |
+| Shared | `.pando.yaml` in the **invoking** worktree | **no** (only `target-branch`, `base`, and `include`) | **no** | yes | **no** | yes | yes (untrusted, needs `pando trust commit-approve`) | yes (untrusted, needs `pando trust merge-approve`) | yes |
 | Local | `.pando.local.yaml` in the **primary** worktree | yes | yes | yes | **no** | yes | yes | yes | yes |
 
 `pando install` adds a commented scaffold to the global YAML file. It
@@ -148,6 +148,33 @@ branching from the wrong point. `pando switch --fetch` and
 new branch — resolution of existing worktrees, local branches, and remote
 matches is unchanged.
 
+## Copying ignored files with `.worktreeinclude`
+
+When `switch` or `create` makes a new worktree, Pando copies the files a
+`.worktreeinclude` in the **invoking** worktree selects. The file uses
+gitignore syntax, and only untracked files that Git also ignores are copied,
+so tracked files are never duplicated:
+
+```gitignore
+# .worktreeinclude
+.env*
+config/local.yaml
+```
+
+The copy runs after the worktree is created and before post-create hooks, so
+hooks such as `npm install` see the copied files. Files that already exist in
+the new worktree are never overwritten, and symbolic links are recreated
+rather than followed. Copying is not hook execution and needs no trust
+approval. Without a `.worktreeinclude` nothing happens.
+
+It is on by default. `worktrees.include: false` turns it off; the key is
+legal in all three layers and resolves local, then shared, then global:
+
+```yaml
+worktrees:
+  include: false
+```
+
 ## 3. Personal per-clone overlay
 
 ```yaml
@@ -218,9 +245,11 @@ pr:
   (`.pando.local.yaml`) steps, concatenated per phase.
 - **Root**: local root overrides global root. There is no intermediate
   "shared root" — the shared file cannot set `worktrees.root` at all, only
-  `worktrees.target-branch` and `worktrees.base`.
-- **Base and target branch** (`worktrees.base`, `worktrees.target-branch`,
-  each resolving independently): local, then shared, then global.
+  `worktrees.target-branch`, `worktrees.base`, and `worktrees.include`.
+- **Base, target branch, and include** (`worktrees.base`,
+  `worktrees.target-branch`, `worktrees.include`, each resolving
+  independently): local, then shared, then global. `worktrees.include`
+  defaults to `true`.
 - **Default sort**: the ignored local value overrides the global value. The
   committed shared file cannot set this personal interface preference.
 - **Commit generation** (`command` and `template` resolve independently):
