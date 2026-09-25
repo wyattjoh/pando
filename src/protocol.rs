@@ -7,31 +7,24 @@ use std::{
 
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use schemars::{
-    JsonSchema,
-    schema::{InstanceType, Schema, SchemaObject, SingleOrVec},
-};
+use schemars::{JsonSchema, Schema, json_schema};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
-fn schema_version_schema(_: &mut schemars::r#gen::SchemaGenerator) -> Schema {
-    SchemaObject {
-        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Integer))),
-        enum_values: Some(vec![SCHEMA_VERSION.into()]),
-        ..SchemaObject::default()
-    }
-    .into()
+fn schema_version_schema(_: &mut schemars::SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "integer",
+        "enum": [SCHEMA_VERSION],
+    })
 }
 
-fn response_status_schema(_: &mut schemars::r#gen::SchemaGenerator) -> Schema {
-    SchemaObject {
-        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
-        enum_values: Some(vec!["success".into(), "error".into()]),
-        ..SchemaObject::default()
-    }
-    .into()
+fn response_status_schema(_: &mut schemars::SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": "string",
+        "enum": ["success", "error"],
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]

@@ -11436,7 +11436,7 @@ fn json_help_exposes_create_description_and_shared_base_inputs() {
             .rsplit('/')
             .next()
             .unwrap();
-        let properties = schema["definitions"][input_type]["properties"]
+        let properties = schema["$defs"][input_type]["properties"]
             .as_object()
             .unwrap();
         assert!(properties.contains_key("fetch"), "{command}: {schema}");

@@ -90,19 +90,19 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "EmptyInput": {
             "additionalProperties": false,
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
             "anyOf": [
               {
-                "$ref": "#/definitions/EmptyInput"
+                "$ref": "#/$defs/EmptyInput"
               },
               {
                 "type": "null"
@@ -125,12 +125,11 @@
         "required": [
           "schema_version"
         ],
-        "title": "OptionalInputRequest_for_EmptyInput",
+        "title": "OptionalInputRequest",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -138,7 +137,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -152,10 +151,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -214,13 +213,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -228,20 +228,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -250,7 +250,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -276,28 +276,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -316,9 +313,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -326,8 +321,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -338,54 +333,54 @@
             "properties": {
               "bare": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "dirty": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "inaccessible": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "locked": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "missing": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "prunable": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "total": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "unknown": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               }
             },
             "required": [
-              "bare",
-              "dirty",
-              "inaccessible",
-              "locked",
-              "missing",
-              "prunable",
               "total",
-              "unknown"
+              "dirty",
+              "unknown",
+              "missing",
+              "inaccessible",
+              "bare",
+              "locked",
+              "prunable"
             ],
             "type": "object"
           },
@@ -429,7 +424,7 @@
                 "type": "boolean"
               },
               "path": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               },
               "prune_reason": {
                 "type": [
@@ -439,33 +434,34 @@
               }
             },
             "required": [
+              "kind",
+              "path",
               "condition",
               "current",
-              "kind",
-              "navigable",
-              "path"
+              "navigable"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "outcome": {
             "type": "string"
           },
           "summary": {
-            "$ref": "#/definitions/ListSummary"
+            "$ref": "#/$defs/ListSummary"
           },
           "worktrees": {
             "items": {
-              "$ref": "#/definitions/WorktreeRecord"
+              "$ref": "#/$defs/WorktreeRecord"
             },
             "type": "array"
           }
         },
         "required": [
           "outcome",
-          "summary",
-          "worktrees"
+          "worktrees",
+          "summary"
         ],
         "title": "ListResult",
         "type": "object"
@@ -498,9 +494,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "GetProperty": {
             "enum": [
               "branch",
@@ -516,7 +510,7 @@
             "additionalProperties": false,
             "properties": {
               "property": {
-                "$ref": "#/definitions/GetProperty"
+                "$ref": "#/$defs/GetProperty"
               }
             },
             "required": [
@@ -525,9 +519,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/GetRequest"
+            "$ref": "#/$defs/GetRequest"
           },
           "request_id": {
             "type": [
@@ -543,15 +539,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_GetRequest",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -559,7 +554,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -573,10 +568,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -635,13 +630,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -649,20 +645,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -671,7 +667,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -697,28 +693,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -737,9 +730,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -747,8 +738,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -762,15 +753,17 @@
               },
               {
                 "format": "uint16",
-                "minimum": 0.0,
+                "maximum": 65535,
+                "minimum": 0,
                 "type": "integer"
               },
               {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               }
             ]
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "outcome": {
             "type": "string"
@@ -779,7 +772,7 @@
             "type": "string"
           },
           "value": {
-            "$ref": "#/definitions/PropertyWireValue"
+            "$ref": "#/$defs/PropertyWireValue"
           }
         },
         "required": [
@@ -837,9 +830,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "SwitchInput": {
             "additionalProperties": false,
             "description": "Strict machine request for switching worktrees.",
@@ -870,9 +861,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/SwitchInput"
+            "$ref": "#/$defs/SwitchInput"
           },
           "request_id": {
             "type": [
@@ -888,15 +881,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_SwitchInput",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -904,7 +896,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -918,10 +910,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -980,13 +972,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -994,20 +987,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -1016,7 +1009,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -1042,188 +1035,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "anyOf": [
-          {
-            "properties": {
-              "branch": {
-                "type": "string"
-              },
-              "destination": {
-                "$ref": "#/definitions/BytePath"
-              },
-              "dry_run": {
-                "type": "boolean"
-              },
-              "outcome": {
-                "enum": [
-                  "existing"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "branch",
-              "destination",
-              "dry_run",
-              "outcome"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "approval_required": {
-                "type": "boolean"
-              },
-              "base_ref": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "branch": {
-                "type": "string"
-              },
-              "destination": {
-                "$ref": "#/definitions/BytePath"
-              },
-              "kind": {
-                "type": "string"
-              },
-              "outcome": {
-                "enum": [
-                  "creation_plan"
-                ],
-                "type": "string"
-              },
-              "start_point": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "approval_required",
-              "branch",
-              "destination",
-              "kind",
-              "outcome",
-              "start_point"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "base_ref": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "branch": {
-                "type": "string"
-              },
-              "destination": {
-                "$ref": "#/definitions/BytePath"
-              },
-              "kind": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "outcome": {
-                "enum": [
-                  "creation_plan"
-                ],
-                "type": "string"
-              },
-              "remote": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "start_point": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "branch",
-              "destination",
-              "outcome"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "base_ref": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "branch": {
-                "type": "string"
-              },
-              "destination": {
-                "$ref": "#/definitions/BytePath"
-              },
-              "kind": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "outcome": {
-                "enum": [
-                  "created"
-                ],
-                "type": "string"
-              },
-              "remote": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "start_point": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "branch",
-              "destination",
-              "outcome"
-            ],
-            "type": "object"
-          }
-        ],
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -1242,9 +1072,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -1252,8 +1080,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -1261,36 +1089,174 @@
             ]
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Version 1 success variants shared by switch and create adapters.",
-        "title": "OperationResult"
-      },
-      "selection_required_context_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "anyOf": [
+        "oneOf": [
           {
+            "properties": {
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/$defs/BytePath"
+              },
+              "dry_run": {
+                "type": "boolean"
+              },
+              "outcome": {
+                "const": "existing",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "branch",
+              "destination",
+              "dry_run"
+            ],
             "type": "object"
           },
           {
-            "$ref": "#/definitions/SwitchSelectionContext"
-          },
-          {
-            "$ref": "#/definitions/BranchContext"
-          },
-          {
-            "$ref": "#/definitions/ApprovalContext"
-          }
-        ],
-        "definitions": {
-          "ApprovalContext": {
             "properties": {
-              "approval": {
-                "$ref": "#/definitions/HookApprovalContext"
+              "approval_required": {
+                "type": "boolean"
+              },
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "branch": {
                 "type": "string"
               },
               "destination": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "creation_plan",
+                "type": "string"
+              },
+              "start_point": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "branch",
+              "destination",
+              "kind",
+              "start_point",
+              "approval_required"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/$defs/BytePath"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "const": "creation_plan",
+                "type": "string"
+              },
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start_point": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "outcome",
+              "branch",
+              "destination"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/$defs/BytePath"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "const": "created",
+                "type": "string"
+              },
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start_point": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "outcome",
+              "branch",
+              "destination"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "OperationResult"
+      },
+      "selection_required_context_schema": {
+        "$defs": {
+          "ApprovalContext": {
+            "properties": {
+              "approval": {
+                "$ref": "#/$defs/HookApprovalContext"
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/$defs/BytePath"
               }
             },
             "required": [
@@ -1314,7 +1280,7 @@
               "destination": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/BytePath"
+                    "$ref": "#/$defs/BytePath"
                   },
                   {
                     "type": "null"
@@ -1353,9 +1319,7 @@
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -1374,9 +1338,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -1384,8 +1346,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -1413,7 +1375,7 @@
             "properties": {
               "commands": {
                 "items": {
-                  "$ref": "#/definitions/HookApprovalCommand"
+                  "$ref": "#/$defs/HookApprovalCommand"
                 },
                 "type": "array"
               },
@@ -1428,14 +1390,14 @@
               }
             },
             "required": [
-              "commands",
-              "identity",
               "phase",
-              "repository"
+              "commands",
+              "repository",
+              "identity"
             ],
             "type": "object"
           },
-          "RecoveryInvocation_for_Request_for_RetryInput": {
+          "RecoveryInvocation": {
             "additionalProperties": false,
             "description": "A reproducible command invocation attached to a recovery action.",
             "properties": {
@@ -1448,7 +1410,7 @@
               "stdin": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/Request_for_RetryInput"
+                    "$ref": "#/$defs/Request"
                   },
                   {
                     "type": "null"
@@ -1458,7 +1420,7 @@
               "working_directory": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/BytePath"
+                    "$ref": "#/$defs/BytePath"
                   },
                   {
                     "type": "null"
@@ -1471,11 +1433,11 @@
             ],
             "type": "object"
           },
-          "Request_for_RetryInput": {
+          "Request": {
             "additionalProperties": false,
             "properties": {
               "input": {
-                "$ref": "#/definitions/RetryInput"
+                "$ref": "#/$defs/RetryInput"
               },
               "request_id": {
                 "type": [
@@ -1491,8 +1453,8 @@
               }
             },
             "required": [
-              "input",
-              "schema_version"
+              "schema_version",
+              "input"
             ],
             "type": "object"
           },
@@ -1548,7 +1510,7 @@
                 "type": "boolean"
               },
               "destination": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               },
               "last_commit_at": {
                 "type": [
@@ -1557,12 +1519,12 @@
                 ]
               },
               "retry": {
-                "$ref": "#/definitions/RecoveryInvocation_for_Request_for_RetryInput"
+                "$ref": "#/$defs/RecoveryInvocation"
               }
             },
             "required": [
-              "current",
               "destination",
+              "current",
               "retry"
             ],
             "type": "object"
@@ -1571,12 +1533,12 @@
             "properties": {
               "choices": {
                 "items": {
-                  "$ref": "#/definitions/SwitchChoice"
+                  "$ref": "#/$defs/SwitchChoice"
                 },
                 "type": "array"
               },
               "unregistered_branch": {
-                "$ref": "#/definitions/SelectionHint"
+                "$ref": "#/$defs/SelectionHint"
               }
             },
             "required": [
@@ -1586,6 +1548,21 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/SwitchSelectionContext"
+          },
+          {
+            "$ref": "#/$defs/BranchContext"
+          },
+          {
+            "$ref": "#/$defs/ApprovalContext"
+          }
+        ],
         "title": "OperationContext"
       }
     },
@@ -1635,9 +1612,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "CreateInput": {
             "additionalProperties": false,
             "description": "Strict machine request for creating worktrees.",
@@ -1675,9 +1650,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/CreateInput"
+            "$ref": "#/$defs/CreateInput"
           },
           "request_id": {
             "type": [
@@ -1693,15 +1670,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_CreateInput",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -1709,7 +1685,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -1723,10 +1699,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -1785,13 +1761,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -1799,20 +1776,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -1821,7 +1798,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -1847,188 +1824,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "anyOf": [
-          {
-            "properties": {
-              "branch": {
-                "type": "string"
-              },
-              "destination": {
-                "$ref": "#/definitions/BytePath"
-              },
-              "dry_run": {
-                "type": "boolean"
-              },
-              "outcome": {
-                "enum": [
-                  "existing"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "branch",
-              "destination",
-              "dry_run",
-              "outcome"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "approval_required": {
-                "type": "boolean"
-              },
-              "base_ref": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "branch": {
-                "type": "string"
-              },
-              "destination": {
-                "$ref": "#/definitions/BytePath"
-              },
-              "kind": {
-                "type": "string"
-              },
-              "outcome": {
-                "enum": [
-                  "creation_plan"
-                ],
-                "type": "string"
-              },
-              "start_point": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "approval_required",
-              "branch",
-              "destination",
-              "kind",
-              "outcome",
-              "start_point"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "base_ref": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "branch": {
-                "type": "string"
-              },
-              "destination": {
-                "$ref": "#/definitions/BytePath"
-              },
-              "kind": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "outcome": {
-                "enum": [
-                  "creation_plan"
-                ],
-                "type": "string"
-              },
-              "remote": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "start_point": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "branch",
-              "destination",
-              "outcome"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "base_ref": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "branch": {
-                "type": "string"
-              },
-              "destination": {
-                "$ref": "#/definitions/BytePath"
-              },
-              "kind": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "outcome": {
-                "enum": [
-                  "created"
-                ],
-                "type": "string"
-              },
-              "remote": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "start_point": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "branch",
-              "destination",
-              "outcome"
-            ],
-            "type": "object"
-          }
-        ],
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -2047,9 +1861,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -2057,8 +1869,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -2066,7 +1878,160 @@
             ]
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Version 1 success variants shared by switch and create adapters.",
+        "oneOf": [
+          {
+            "properties": {
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/$defs/BytePath"
+              },
+              "dry_run": {
+                "type": "boolean"
+              },
+              "outcome": {
+                "const": "existing",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "branch",
+              "destination",
+              "dry_run"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "approval_required": {
+                "type": "boolean"
+              },
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/$defs/BytePath"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "outcome": {
+                "const": "creation_plan",
+                "type": "string"
+              },
+              "start_point": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "branch",
+              "destination",
+              "kind",
+              "start_point",
+              "approval_required"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/$defs/BytePath"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "const": "creation_plan",
+                "type": "string"
+              },
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start_point": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "outcome",
+              "branch",
+              "destination"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "base_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "branch": {
+                "type": "string"
+              },
+              "destination": {
+                "$ref": "#/$defs/BytePath"
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "const": "created",
+                "type": "string"
+              },
+              "remote": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "start_point": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "outcome",
+              "branch",
+              "destination"
+            ],
+            "type": "object"
+          }
+        ],
         "title": "OperationResult"
       },
       "selection_required_context_schema": null
@@ -2105,9 +2070,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "RemovalInput": {
             "additionalProperties": false,
             "description": "Strict version 1 input for worktree removal.",
@@ -2127,9 +2090,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/RemovalInput"
+            "$ref": "#/$defs/RemovalInput"
           },
           "request_id": {
             "type": [
@@ -2145,15 +2110,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_RemovalInput",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -2161,7 +2125,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -2175,10 +2139,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -2237,13 +2201,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -2251,20 +2216,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -2273,7 +2238,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -2299,28 +2264,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -2339,9 +2301,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -2349,8 +2309,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -2373,25 +2333,26 @@
                 "type": "boolean"
               },
               "path": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               },
               "pre_remove_hooks": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               }
             },
             "required": [
               "branch",
+              "path",
               "branch_retained",
               "current",
               "force",
-              "path",
               "pre_remove_hooks"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Public result shared by human and JSON removal adapters.",
         "oneOf": [
           {
@@ -2400,22 +2361,20 @@
                 "type": "boolean"
               },
               "outcome": {
-                "enum": [
-                  "dry_run"
-                ],
+                "const": "dry_run",
                 "type": "string"
               },
               "targets": {
                 "items": {
-                  "$ref": "#/definitions/RemovalTargetContext"
+                  "$ref": "#/$defs/RemovalTargetContext"
                 },
                 "type": "array"
               }
             },
             "required": [
-              "force",
               "outcome",
-              "targets"
+              "targets",
+              "force"
             ],
             "type": "object"
           },
@@ -2424,7 +2383,7 @@
               "destination": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/BytePath"
+                    "$ref": "#/$defs/BytePath"
                   },
                   {
                     "type": "null"
@@ -2432,14 +2391,12 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "removed"
-                ],
+                "const": "removed",
                 "type": "string"
               },
               "targets": {
                 "items": {
-                  "$ref": "#/definitions/RemovalTargetContext"
+                  "$ref": "#/$defs/RemovalTargetContext"
                 },
                 "type": "array"
               }
@@ -2511,9 +2468,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "MergeInput": {
             "additionalProperties": false,
             "description": "Strict version 1 input for the merge lifecycle.",
@@ -2538,9 +2493,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/MergeInput"
+            "$ref": "#/$defs/MergeInput"
           },
           "request_id": {
             "type": [
@@ -2556,15 +2513,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_MergeInput",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -2572,7 +2528,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -2586,10 +2542,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -2648,13 +2604,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -2662,20 +2619,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -2684,7 +2641,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -2710,28 +2667,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -2750,9 +2704,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -2760,8 +2712,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -2788,6 +2740,7 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "Public result shared by human and JSON merge adapters.",
         "oneOf": [
           {
@@ -2796,27 +2749,25 @@
                 "type": "boolean"
               },
               "outcome": {
-                "enum": [
-                  "dry_run"
-                ],
+                "const": "dry_run",
                 "type": "string"
               },
               "plan": {
                 "type": "string"
               },
               "policy": {
-                "$ref": "#/definitions/MergePolicy"
+                "$ref": "#/$defs/MergePolicy"
               },
               "ready": {
                 "type": "boolean"
               }
             },
             "required": [
-              "approval_required",
               "outcome",
               "plan",
               "policy",
-              "ready"
+              "ready",
+              "approval_required"
             ],
             "type": "object"
           },
@@ -2825,7 +2776,7 @@
               "destination": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/BytePath"
+                    "$ref": "#/$defs/BytePath"
                   },
                   {
                     "type": "null"
@@ -2833,9 +2784,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "in_place"
-                ],
+                "const": "in_place",
                 "type": "string"
               }
             },
@@ -2849,7 +2798,7 @@
               "destination": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/BytePath"
+                    "$ref": "#/$defs/BytePath"
                   },
                   {
                     "type": "null"
@@ -2857,9 +2806,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "removed"
-                ],
+                "const": "removed",
                 "type": "string"
               }
             },
@@ -2873,7 +2820,7 @@
               "destination": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/BytePath"
+                    "$ref": "#/$defs/BytePath"
                   },
                   {
                     "type": "null"
@@ -2881,9 +2828,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "retained"
-                ],
+                "const": "retained",
                 "type": "string"
               }
             },
@@ -2936,9 +2881,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "CommitRequest": {
             "additionalProperties": false,
             "properties": {
@@ -2947,15 +2890,15 @@
                 "type": "boolean"
               },
               "message": {
-                "$ref": "#/definitions/MessageSource"
+                "$ref": "#/$defs/MessageSource"
               },
               "selection": {
-                "$ref": "#/definitions/Selection"
+                "$ref": "#/$defs/Selection"
               }
             },
             "required": [
-              "message",
-              "selection"
+              "selection",
+              "message"
             ],
             "type": "object"
           },
@@ -2965,9 +2908,7 @@
                 "additionalProperties": false,
                 "properties": {
                   "source": {
-                    "enum": [
-                      "provided"
-                    ],
+                    "const": "provided",
                     "type": "string"
                   },
                   "value": {
@@ -2984,9 +2925,7 @@
                 "additionalProperties": false,
                 "properties": {
                   "source": {
-                    "enum": [
-                      "configured_generator"
-                    ],
+                    "const": "configured_generator",
                     "type": "string"
                   }
                 },
@@ -3005,9 +2944,11 @@
             "type": "string"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/CommitRequest"
+            "$ref": "#/$defs/CommitRequest"
           },
           "request_id": {
             "type": [
@@ -3023,15 +2964,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_CommitRequest",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -3039,7 +2979,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -3053,10 +2993,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -3115,13 +3055,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -3129,20 +3070,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -3151,7 +3092,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -3177,13 +3118,13 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
@@ -3226,9 +3167,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "Request": {
             "additionalProperties": false,
             "properties": {
@@ -3258,11 +3197,7 @@
                 ]
               },
               "status": {
-                "allOf": [
-                  {
-                    "$ref": "#/definitions/Status"
-                  }
-                ],
+                "$ref": "#/$defs/Status",
                 "default": "draft"
               },
               "title": {
@@ -3283,9 +3218,11 @@
             "type": "string"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/Request"
+            "$ref": "#/$defs/Request"
           },
           "request_id": {
             "type": [
@@ -3301,15 +3238,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_Request",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -3317,7 +3253,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -3331,10 +3267,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -3393,13 +3329,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -3407,20 +3344,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -3429,7 +3366,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -3455,19 +3392,19 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "oneOf": [
           {
             "properties": {
@@ -3487,9 +3424,7 @@
                 "type": "string"
               },
               "outcome": {
-                "enum": [
-                  "dry_run"
-                ],
+                "const": "dry_run",
                 "type": "string"
               },
               "provider": {
@@ -3501,15 +3436,15 @@
               }
             },
             "required": [
-              "base_branch",
-              "base_repository",
-              "draft",
-              "head_branch",
-              "head_repository",
               "outcome",
               "provider",
-              "push",
-              "remote"
+              "base_repository",
+              "base_branch",
+              "head_repository",
+              "head_branch",
+              "remote",
+              "draft",
+              "push"
             ],
             "type": "object"
           },
@@ -3531,9 +3466,7 @@
                 "type": "string"
               },
               "outcome": {
-                "enum": [
-                  "created"
-                ],
+                "const": "created",
                 "type": "string"
               },
               "provider": {
@@ -3547,15 +3480,15 @@
               }
             },
             "required": [
-              "base_branch",
-              "base_repository",
-              "draft",
-              "head_branch",
-              "head_repository",
               "outcome",
+              "url",
               "provider",
+              "base_repository",
+              "base_branch",
+              "head_repository",
+              "head_branch",
               "remote",
-              "url"
+              "draft"
             ],
             "type": "object"
           }
@@ -3586,19 +3519,19 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "EmptyInput": {
             "additionalProperties": false,
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
             "anyOf": [
               {
-                "$ref": "#/definitions/EmptyInput"
+                "$ref": "#/$defs/EmptyInput"
               },
               {
                 "type": "null"
@@ -3621,12 +3554,11 @@
         "required": [
           "schema_version"
         ],
-        "title": "OptionalInputRequest_for_EmptyInput",
+        "title": "OptionalInputRequest",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -3634,7 +3566,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -3648,10 +3580,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -3710,13 +3642,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -3724,20 +3657,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -3746,7 +3679,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -3772,28 +3705,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -3812,9 +3742,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -3822,8 +3750,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -3859,7 +3787,7 @@
                 "type": "string"
               },
               "repository": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               }
             },
             "required": [
@@ -3883,11 +3811,11 @@
                 "type": "string"
               },
               "source": {
-                "$ref": "#/definitions/HookSource"
+                "$ref": "#/$defs/HookSource"
               },
               "step_count": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "trusted": {
@@ -3895,27 +3823,26 @@
               }
             },
             "required": [
-              "configured",
               "phase",
-              "source",
+              "configured",
+              "trusted",
               "step_count",
-              "trusted"
+              "source"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "oneOf": [
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "status"
-                ],
+                "const": "status",
                 "type": "string"
               },
               "phases": {
                 "items": {
-                  "$ref": "#/definitions/HookStatus"
+                  "$ref": "#/$defs/HookStatus"
                 },
                 "type": "array"
               }
@@ -3935,9 +3862,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "generator_status"
-                ],
+                "const": "generator_status",
                 "type": "string"
               },
               "source": {
@@ -3959,9 +3884,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "reset"
-                ],
+                "const": "reset",
                 "type": "string"
               }
             },
@@ -3973,9 +3896,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "already_reset"
-                ],
+                "const": "already_reset",
                 "type": "string"
               }
             },
@@ -3989,7 +3910,7 @@
               "candidate": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/Candidate"
+                    "$ref": "#/$defs/Candidate"
                   },
                   {
                     "type": "null"
@@ -3997,9 +3918,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "dry_run"
-                ],
+                "const": "dry_run",
                 "type": "string"
               }
             },
@@ -4038,9 +3957,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "DryRunInput": {
             "additionalProperties": false,
             "properties": {
@@ -4052,9 +3969,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/DryRunInput"
+            "$ref": "#/$defs/DryRunInput"
           },
           "request_id": {
             "type": [
@@ -4070,15 +3989,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_DryRunInput",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -4086,7 +4004,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -4100,10 +4018,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -4162,13 +4080,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -4176,20 +4095,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -4198,7 +4117,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -4224,28 +4143,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -4264,9 +4180,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -4274,8 +4188,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -4311,7 +4225,7 @@
                 "type": "string"
               },
               "repository": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               }
             },
             "required": [
@@ -4335,11 +4249,11 @@
                 "type": "string"
               },
               "source": {
-                "$ref": "#/definitions/HookSource"
+                "$ref": "#/$defs/HookSource"
               },
               "step_count": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "trusted": {
@@ -4347,27 +4261,26 @@
               }
             },
             "required": [
-              "configured",
               "phase",
-              "source",
+              "configured",
+              "trusted",
               "step_count",
-              "trusted"
+              "source"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "oneOf": [
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "status"
-                ],
+                "const": "status",
                 "type": "string"
               },
               "phases": {
                 "items": {
-                  "$ref": "#/definitions/HookStatus"
+                  "$ref": "#/$defs/HookStatus"
                 },
                 "type": "array"
               }
@@ -4387,9 +4300,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "generator_status"
-                ],
+                "const": "generator_status",
                 "type": "string"
               },
               "source": {
@@ -4411,9 +4322,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "reset"
-                ],
+                "const": "reset",
                 "type": "string"
               }
             },
@@ -4425,9 +4334,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "already_reset"
-                ],
+                "const": "already_reset",
                 "type": "string"
               }
             },
@@ -4441,7 +4348,7 @@
               "candidate": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/Candidate"
+                    "$ref": "#/$defs/Candidate"
                   },
                   {
                     "type": "null"
@@ -4449,9 +4356,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "dry_run"
-                ],
+                "const": "dry_run",
                 "type": "string"
               }
             },
@@ -4487,19 +4392,19 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "EmptyInput": {
             "additionalProperties": false,
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
             "anyOf": [
               {
-                "$ref": "#/definitions/EmptyInput"
+                "$ref": "#/$defs/EmptyInput"
               },
               {
                 "type": "null"
@@ -4522,12 +4427,11 @@
         "required": [
           "schema_version"
         ],
-        "title": "OptionalInputRequest_for_EmptyInput",
+        "title": "OptionalInputRequest",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -4535,7 +4439,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -4549,10 +4453,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -4611,13 +4515,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -4625,20 +4530,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -4647,7 +4552,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -4673,28 +4578,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -4713,9 +4615,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -4723,8 +4623,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -4760,7 +4660,7 @@
                 "type": "string"
               },
               "repository": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               }
             },
             "required": [
@@ -4784,11 +4684,11 @@
                 "type": "string"
               },
               "source": {
-                "$ref": "#/definitions/HookSource"
+                "$ref": "#/$defs/HookSource"
               },
               "step_count": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "trusted": {
@@ -4796,27 +4696,26 @@
               }
             },
             "required": [
-              "configured",
               "phase",
-              "source",
+              "configured",
+              "trusted",
               "step_count",
-              "trusted"
+              "source"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "oneOf": [
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "status"
-                ],
+                "const": "status",
                 "type": "string"
               },
               "phases": {
                 "items": {
-                  "$ref": "#/definitions/HookStatus"
+                  "$ref": "#/$defs/HookStatus"
                 },
                 "type": "array"
               }
@@ -4836,9 +4735,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "generator_status"
-                ],
+                "const": "generator_status",
                 "type": "string"
               },
               "source": {
@@ -4860,9 +4757,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "reset"
-                ],
+                "const": "reset",
                 "type": "string"
               }
             },
@@ -4874,9 +4769,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "already_reset"
-                ],
+                "const": "already_reset",
                 "type": "string"
               }
             },
@@ -4890,7 +4783,7 @@
               "candidate": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/Candidate"
+                    "$ref": "#/$defs/Candidate"
                   },
                   {
                     "type": "null"
@@ -4898,9 +4791,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "dry_run"
-                ],
+                "const": "dry_run",
                 "type": "string"
               }
             },
@@ -4939,9 +4830,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "DryRunInput": {
             "additionalProperties": false,
             "properties": {
@@ -4953,9 +4842,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/DryRunInput"
+            "$ref": "#/$defs/DryRunInput"
           },
           "request_id": {
             "type": [
@@ -4971,15 +4862,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_DryRunInput",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -4987,7 +4877,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -5001,10 +4891,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -5063,13 +4953,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -5077,20 +4968,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -5099,7 +4990,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -5125,28 +5016,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -5165,9 +5053,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -5175,8 +5061,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -5212,7 +5098,7 @@
                 "type": "string"
               },
               "repository": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               }
             },
             "required": [
@@ -5236,11 +5122,11 @@
                 "type": "string"
               },
               "source": {
-                "$ref": "#/definitions/HookSource"
+                "$ref": "#/$defs/HookSource"
               },
               "step_count": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "trusted": {
@@ -5248,27 +5134,26 @@
               }
             },
             "required": [
-              "configured",
               "phase",
-              "source",
+              "configured",
+              "trusted",
               "step_count",
-              "trusted"
+              "source"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "oneOf": [
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "status"
-                ],
+                "const": "status",
                 "type": "string"
               },
               "phases": {
                 "items": {
-                  "$ref": "#/definitions/HookStatus"
+                  "$ref": "#/$defs/HookStatus"
                 },
                 "type": "array"
               }
@@ -5288,9 +5173,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "generator_status"
-                ],
+                "const": "generator_status",
                 "type": "string"
               },
               "source": {
@@ -5312,9 +5195,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "reset"
-                ],
+                "const": "reset",
                 "type": "string"
               }
             },
@@ -5326,9 +5207,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "already_reset"
-                ],
+                "const": "already_reset",
                 "type": "string"
               }
             },
@@ -5342,7 +5221,7 @@
               "candidate": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/Candidate"
+                    "$ref": "#/$defs/Candidate"
                   },
                   {
                     "type": "null"
@@ -5350,9 +5229,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "dry_run"
-                ],
+                "const": "dry_run",
                 "type": "string"
               }
             },
@@ -5391,9 +5268,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "DryRunInput": {
             "additionalProperties": false,
             "properties": {
@@ -5405,9 +5280,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/DryRunInput"
+            "$ref": "#/$defs/DryRunInput"
           },
           "request_id": {
             "type": [
@@ -5423,15 +5300,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_DryRunInput",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -5439,7 +5315,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -5453,10 +5329,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -5515,13 +5391,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -5529,20 +5406,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -5551,7 +5428,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -5577,28 +5454,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -5617,9 +5491,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -5627,8 +5499,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -5664,7 +5536,7 @@
                 "type": "string"
               },
               "repository": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               }
             },
             "required": [
@@ -5688,11 +5560,11 @@
                 "type": "string"
               },
               "source": {
-                "$ref": "#/definitions/HookSource"
+                "$ref": "#/$defs/HookSource"
               },
               "step_count": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "trusted": {
@@ -5700,27 +5572,26 @@
               }
             },
             "required": [
-              "configured",
               "phase",
-              "source",
+              "configured",
+              "trusted",
               "step_count",
-              "trusted"
+              "source"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "oneOf": [
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "status"
-                ],
+                "const": "status",
                 "type": "string"
               },
               "phases": {
                 "items": {
-                  "$ref": "#/definitions/HookStatus"
+                  "$ref": "#/$defs/HookStatus"
                 },
                 "type": "array"
               }
@@ -5740,9 +5611,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "generator_status"
-                ],
+                "const": "generator_status",
                 "type": "string"
               },
               "source": {
@@ -5764,9 +5633,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "reset"
-                ],
+                "const": "reset",
                 "type": "string"
               }
             },
@@ -5778,9 +5645,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "already_reset"
-                ],
+                "const": "already_reset",
                 "type": "string"
               }
             },
@@ -5794,7 +5659,7 @@
               "candidate": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/Candidate"
+                    "$ref": "#/$defs/Candidate"
                   },
                   {
                     "type": "null"
@@ -5802,9 +5667,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "dry_run"
-                ],
+                "const": "dry_run",
                 "type": "string"
               }
             },
@@ -5841,19 +5704,19 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "EmptyInput": {
             "additionalProperties": false,
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
             "anyOf": [
               {
-                "$ref": "#/definitions/EmptyInput"
+                "$ref": "#/$defs/EmptyInput"
               },
               {
                 "type": "null"
@@ -5876,12 +5739,11 @@
         "required": [
           "schema_version"
         ],
-        "title": "OptionalInputRequest_for_EmptyInput",
+        "title": "OptionalInputRequest",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -5889,7 +5751,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -5903,10 +5765,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -5965,13 +5827,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -5979,20 +5842,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -6001,7 +5864,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -6027,13 +5890,13 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
@@ -6064,9 +5927,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "DryRunInput": {
             "additionalProperties": false,
             "properties": {
@@ -6078,9 +5939,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/DryRunInput"
+            "$ref": "#/$defs/DryRunInput"
           },
           "request_id": {
             "type": [
@@ -6096,15 +5959,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_DryRunInput",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -6112,7 +5974,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -6126,10 +5988,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -6188,13 +6050,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -6202,20 +6065,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -6224,7 +6087,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -6250,13 +6113,13 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
@@ -6287,9 +6150,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "DryRunInput": {
             "additionalProperties": false,
             "properties": {
@@ -6301,9 +6162,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/DryRunInput"
+            "$ref": "#/$defs/DryRunInput"
           },
           "request_id": {
             "type": [
@@ -6319,15 +6182,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_DryRunInput",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -6335,7 +6197,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -6349,10 +6211,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -6411,13 +6273,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -6425,20 +6288,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -6447,7 +6310,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -6473,13 +6336,13 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
@@ -6509,19 +6372,19 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "EmptyInput": {
             "additionalProperties": false,
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
             "anyOf": [
               {
-                "$ref": "#/definitions/EmptyInput"
+                "$ref": "#/$defs/EmptyInput"
               },
               {
                 "type": "null"
@@ -6544,12 +6407,11 @@
         "required": [
           "schema_version"
         ],
-        "title": "OptionalInputRequest_for_EmptyInput",
+        "title": "OptionalInputRequest",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -6557,7 +6419,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -6571,10 +6433,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -6633,13 +6495,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -6647,20 +6510,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -6669,7 +6532,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -6695,28 +6558,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -6735,9 +6595,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -6745,8 +6603,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -6782,7 +6640,7 @@
                 "type": "string"
               },
               "repository": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               }
             },
             "required": [
@@ -6806,11 +6664,11 @@
                 "type": "string"
               },
               "source": {
-                "$ref": "#/definitions/HookSource"
+                "$ref": "#/$defs/HookSource"
               },
               "step_count": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "trusted": {
@@ -6818,27 +6676,26 @@
               }
             },
             "required": [
-              "configured",
               "phase",
-              "source",
+              "configured",
+              "trusted",
               "step_count",
-              "trusted"
+              "source"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "oneOf": [
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "status"
-                ],
+                "const": "status",
                 "type": "string"
               },
               "phases": {
                 "items": {
-                  "$ref": "#/definitions/HookStatus"
+                  "$ref": "#/$defs/HookStatus"
                 },
                 "type": "array"
               }
@@ -6858,9 +6715,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "generator_status"
-                ],
+                "const": "generator_status",
                 "type": "string"
               },
               "source": {
@@ -6882,9 +6737,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "reset"
-                ],
+                "const": "reset",
                 "type": "string"
               }
             },
@@ -6896,9 +6749,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "already_reset"
-                ],
+                "const": "already_reset",
                 "type": "string"
               }
             },
@@ -6912,7 +6763,7 @@
               "candidate": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/Candidate"
+                    "$ref": "#/$defs/Candidate"
                   },
                   {
                     "type": "null"
@@ -6920,9 +6771,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "dry_run"
-                ],
+                "const": "dry_run",
                 "type": "string"
               }
             },
@@ -6961,9 +6810,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "DryRunInput": {
             "additionalProperties": false,
             "properties": {
@@ -6975,9 +6822,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/DryRunInput"
+            "$ref": "#/$defs/DryRunInput"
           },
           "request_id": {
             "type": [
@@ -6993,15 +6842,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_DryRunInput",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -7009,7 +6857,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -7023,10 +6871,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -7085,13 +6933,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -7099,20 +6948,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -7121,7 +6970,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -7147,28 +6996,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -7187,9 +7033,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -7197,8 +7041,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -7234,7 +7078,7 @@
                 "type": "string"
               },
               "repository": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               }
             },
             "required": [
@@ -7258,11 +7102,11 @@
                 "type": "string"
               },
               "source": {
-                "$ref": "#/definitions/HookSource"
+                "$ref": "#/$defs/HookSource"
               },
               "step_count": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "trusted": {
@@ -7270,27 +7114,26 @@
               }
             },
             "required": [
-              "configured",
               "phase",
-              "source",
+              "configured",
+              "trusted",
               "step_count",
-              "trusted"
+              "source"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "oneOf": [
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "status"
-                ],
+                "const": "status",
                 "type": "string"
               },
               "phases": {
                 "items": {
-                  "$ref": "#/definitions/HookStatus"
+                  "$ref": "#/$defs/HookStatus"
                 },
                 "type": "array"
               }
@@ -7310,9 +7153,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "generator_status"
-                ],
+                "const": "generator_status",
                 "type": "string"
               },
               "source": {
@@ -7334,9 +7175,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "reset"
-                ],
+                "const": "reset",
                 "type": "string"
               }
             },
@@ -7348,9 +7187,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "already_reset"
-                ],
+                "const": "already_reset",
                 "type": "string"
               }
             },
@@ -7364,7 +7201,7 @@
               "candidate": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/Candidate"
+                    "$ref": "#/$defs/Candidate"
                   },
                   {
                     "type": "null"
@@ -7372,9 +7209,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "dry_run"
-                ],
+                "const": "dry_run",
                 "type": "string"
               }
             },
@@ -7413,9 +7248,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "DryRunInput": {
             "additionalProperties": false,
             "properties": {
@@ -7427,9 +7260,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/DryRunInput"
+            "$ref": "#/$defs/DryRunInput"
           },
           "request_id": {
             "type": [
@@ -7445,15 +7280,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_DryRunInput",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -7461,7 +7295,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -7475,10 +7309,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -7537,13 +7371,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -7551,20 +7386,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -7573,7 +7408,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -7599,28 +7434,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -7639,9 +7471,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -7649,8 +7479,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -7686,7 +7516,7 @@
                 "type": "string"
               },
               "repository": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               }
             },
             "required": [
@@ -7710,11 +7540,11 @@
                 "type": "string"
               },
               "source": {
-                "$ref": "#/definitions/HookSource"
+                "$ref": "#/$defs/HookSource"
               },
               "step_count": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "trusted": {
@@ -7722,27 +7552,26 @@
               }
             },
             "required": [
-              "configured",
               "phase",
-              "source",
+              "configured",
+              "trusted",
               "step_count",
-              "trusted"
+              "source"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "oneOf": [
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "status"
-                ],
+                "const": "status",
                 "type": "string"
               },
               "phases": {
                 "items": {
-                  "$ref": "#/definitions/HookStatus"
+                  "$ref": "#/$defs/HookStatus"
                 },
                 "type": "array"
               }
@@ -7762,9 +7591,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "generator_status"
-                ],
+                "const": "generator_status",
                 "type": "string"
               },
               "source": {
@@ -7786,9 +7613,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "reset"
-                ],
+                "const": "reset",
                 "type": "string"
               }
             },
@@ -7800,9 +7625,7 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "already_reset"
-                ],
+                "const": "already_reset",
                 "type": "string"
               }
             },
@@ -7816,7 +7639,7 @@
               "candidate": {
                 "anyOf": [
                   {
-                    "$ref": "#/definitions/Candidate"
+                    "$ref": "#/$defs/Candidate"
                   },
                   {
                     "type": "null"
@@ -7824,9 +7647,7 @@
                 ]
               },
               "outcome": {
-                "enum": [
-                  "dry_run"
-                ],
+                "const": "dry_run",
                 "type": "string"
               }
             },
@@ -7866,9 +7687,7 @@
       ],
       "outcome": "help",
       "request_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "definitions": {
+        "$defs": {
           "InstallInput": {
             "additionalProperties": false,
             "properties": {
@@ -7880,9 +7699,11 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
         "properties": {
           "input": {
-            "$ref": "#/definitions/InstallInput"
+            "$ref": "#/$defs/InstallInput"
           },
           "request_id": {
             "type": [
@@ -7898,15 +7719,14 @@
           }
         },
         "required": [
-          "input",
-          "schema_version"
+          "schema_version",
+          "input"
         ],
-        "title": "Request_for_InstallInput",
+        "title": "Request",
         "type": "object"
       },
       "response_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "Diagnostic": {
             "properties": {
               "content": {
@@ -7914,7 +7734,7 @@
               },
               "original_size": {
                 "format": "uint",
-                "minimum": 0.0,
+                "minimum": 0,
                 "type": "integer"
               },
               "source": {
@@ -7928,10 +7748,10 @@
               }
             },
             "required": [
-              "content",
-              "original_size",
               "source",
               "stream",
+              "content",
+              "original_size",
               "truncated"
             ],
             "type": "object"
@@ -7990,13 +7810,14 @@
             "required": [
               "action",
               "description",
-              "invocation",
               "mutation",
-              "requires_human_approval"
+              "requires_human_approval",
+              "invocation"
             ],
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "properties": {
           "command": {
             "type": "string"
@@ -8004,20 +7825,20 @@
           "context": true,
           "diagnostics": {
             "items": {
-              "$ref": "#/definitions/Diagnostic"
+              "$ref": "#/$defs/Diagnostic"
             },
             "type": "array"
           },
           "effects": {
             "items": {
-              "$ref": "#/definitions/Effect"
+              "$ref": "#/$defs/Effect"
             },
             "type": "array"
           },
           "error": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ErrorBody"
+                "$ref": "#/$defs/ErrorBody"
               },
               {
                 "type": "null"
@@ -8026,7 +7847,7 @@
           },
           "next_steps": {
             "items": {
-              "$ref": "#/definitions/NextStep"
+              "$ref": "#/$defs/NextStep"
             },
             "type": "array"
           },
@@ -8052,28 +7873,25 @@
           }
         },
         "required": [
-          "command",
-          "context",
-          "diagnostics",
-          "effects",
-          "next_steps",
           "schema_version",
-          "status"
+          "command",
+          "status",
+          "context",
+          "effects",
+          "diagnostics",
+          "next_steps"
         ],
         "title": "Response",
         "type": "object"
       },
       "result_schema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "definitions": {
+        "$defs": {
           "BytePath": {
             "oneOf": [
               {
                 "properties": {
                   "encoding": {
-                    "enum": [
-                      "utf8"
-                    ],
+                    "const": "utf8",
                     "type": "string"
                   },
                   "value": {
@@ -8092,9 +7910,7 @@
                     "type": "string"
                   },
                   "encoding": {
-                    "enum": [
-                      "base64"
-                    ],
+                    "const": "base64",
                     "type": "string"
                   },
                   "value": {
@@ -8102,8 +7918,8 @@
                   }
                 },
                 "required": [
-                  "display",
                   "encoding",
+                  "display",
                   "value"
                 ],
                 "type": "object"
@@ -8117,13 +7933,13 @@
                 "type": "boolean"
               },
               "configuration": {
-                "$ref": "#/definitions/InstallTarget"
+                "$ref": "#/$defs/InstallTarget"
               },
               "integration": {
-                "$ref": "#/definitions/InstallTarget"
+                "$ref": "#/$defs/InstallTarget"
               },
               "startup": {
-                "$ref": "#/definitions/InstallTarget"
+                "$ref": "#/$defs/InstallTarget"
               }
             },
             "required": [
@@ -8137,7 +7953,7 @@
           "InstallTarget": {
             "properties": {
               "path": {
-                "$ref": "#/definitions/BytePath"
+                "$ref": "#/$defs/BytePath"
               },
               "would_change": {
                 "type": "boolean"
@@ -8150,17 +7966,16 @@
             "type": "object"
           }
         },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "oneOf": [
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "dry_run"
-                ],
+                "const": "dry_run",
                 "type": "string"
               },
               "plan": {
-                "$ref": "#/definitions/InstallPlan"
+                "$ref": "#/$defs/InstallPlan"
               }
             },
             "required": [
@@ -8172,13 +7987,11 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "already_current"
-                ],
+                "const": "already_current",
                 "type": "string"
               },
               "plan": {
-                "$ref": "#/definitions/InstallPlan"
+                "$ref": "#/$defs/InstallPlan"
               }
             },
             "required": [
@@ -8190,13 +8003,11 @@
           {
             "properties": {
               "outcome": {
-                "enum": [
-                  "installed"
-                ],
+                "const": "installed",
                 "type": "string"
               },
               "plan": {
-                "$ref": "#/definitions/InstallPlan"
+                "$ref": "#/$defs/InstallPlan"
               }
             },
             "required": [
