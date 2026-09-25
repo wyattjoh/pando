@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/wyattjoh/pando/compare/v0.2.0...v0.2.1) (2026-09-25)
+
+
+### Performance Improvements
+
+* stop running git status in every worktree ([22c7170](https://github.com/wyattjoh/pando/commit/22c7170747d1366274b20ee5ce8627e5bb777340))
+* stop running git status in every worktree ([38182bd](https://github.com/wyattjoh/pando/commit/38182bd01562f2fb02a7e0b44635a69cc6cec789))
+
 ## [0.2.0](https://github.com/wyattjoh/pando/compare/v0.1.1...v0.2.0) (2026-09-25)
 
 
