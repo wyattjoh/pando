@@ -2480,13 +2480,17 @@
         "destination",
         "trust.review",
         "merge.retry",
-        "trust.review_squash_generator"
+        "trust.review_squash_generator",
+        "worktree.enter_target",
+        "worktree.create_target",
+        "worktree.switch_primary"
       ],
       "error_codes": [
         "json.invalid_request",
         "json.unsupported_schema_version",
         "repository.invalid",
         "merge.primary_forbidden",
+        "merge.target_unavailable",
         "merge.dirty",
         "merge.not_fast_forwardable",
         "merge.squash_generator_missing",

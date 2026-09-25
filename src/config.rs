@@ -244,6 +244,9 @@ pub struct EffectiveConfig {
     pub pr_provider: PrProvider,
     pub pr_generation: EffectiveGeneration,
     pub pull_request_template: Option<GenerationValue>,
+    /// The layer that set [`Self::target_branch`], or `None` when merge falls
+    /// back to discovering the target from the repository.
+    pub target_branch_source: Option<GenerationSource>,
 }
 
 impl EffectiveConfig {
@@ -416,6 +419,15 @@ impl EffectiveConfig {
             .or_else(|| shared.worktrees.as_ref().and_then(|section| section.base))
             .or_else(|| global.worktrees.as_ref().and_then(|section| section.base))
             .unwrap_or_default();
+        let target_branch_source = if shared
+            .worktrees
+            .as_ref()
+            .is_some_and(|section| section.target_branch.is_some())
+        {
+            Some(GenerationSource::Shared)
+        } else {
+            target_branch.as_ref().map(|_| GenerationSource::Global)
+        };
         Ok(Self {
             root,
             target_branch,
@@ -495,6 +507,7 @@ impl EffectiveConfig {
                 shared_pr_template,
                 global_pr_template,
             ),
+            target_branch_source,
         })
     }
 

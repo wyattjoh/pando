@@ -107,8 +107,9 @@ Usage: pando merge [OPTIONS]
 | `--no-squash` | Merge the topic's commits as they are instead of collapsing them into one |
 | `--yolo` | Stage every change and include it in the generated squash commit |
 
-Integrates the current clean topic into the resolved target branch
-(checked out in the primary worktree) via `git merge --ff-only`. A diverged
+Integrates the current clean topic into the resolved target branch via
+`git merge --ff-only`, run in whichever registered worktree has the target
+checked out (the primary worktree or a linked one). A diverged
 topic rebases onto the target by default. `--yolo` stages every local change
 and, when squashing (the default), includes it directly in the generated
 squash commit without invoking the commit generator. With `--no-squash`, it
@@ -146,7 +147,40 @@ target branch and **keeps** the topic branch. Nothing is removed, so
 `pre-remove` hooks do not run, `--no-remove` has no additional effect, and no
 destination is written to stdout. The plan/context reports `in_place: true`.
 Running it from the primary worktree while the target branch itself is checked
-out fails with `merge.nothing_to_merge`.
+out fails with `merge.nothing_to_merge`. If another worktree already has the
+target checked out, the primary worktree cannot switch to it and the merge
+fails with `merge.target_unavailable` (`problem: checked_out_elsewhere`).
+
+### Target worktree
+
+The fast-forward runs in the one registered worktree that has the target
+branch checked out, and a removing merge writes that worktree's path as its
+destination. The dry run reports it as `target_worktree` in the context and
+names it in human output. Before any mutation, merge refuses with
+`merge.target_unavailable` when that worktree cannot be used. The error's
+context is typed:
+
+```json
+{
+  "problem": "not_checked_out",
+  "target_branch": "main",
+  "target_source": "fallback",
+  "primary_worktree": {"encoding": "utf8", "value": "/repo"},
+  "primary_branch": "develop",
+  "topic_worktree": {"encoding": "utf8", "value": "/repo-feature"},
+  "target_worktrees": []
+}
+```
+
+`problem` is one of `not_checked_out`, `ambiguous`, `checked_out_elsewhere`,
+`dirty` (tracked changes; untracked files do not block), `locked`, or
+`inaccessible`. `target_source` is `journal`, `local`, `shared`, `global`, or
+`fallback`, and the message says "configured", "journaled", or "resolved"
+target branch accordingly. `next_steps` offers `worktree.create_target`
+(`pando switch <target>`) and `worktree.switch_primary` (`git switch
+<target>` in the primary worktree) for a target checked out nowhere, and
+`worktree.enter_target` for a dirty, locked, or conflicting one. Merge never
+creates, switches, or cleans a target worktree itself.
 
 Uses `worktrees.target-branch` when set in `.pando.yaml` or the global
 config. Otherwise, it falls back to the local branch pointed to by
@@ -179,7 +213,7 @@ stderr rather than streaming it raw. A failure folds the same Git output into
 the reported error, so rebase conflicts stay readable. The continuation
 neutralizes `GIT_EDITOR`, keeping the commit message Git already recorded.
 
-After the default successful cleanup, stdout contains only the primary
+After the default successful cleanup, stdout contains only the target
 worktree's byte-preserving path plus a trailing newline, so the zsh wrapper
 can `cd` there. With `--no-remove`, the topic is retained and no destination is
 written to stdout. See `docs/adr/0001-journal-merge-lifecycle.md`.

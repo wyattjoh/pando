@@ -189,6 +189,14 @@ impl BytePath {
     pub fn path(value: &Path) -> Self {
         Self::new(value.as_os_str())
     }
+    /// A human-readable rendering, lossy only for non-UTF-8 paths.
+    #[must_use]
+    pub fn display(&self) -> &str {
+        match self {
+            Self::Utf8 { value } => value,
+            Self::Base64 { display, .. } => display,
+        }
+    }
 }
 
 /// Reads one strict request document from stdin.
