@@ -3706,7 +3706,7 @@ fn target_unavailable(
             let configure = if matches!(source, MergeTargetSource::Journal) {
                 ""
             } else {
-                ", or set worktrees.target-branch in .pando.yaml or the global config"
+                ", or set worktrees.target-branch in .pando.local.yaml, .pando.yaml, or the global config"
             };
             format!(
                 "{subject} is not checked out in any worktree and {primary_state}; create a target worktree with 'pando switch {target}', switch the primary worktree to {target}{configure}"

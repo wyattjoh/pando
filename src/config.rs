@@ -429,7 +429,13 @@ impl EffectiveConfig {
             .or_else(|| shared.worktrees.as_ref().and_then(|section| section.base))
             .or_else(|| global.worktrees.as_ref().and_then(|section| section.base))
             .unwrap_or_default();
-        let target_branch_source = if shared
+        let target_branch_source = if local
+            .worktrees
+            .as_ref()
+            .is_some_and(|section| section.target_branch.is_some())
+        {
+            Some(GenerationSource::Local)
+        } else if shared
             .worktrees
             .as_ref()
             .is_some_and(|section| section.target_branch.is_some())

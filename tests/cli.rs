@@ -2785,6 +2785,24 @@ fn merge_names_the_global_source_of_an_unchecked_out_target() {
 }
 
 #[test]
+fn json_merge_names_the_local_source_of_an_unchecked_out_target() {
+    let repo = Repository::new();
+    git(&repo.main, ["switch", "-c", "develop"]);
+    commit_feature_change(&repo);
+    write_ignored_local_config(&repo, "worktrees:\n  target-branch: main\n");
+
+    let output = json_command(&repo.linked, &["merge", "--output", "json"], None);
+
+    let value = target_error(&output);
+    assert_eq!(value["context"]["target_source"], "local");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("configured target branch \"main\" (from .pando.local.yaml)"),
+        "{message}"
+    );
+}
+
+#[test]
 fn merge_refuses_a_target_worktree_with_tracked_changes() {
     let repo = Repository::new();
     let target = check_out_main_in_a_linked_worktree(&repo);
