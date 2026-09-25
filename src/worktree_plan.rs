@@ -795,9 +795,7 @@ pub(crate) fn prepare(
             Err(error) => return failure("repository.invalid", format!("{error:#}")),
         }
     }
-    if let Source::New { base } = &plan.source
-        && !authorize_new
-    {
+    if let (Source::New { base }, false) = (&plan.source, authorize_new) {
         let dirty_source = match HistoryObservation::new(&repository.current().path).status() {
             Ok(status) => status.is_dirty(),
             Err(error) => return failure("repository.invalid", format!("{error:#}")),
