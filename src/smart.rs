@@ -148,7 +148,7 @@ fn plan_dry_run(branch: &str, intent: Intent, fetch: bool) -> Result<()> {
             destination.display()
         )),
         Preparation::NewBranch { facts, .. } => {
-            if fetch && let Some(base_ref) = facts.base_ref.as_deref() {
+            if let Some(base_ref) = facts.base_ref.as_deref().filter(|_| fetch) {
                 ui::info(format!(
                     "Would fetch {base_ref} before branching; no changes made."
                 ))?;

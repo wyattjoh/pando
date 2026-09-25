@@ -1105,10 +1105,9 @@ mod tests {
     fn schemas_are_generated_from_runtime_types() {
         assert!(
             schemars::schema_for!(CommitRequestEnvelope)
-                .schema
-                .object
+                .get("properties")
                 .is_some()
         );
-        assert!(schemars::schema_for!(Response).schema.object.is_some());
+        assert!(schemars::schema_for!(Response).get("properties").is_some());
     }
 }
