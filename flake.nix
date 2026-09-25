@@ -19,7 +19,7 @@
           pkgs = import nixpkgs { inherit system; };
           project = pkgs.rustPlatform.buildRustPackage {
             pname = "pando";
-            version = "0.2.0";
+            version = "0.2.0"; # x-release-please-version
             src = ./.;
             nativeBuildInputs = [
               pkgs.gitMinimal
