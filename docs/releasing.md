@@ -4,7 +4,7 @@ Releases are driven by [release-please](https://github.com/googleapis/release-pl
 
 1. Every push to `main` runs `.github/workflows/release.yml`. When releasable commits (`feat:`, `fix:`, `deps:`, or any `!` breaking change) have landed since the last release, release-please opens or refreshes a release PR titled `chore(main): release X.Y.Z`. It bumps the version in `Cargo.toml`, `Cargo.lock`, `flake.nix`, and `.release-please-manifest.json`, and prepends the generated entry to `CHANGELOG.md`.
 2. Merging that PR tags `vX.Y.Z`, creates the GitHub release, and attaches prebuilt `pando` archives with SHA-256 checksums for `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`.
-3. Publishing to crates.io is opt-in: set the repository variable `PUBLISH_CRATES_IO` to `true` and add a `CARGO_REGISTRY_TOKEN` secret.
+3. The crate is not published to crates.io; `Cargo.toml` sets `publish = false` so `cargo publish` refuses to run.
 
 While the project is pre-1.0, `feat:` and breaking changes bump the minor version and `fix:` bumps the patch version. To force a specific version, land a commit with a `Release-As: X.Y.Z` footer.
 

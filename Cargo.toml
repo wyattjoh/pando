@@ -7,6 +7,7 @@ edition = "2024"
 description = "Inspect and switch between Git worktrees"
 license = "MIT"
 repository = "https://github.com/wyattjoh/pando"
+publish = false
 rust-version = "1.85"
 
 [lib]
