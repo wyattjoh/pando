@@ -722,7 +722,7 @@ where
             return Err(error).with_context(|| format!("failed to read {}", path.display()));
         }
     };
-    serde_yaml::from_str(&content)
+    serde_yaml_ng::from_str(&content)
         .with_context(|| format!("failed to parse configuration file {}", path.display()))
 }
 
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn pr_provider_defaults_to_auto() {
-        let config: PrConfig = serde_yaml::from_str("{}").unwrap();
+        let config: PrConfig = serde_yaml_ng::from_str("{}").unwrap();
         assert_eq!(config.provider.unwrap_or_default(), PrProvider::Auto);
     }
 
@@ -777,10 +777,11 @@ mod tests {
             ("github", PrProvider::Github),
             ("tea", PrProvider::Tea),
         ] {
-            let config: PrConfig = serde_yaml::from_str(&format!("provider: {value}\n")).unwrap();
+            let config: PrConfig =
+                serde_yaml_ng::from_str(&format!("provider: {value}\n")).unwrap();
             assert_eq!(config.provider, Some(expected));
         }
-        assert!(serde_yaml::from_str::<PrConfig>("provider: gitlab\n").is_err());
+        assert!(serde_yaml_ng::from_str::<PrConfig>("provider: gitlab\n").is_err());
     }
 
     #[test]
