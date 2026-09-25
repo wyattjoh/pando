@@ -615,7 +615,7 @@ pub(crate) fn prepare(
     let repository = match if input.branch.is_none() && intent == Intent::Switch {
         observation.repository_with_metadata()
     } else {
-        observation.repository_for_navigation()
+        observation.repository()
     } {
         Ok(repository) => repository,
         Err(error) => return failure("repository.invalid", format!("{error:#}")),
@@ -906,7 +906,7 @@ pub(crate) fn prepare_detached_navigation(
             )));
         }
     };
-    let repository = match RepositoryObservation::new(&current_dir).repository_for_navigation() {
+    let repository = match RepositoryObservation::new(&current_dir).repository() {
         Ok(repository) => repository,
         Err(error) => {
             return DetachedNavigationPreparation::Complete(detached_failure(format!("{error:#}")));
@@ -2184,8 +2184,8 @@ fn plan(
         Ok(SourceResolution::FetchRequired(requirement)) if fetch.refreshes() => {
             let output = git::RefMutation::new(&repository.current().path)
                 .fetch_base_ref(&requirement.base_ref)?;
-            let refreshed_repository = RepositoryObservation::new(&repository.current().path)
-                .repository_for_navigation()?;
+            let refreshed_repository =
+                RepositoryObservation::new(&repository.current().path).repository()?;
             let refreshed_snapshot = Snapshot::observe(&refreshed_repository)?;
             let mut rebuilt = match plan(
                 &refreshed_repository,

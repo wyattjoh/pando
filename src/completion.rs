@@ -73,7 +73,7 @@ pub fn remove_candidates() -> Vec<CompletionCandidate> {
     let Some(cwd) = cwd() else {
         return Vec::new();
     };
-    let Ok(repository) = RepositoryObservation::new(&cwd).repository_for_navigation() else {
+    let Ok(repository) = RepositoryObservation::new(&cwd).repository() else {
         return Vec::new();
     };
     repository
@@ -103,9 +103,7 @@ struct BranchContext {
 
 fn branch_context() -> Option<BranchContext> {
     let cwd = cwd()?;
-    let repository = RepositoryObservation::new(&cwd)
-        .repository_for_navigation()
-        .ok()?;
+    let repository = RepositoryObservation::new(&cwd).repository().ok()?;
     let branches = RepositoryObservation::new(&repository.current().path)
         .completion_branch_names()
         .ok()?;

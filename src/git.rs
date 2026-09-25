@@ -6,7 +6,11 @@ use std::{
     os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Output, Stdio},
-    sync::mpsc::{self, SyncSender},
+    sync::{
+        OnceLock,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self, SyncSender},
+    },
     thread,
 };
 
@@ -677,34 +681,38 @@ impl<'cwd> RepositoryObservation<'cwd> {
         Self { cwd }
     }
 
-    fn discover(self) -> Result<Discovery> {
+    fn discover(self, observation: ConditionObservation) -> Result<Discovery> {
         Ok(Discovery {
-            worktrees: discover_worktrees(self.cwd, ConditionObservation::Full)?,
-            metadata_warning: None,
-        })
-    }
-
-    fn discover_for_navigation(self) -> Result<Discovery> {
-        Ok(Discovery {
-            worktrees: discover_worktrees(self.cwd, ConditionObservation::Accessibility)?,
+            worktrees: discover_worktrees(self.cwd, observation)?,
             metadata_warning: None,
         })
     }
 
     fn discover_with_metadata(self) -> Result<Discovery> {
-        let mut discovery = self.discover()?;
+        let mut discovery = self.discover(ConditionObservation::Full)?;
         discovery.metadata_warning = enrich_last_commit_at(self.cwd, &mut discovery.worktrees)
             .err()
             .map(|error| format!("failed to load last-commit metadata: {error:#}"));
         Ok(discovery)
     }
 
+    /// Resolves repository context without running `git status` anywhere.
+    ///
+    /// Each worktree's condition reports only filesystem accessibility: an
+    /// accessible worktree is [`Condition::Unknown`] rather than clean or dirty.
+    /// Callers that need one worktree's clean/dirty state observe it with
+    /// [`Self::worktree_condition`]; only whole-repository presentations such as
+    /// `list` and the pickers pay for every worktree's status.
     pub(crate) fn repository(self) -> Result<Repository> {
-        repository_from_worktrees(self.cwd, self.discover()?)
+        repository_from_worktrees(
+            self.cwd,
+            self.discover(ConditionObservation::Accessibility)?,
+        )
     }
 
-    pub(crate) fn repository_for_navigation(self) -> Result<Repository> {
-        repository_from_worktrees(self.cwd, self.discover_for_navigation()?)
+    /// Observes one worktree's full condition, including clean or dirty.
+    pub(crate) fn worktree_condition(worktree: &Worktree) -> Condition {
+        inspect_condition(worktree)
     }
 
     /// Resolves repository context and enriches worktrees with commit timestamps.
@@ -848,14 +856,53 @@ fn discover_worktrees(cwd: &Path, observation: ConditionObservation) -> Result<V
     let current = current_record(&worktrees, cwd);
     for (index, worktree) in worktrees.iter_mut().enumerate() {
         worktree.current = current == Some(index);
-        worktree.condition = match observation {
-            ConditionObservation::Full => inspect_condition(worktree),
-            ConditionObservation::Accessibility => {
-                inspect_accessibility(worktree).unwrap_or(Condition::Unknown)
+    }
+    match observation {
+        ConditionObservation::Full => inspect_conditions(&mut worktrees),
+        ConditionObservation::Accessibility => {
+            for worktree in &mut worktrees {
+                worktree.condition = inspect_accessibility(worktree).unwrap_or(Condition::Unknown);
             }
-        };
+        }
     }
     Ok(worktrees)
+}
+
+/// Observes every worktree's condition, running the per-worktree `git status`
+/// probes concurrently on a pool bounded by the available parallelism.
+///
+/// Each probe is independent and read-only, so a repository with many
+/// worktrees pays roughly one status walk per core instead of one per
+/// worktree. Results land in each worktree's own slot, so discovery order is
+/// unchanged.
+fn inspect_conditions(worktrees: &mut [Worktree]) {
+    let workers = thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(worktrees.len());
+    if workers <= 1 {
+        for worktree in worktrees {
+            worktree.condition = inspect_condition(worktree);
+        }
+        return;
+    }
+    let next = AtomicUsize::new(0);
+    let conditions: Vec<_> = worktrees.iter().map(|_| OnceLock::new()).collect();
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(worktree) = worktrees.get(index) else {
+                        break;
+                    };
+                    let _ = conditions[index].set(inspect_condition(worktree));
+                }
+            });
+        }
+    });
+    for (worktree, condition) in worktrees.iter_mut().zip(conditions) {
+        worktree.condition = condition.into_inner().unwrap_or(Condition::Unknown);
+    }
 }
 
 fn repository_from_worktrees(cwd: &Path, discovery: Discovery) -> Result<Repository> {

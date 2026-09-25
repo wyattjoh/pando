@@ -3567,6 +3567,12 @@ fn inspect_removal_state(repository: &Repository, target: &Worktree) -> Result<O
 }
 
 fn check_removable(target: &Worktree, force: bool) -> Result<()> {
+    // Repository discovery reports only accessibility, so observe this one
+    // target's clean/dirty condition now rather than every worktree's up front.
+    let target = &Worktree {
+        condition: RepositoryObservation::worktree_condition(target),
+        ..target.clone()
+    };
     if target.locked.is_some()
         || target.prunable.is_some()
         || matches!(
