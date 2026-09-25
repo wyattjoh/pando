@@ -60,6 +60,8 @@ impl HookStep {
 struct LocalWorktreesConfig {
     #[serde(default)]
     root: Option<PathBuf>,
+    #[serde(default, rename = "target-branch")]
+    target_branch: Option<String>,
     #[serde(default, rename = "default-sort")]
     default_sort: Option<SortMode>,
     #[serde(default)]
@@ -397,10 +399,18 @@ impl EffectiveConfig {
         if let Some(path) = &local_path {
             validate_hooks(&local_hooks, path)?;
         }
-        let target_branch = shared
+        // Like the base, the target branch resolves local over shared over
+        // global, so a clone can integrate somewhere the project does not.
+        let target_branch = local
             .worktrees
             .as_ref()
             .and_then(|section| section.target_branch.clone())
+            .or_else(|| {
+                shared
+                    .worktrees
+                    .as_ref()
+                    .and_then(|section| section.target_branch.clone())
+            })
             .or_else(|| {
                 global
                     .worktrees
@@ -524,7 +534,7 @@ impl EffectiveConfig {
     ///
     /// Returns an error when no target branch is configured.
     pub fn require_target_branch(&self) -> Result<&str> {
-        self.target_branch.as_deref().context("no target branch is configured; add worktrees.target-branch to .pando.yaml or global config")
+        self.target_branch.as_deref().context("no target branch is configured; add worktrees.target-branch to .pando.yaml, .pando.local.yaml, or global config")
     }
 }
 

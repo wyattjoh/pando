@@ -126,7 +126,8 @@ worktrees:
   default-sort: last-commit-at # git, branch, last-commit-at, or path
   base: head                   # head (default) or fresh
 ```
-The ignored `.pando.local.yaml` overlay may override all three values;
+The ignored `.pando.local.yaml` overlay may override all three values and
+`target-branch`;
 committed `.pando.yaml` cannot set the personal `default-sort` preference,
 though it may set `base` and `target-branch`.
 Source: README.md ("Global placement")

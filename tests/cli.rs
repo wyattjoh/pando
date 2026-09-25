@@ -10724,6 +10724,39 @@ fn create_fresh_with_an_unfetched_tracking_ref_fails_with_guidance() {
 }
 
 #[test]
+fn local_target_branch_overrides_the_shared_target_branch() {
+    let repo = Repository::new();
+    add_local_origin(&repo);
+    let published = git_output(&repo.main, ["rev-parse", "origin/main"]);
+    advance_local_head(&repo);
+    fs::write(
+        repo.main.join(".pando.yaml"),
+        "worktrees:\n  target-branch: release\n",
+    )
+    .unwrap();
+    write_ignored_local_config(&repo, "worktrees:\n  target-branch: main\n");
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with(&root, "  base: fresh\n");
+
+    let output = create_command(&repo, &xdg, &["create", "topic/local-target"]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "topic/local-target"]),
+        published
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(&format!("from branch \"origin/main\" at {published}")),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn create_fresh_retains_the_dirty_source_warning() {
     let repo = Repository::new();
     add_local_origin(&repo);

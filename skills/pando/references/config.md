@@ -116,10 +116,11 @@ worktrees:
 `target-branch` overrides the default target for `pando merge` and PR
 creation. When it is omitted, operations fall back to the local branch pointed
 to by `origin/HEAD`, then local `main`, then local `master`. Set it in
-`.pando.yaml` or the global config when a different target is needed.
+`.pando.yaml`, `.pando.local.yaml`, or the global config when a different
+target is needed; the local value wins, then shared, then global.
 
-May also set where new branches are cut from — the one placement-adjacent
-key legal in all three layers:
+May also set where new branches are cut from, which, like `target-branch`,
+is legal in all three layers:
 
 ```yaml
 worktrees:
@@ -218,8 +219,8 @@ pr:
 - **Root**: local root overrides global root. There is no intermediate
   "shared root" — the shared file cannot set `worktrees.root` at all, only
   `worktrees.target-branch` and `worktrees.base`.
-- **Base**: local, then shared, then global — the only `pando` key that
-  layers through all three files.
+- **Base and target branch** (`worktrees.base`, `worktrees.target-branch`,
+  each resolving independently): local, then shared, then global.
 - **Default sort**: the ignored local value overrides the global value. The
   committed shared file cannot set this personal interface preference.
 - **Commit generation** (`command` and `template` resolve independently):

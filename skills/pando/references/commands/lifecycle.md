@@ -148,13 +148,13 @@ destination is written to stdout. The plan/context reports `in_place: true`.
 Running it from the primary worktree while the target branch itself is checked
 out fails with `merge.nothing_to_merge`.
 
-Uses `worktrees.target-branch` when set in `.pando.yaml` or the global
-config. Otherwise, it falls back to the local branch pointed to by
+Uses `worktrees.target-branch` when set in `.pando.local.yaml`,
+`.pando.yaml`, or the global config, resolving in that order. Otherwise, it falls back to the local branch pointed to by
 `origin/HEAD`, then local `main`, then local `master`. It errors only when no
 configured or fallback branch exists.
 
 ```yaml
-# .pando.yaml or global config.yaml
+# .pando.local.yaml, .pando.yaml, or global config.yaml
 worktrees:
   target-branch: main
 ```

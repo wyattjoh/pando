@@ -133,7 +133,7 @@ worktrees:
   base: head
 ```
 
-The global file controls placement, the personal default sort, and the personal default new-branch base; it cannot define hooks. `default-sort` accepts `git`, `branch`, `last-commit-at`, or `path`, and defaults to `git` when omitted. `base` accepts `head` or `fresh` and defaults to `head`; it is the one `pando` key legal in all three layers, resolving local over shared over global. Absolute roots are used directly. Relative roots are anchored at Git's primary worktree, not the current nested directory or linked worktree.
+The global file controls placement, the personal default sort, and the personal default new-branch base; it cannot define hooks. `default-sort` accepts `git`, `branch`, `last-commit-at`, or `path`, and defaults to `git` when omitted. `base` accepts `head` or `fresh` and defaults to `head`. `base` and `target-branch` are legal in all three layers, each resolving local over shared over global. Absolute roots are used directly. Relative roots are anchored at Git's primary worktree, not the current nested directory or linked worktree.
 
 ### Shared project setup
 
@@ -154,12 +154,13 @@ Each step runs sequentially from the new worktree root through `/bin/sh -c`. Ste
 
 ### Personal per-clone overlay
 
-A `.pando.local.yaml` in the primary worktree can override placement and the new-branch base, and append personal hooks:
+A `.pando.local.yaml` in the primary worktree can override placement, the merge target branch, and the new-branch base, and append personal hooks:
 
 ```yaml
 worktrees:
   root: /Volumes/fast/worktrees
   default-sort: path
+  target-branch: develop
   base: fresh
 hooks:
   post-create:
