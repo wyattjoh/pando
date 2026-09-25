@@ -16,6 +16,9 @@ just install          # cargo install --path .
 cargo test --test cli switch_creates          # one integration test (substring match)
 cargo test --lib                              # unit tests only (in-module #[cfg(test)])
 cargo test --test cli -- --nocapture          # see PTY/child output
+
+scripts/bench-repo.py <dir>                   # generate a large sample repo (many refs, worktrees, data)
+scripts/bench.sh <dir> <pando> [<pando>...]   # hyperfine read-only and dry-run commands against it
 ```
 
 CI runs `fmt --check`, `clippy -D warnings`, and `test --all-features` on ubuntu-latest, plus `cargo check --all-features --locked` on the declared Rust 1.85 MSRV. Clippy `pedantic` is `warn` in `Cargo.toml` but denied in CI, so public fallible functions need `/// # Errors` doc sections and public types need `#[must_use]` where applicable.
@@ -86,7 +89,7 @@ Shared hooks run before local hooks; the local root and default sort override th
 
 **Branch resolution order** inside topic worktree preparation is: existing registered worktree → existing local branch → single already-fetched remote match → explicit choice among multiple remotes → a genuinely new branch from the base `worktrees.base` selects. `branch::Snapshot` owns classification and never prompts or implicitly selects an ambiguous remote; only the human adapter renders choices and confirmations. The tool never adopts, repairs, prunes, moves, or deletes an existing destination or a broken worktree record.
 
-**Branch observation is bounded, not per-ref.** An explicit switch to a registered worktree resolves from `git worktree list` before building a branch snapshot, and explicit navigation/get/completion paths inspect filesystem accessibility without running `git status` in every worktree. Human and JSON list/picker paths still observe full clean/dirty conditions. When a snapshot is needed, `git for-each-ref` pins local and remote object identities, upstreams, and the remote HEAD in batched observations; never add a Git subprocess loop over branches or refs. Creation revalidation checks only the selected source ref instead of rebuilding a snapshot, and completion observes only names needed for candidates. These are performance invariants for repositories with hundreds of branches.
+**Branch observation is bounded, not per-ref.** An explicit switch to a registered worktree resolves from `git worktree list` before building a branch snapshot, and `RepositoryObservation::repository()` inspects only filesystem accessibility and never runs `git status`; lifecycle commands (`commit`, `merge`, `remove`, `pr`, `trust`) observe the one worktree whose clean/dirty state they check with `worktree_condition`. Only human and JSON list/picker/clean paths observe every worktree's condition, and they run those probes concurrently, bounded by the available parallelism. When a snapshot is needed, `git for-each-ref` pins local and remote object identities, upstreams, and the remote HEAD in batched observations; never add a Git subprocess loop over branches or refs. Creation revalidation checks only the selected source ref instead of rebuilding a snapshot, and completion observes only names needed for candidates. These are performance invariants for repositories with hundreds of branches.
 
 **One planner owns the new-branch start point.** `git::plan_new_branch_base` is the single place any interface resolves it, so human `switch`/`create`, their dry runs, and both JSON variants cannot drift. Dry runs call it with fetching disabled and report the refresh as an unattempted effect instead.
 

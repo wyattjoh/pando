@@ -5972,6 +5972,116 @@ fn registered_switch_skips_unrelated_branch_observation() {
     assert!(!calls.contains("rev-parse --verify"), "{calls}");
 }
 
+/// Counts the whole-repository condition probes a `--verbose` run started.
+fn condition_probes(stderr: &str) -> usize {
+    stderr
+        .lines()
+        .filter(|line| line.ends_with("git status --porcelain started"))
+        .count()
+}
+
+#[test]
+fn lifecycle_commands_observe_only_the_worktrees_they_touch() {
+    let repo = Repository::new();
+    let unrelated = repo.add_worktree("unrelated", "unrelated");
+    let doomed = repo.add_worktree("doomed", "doomed");
+    fs::write(unrelated.join("README.md"), "dirty\n").unwrap();
+    fs::write(repo.linked.join("README.md"), "changed\n").unwrap();
+
+    let remove = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["remove", "doomed", "--dry-run", "--verbose"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    assert!(
+        remove.status.success(),
+        "{}",
+        String::from_utf8_lossy(&remove.stderr)
+    );
+    let stderr = String::from_utf8(remove.stderr).unwrap();
+    assert_eq!(
+        condition_probes(&stderr),
+        1,
+        "only the target is probed: {stderr}"
+    );
+    assert!(doomed.exists());
+
+    let commit = Command::cargo_bin("pando")
+        .unwrap()
+        .args([
+            "commit",
+            "--stage-all",
+            "-m",
+            "change",
+            "--dry-run",
+            "--verbose",
+        ])
+        .current_dir(&repo.linked)
+        .output()
+        .unwrap();
+    assert!(
+        commit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let stderr = String::from_utf8(commit.stderr).unwrap();
+    assert_eq!(
+        condition_probes(&stderr),
+        0,
+        "no other worktree is probed: {stderr}"
+    );
+}
+
+#[test]
+fn list_probes_every_worktree_and_keeps_discovery_order() {
+    let repo = Repository::new();
+    let names: Vec<_> = (0..12).map(|index| format!("topic-{index:02}")).collect();
+    for (index, name) in names.iter().enumerate() {
+        let path = repo.add_worktree(name, name);
+        if index % 3 == 0 {
+            fs::write(path.join("README.md"), "dirty\n").unwrap();
+        }
+    }
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["--output", "json", "list", "--verbose"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(condition_probes(&stderr), 14, "{stderr}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = json["result"]["worktrees"].as_array().unwrap();
+    let observed: Vec<_> = rows
+        .iter()
+        .skip(2)
+        .map(|row| {
+            (
+                row["branch"].as_str().unwrap(),
+                row["condition"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let expected: Vec<_> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            (
+                name.as_str(),
+                if index % 3 == 0 { "dirty" } else { "clean" },
+            )
+        })
+        .collect();
+    assert_eq!(observed, expected);
+}
+
 #[test]
 fn new_branch_planning_uses_a_bounded_number_of_git_processes() {
     let repo = Repository::new();

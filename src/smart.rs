@@ -71,11 +71,9 @@ pub fn switch(branch: Option<String>, branches: bool, fetch: bool) -> Result<()>
         };
         return pick_and_switch(&repository, initial_view, fetch);
     };
-    let repository = {
-        let _span = debug::Span::new("repository discovery");
-        RepositoryObservation::new(&cwd).repository_for_navigation()?
-    };
-    resolve_and_switch(&repository, &branch, Intent::Switch, fetch)
+    // Preparation observes the repository itself; the adapter only needs its
+    // own snapshot on the rare hook-approval path, so it defers that discovery.
+    resolve_and_switch(None, &branch, Intent::Switch, fetch)
 }
 
 /// Creates a worktree for `branch` and emits its destination.
@@ -88,13 +86,7 @@ pub fn switch(branch: Option<String>, branches: bool, fetch: bool) -> Result<()>
 /// Returns an error when the branch is already registered, or when repository planning,
 /// hook approval, creation, or setup fails.
 pub fn create(branch: &str, fetch: bool) -> Result<()> {
-    let cwd = env::current_dir().context("failed to read the current directory")?;
-    resolve_and_switch(
-        &RepositoryObservation::new(&cwd).repository_for_navigation()?,
-        branch,
-        Intent::Create,
-        fetch,
-    )
+    resolve_and_switch(None, branch, Intent::Create, fetch)
 }
 
 /// Prints one stable current-worktree property.
@@ -512,17 +504,17 @@ fn pick_and_switch(
         PickerChoice::Worktree(identity) => {
             let chosen = choices[identity];
             if let WorktreeKind::Branch(branch) = &chosen.kind {
-                return resolve_and_switch(repository, branch, Intent::Switch, fetch);
+                return resolve_and_switch(Some(repository), branch, Intent::Switch, fetch);
             }
             branch::reject_fetch(fetch, branch::FETCH_REGISTERED_WORKTREE)?;
             enter_existing(repository, &chosen.path)
         }
         PickerChoice::Branch(branch) => {
-            resolve_and_switch(repository, &branch, Intent::Switch, fetch)
+            resolve_and_switch(Some(repository), &branch, Intent::Switch, fetch)
         }
         PickerChoice::Create => {
             let branch = read_branch_name()?;
-            resolve_and_switch(repository, &branch, Intent::Switch, fetch)
+            resolve_and_switch(Some(repository), &branch, Intent::Switch, fetch)
         }
     }
 }
@@ -1268,7 +1260,7 @@ fn read_branch_name() -> Result<String> {
 }
 
 fn resolve_and_switch(
-    repository: &Repository,
+    repository: Option<&Repository>,
     branch: &str,
     intent: Intent,
     fetch: bool,
@@ -1289,7 +1281,13 @@ fn resolve_and_switch(
                 input.remote = Some(choose_remote(&remotes, branch)?);
             }
             Preparation::ApprovalRequired { candidate, .. } => {
-                approve_planned_hooks(repository, &candidate)?;
+                if let Some(repository) = repository {
+                    approve_planned_hooks(repository, &candidate)?;
+                } else {
+                    let cwd = env::current_dir().context("failed to read the current directory")?;
+                    let repository = RepositoryObservation::new(&cwd).repository()?;
+                    approve_planned_hooks(&repository, &candidate)?;
+                }
             }
             Preparation::NewBranch { facts, .. } => {
                 if let Some(output) = facts
