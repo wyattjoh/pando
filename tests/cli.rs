@@ -8777,6 +8777,7 @@ fn json_exact_leaf_help_advertises_complete_operation_contracts() {
             "switch.approval_required",
             "switch.plan_stale",
             "switch.creation_failed",
+            "switch.include_failed",
             "switch.setup_failed",
             "switch.setup_incomplete",
             "trust.approval_required"
@@ -8807,6 +8808,7 @@ fn json_exact_leaf_help_advertises_complete_operation_contracts() {
             "create.plan_stale",
             "create.creation_failed",
             "create.description_failed",
+            "create.include_failed",
             "create.setup_failed",
             "trust.approval_required"
         ])
@@ -9790,6 +9792,158 @@ fn json_create_description_does_not_modify_a_registered_branch() {
         branch_description(&repo.main, "feature").as_deref(),
         Some("Keep this")
     );
+}
+
+/// Seeds `worktree` with ignored files, one of them outside the include file's selection.
+fn seed_worktreeinclude(worktree: &Path) {
+    fs::write(
+        worktree.join(".gitignore"),
+        ".env*\nconfig/local.yaml\nsecret.key\n/created/\n",
+    )
+    .unwrap();
+    fs::write(
+        worktree.join(".worktreeinclude"),
+        ".env*\nconfig/local.yaml\nnot-ignored.txt\n",
+    )
+    .unwrap();
+    fs::write(worktree.join(".env.local"), "TOKEN=abc\n").unwrap();
+    fs::create_dir_all(worktree.join("config")).unwrap();
+    fs::write(worktree.join("config/local.yaml"), "debug: true\n").unwrap();
+    fs::write(worktree.join("secret.key"), "not selected\n").unwrap();
+    fs::write(worktree.join("not-ignored.txt"), "untracked\n").unwrap();
+}
+
+#[test]
+fn create_copies_ignored_files_selected_by_worktreeinclude() {
+    let repo = Repository::new();
+    seed_worktreeinclude(&repo.main);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+
+    let output = create_command(&repo, &xdg, &["create", "topic/included"]);
+    let destination = root.join("topic/included");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", destination.canonicalize().unwrap().display()).as_bytes()
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("copied 2 files from .worktreeinclude"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join(".env.local")).unwrap(),
+        "TOKEN=abc\n"
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("config/local.yaml")).unwrap(),
+        "debug: true\n"
+    );
+    assert!(!destination.join("secret.key").exists());
+    assert!(!destination.join("not-ignored.txt").exists());
+}
+
+#[test]
+fn create_copies_included_files_from_the_invoking_worktree() {
+    let repo = Repository::new();
+    seed_worktreeinclude(&repo.linked);
+    fs::write(repo.linked.join(".env.local"), "FROM=linked\n").unwrap();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["create", "from-linked"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("from-linked/.env.local")).unwrap(),
+        "FROM=linked\n"
+    );
+}
+
+#[test]
+fn create_skips_worktreeinclude_when_configuration_disables_it() {
+    let repo = Repository::new();
+    seed_worktreeinclude(&repo.main);
+    fs::write(
+        repo.main.join(".pando.yaml"),
+        "worktrees:\n  include: false\n",
+    )
+    .unwrap();
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+
+    let output = create_command(&repo, &xdg, &["create", "topic/excluded"]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains(".worktreeinclude"), "{stderr}");
+    assert!(root.join("topic/excluded/.git").exists());
+    assert!(!root.join("topic/excluded/.env.local").exists());
+
+    let json = create_command(
+        &repo,
+        &xdg,
+        &["create", "topic/excluded-json", "--output", "json"],
+    );
+    assert!(json.status.success());
+    let value = assert_json_pure(&json);
+    assert!(
+        value["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|effect| effect["action"] != "copy_included_files"),
+        "{value}"
+    );
+}
+
+#[test]
+fn json_create_reports_the_copy_included_files_effect() {
+    let repo = Repository::new();
+    seed_worktreeinclude(&repo.main);
+    let root = repo.temp.path().join("created");
+    let xdg = config_home_with_root(&root);
+
+    let preview = create_command(
+        &repo,
+        &xdg,
+        &["create", "topic/json", "--dry-run", "--output", "json"],
+    );
+    assert!(preview.status.success());
+    let value = assert_json_pure(&preview);
+    assert_eq!(value["effects"][2]["action"], "copy_included_files");
+    assert_eq!(value["effects"][2]["attempted"], false);
+    assert!(value["effects"][2]["details"]["copied"].is_null());
+    assert!(!root.exists());
+
+    let execute = create_command(&repo, &xdg, &["create", "topic/json", "--output", "json"]);
+    assert!(execute.status.success());
+    let value = assert_json_pure(&execute);
+    assert_eq!(value["effects"][2]["action"], "copy_included_files");
+    assert_eq!(value["effects"][2]["completed"], true);
+    assert_eq!(value["effects"][2]["details"]["copied"], 2);
+    assert!(root.join("topic/json/.env.local").exists());
 }
 
 #[test]
