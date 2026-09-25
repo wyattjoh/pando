@@ -20,7 +20,7 @@ mod merge_machine;
 use crate::{
     Condition, Worktree, WorktreeKind,
     branch::Snapshot,
-    config::{EffectiveConfig, HookPhase},
+    config::{EffectiveConfig, GenerationSource, HookPhase},
     git::{
         self, HistoryObservation, LifecycleMutation, LifecycleOutput, Repository,
         RepositoryObservation,
@@ -49,6 +49,10 @@ pub struct MergeContext {
     pub target_commit: String,
     pub topic_worktree: BytePath,
     pub primary_worktree: BytePath,
+    /// The worktree that has the target branch checked out and receives the
+    /// fast-forward. It is the primary worktree for an in-place merge.
+    pub target_worktree: BytePath,
+    pub target_source: MergeTargetSource,
     /// The topic branch is checked out in the primary worktree itself, so the
     /// merge switches that worktree to the target instead of removing anything.
     pub in_place: bool,
@@ -76,6 +80,80 @@ pub enum MergePhase {
     Integration,
     Cleanup,
     Complete,
+}
+
+/// Where the merge target branch was selected from.
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeTargetSource {
+    /// Pinned by the lifecycle journal of an interrupted merge.
+    Journal,
+    Local,
+    Shared,
+    Global,
+    /// No layer sets `worktrees.target-branch`, so the target was discovered.
+    Fallback,
+}
+
+impl MergeTargetSource {
+    const fn from_config(source: Option<GenerationSource>) -> Self {
+        match source {
+            Some(GenerationSource::Local) => Self::Local,
+            Some(GenerationSource::Shared) => Self::Shared,
+            Some(GenerationSource::Global) => Self::Global,
+            None => Self::Fallback,
+        }
+    }
+
+    const fn subject(self) -> &'static str {
+        match self {
+            Self::Journal => "journaled target branch",
+            Self::Local | Self::Shared | Self::Global => "configured target branch",
+            Self::Fallback => "resolved target branch",
+        }
+    }
+
+    const fn origin(self) -> &'static str {
+        match self {
+            Self::Journal => "pinned when this merge started",
+            Self::Local => "from .pando.local.yaml",
+            Self::Shared => "from .pando.yaml",
+            Self::Global => "from the global config",
+            Self::Fallback => "no worktrees.target-branch is configured",
+        }
+    }
+}
+
+/// Why the target branch has no worktree the merge can integrate into.
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeTargetProblem {
+    /// No registered worktree has the target branch checked out.
+    NotCheckedOut,
+    /// More than one registered worktree has the target branch checked out.
+    Ambiguous,
+    /// An in-place merge cannot switch the primary worktree to a target that
+    /// another worktree has checked out.
+    CheckedOutElsewhere,
+    /// The target worktree has uncommitted tracked changes.
+    Dirty,
+    Locked,
+    /// The target worktree is missing, prunable, or unreadable.
+    Inaccessible,
+}
+
+/// Typed facts for a merge whose target worktree cannot be used.
+#[derive(Clone, Debug, JsonSchema, Serialize)]
+pub struct MergeTargetLocation {
+    pub problem: MergeTargetProblem,
+    pub target_branch: String,
+    pub target_source: MergeTargetSource,
+    pub primary_worktree: BytePath,
+    /// The primary worktree's branch, or `None` when it is detached.
+    pub primary_branch: Option<String>,
+    pub topic_worktree: BytePath,
+    /// Every registered worktree that has the target branch checked out.
+    pub target_worktrees: Vec<BytePath>,
 }
 
 #[derive(Clone, Copy, Debug, JsonSchema, Serialize)]
@@ -181,6 +259,7 @@ pub struct MergeApprovalContext {
 #[serde(untagged)]
 pub enum MergeOutcomeContext {
     Unavailable {},
+    TargetUnavailable(MergeTargetLocation),
     Lifecycle(MergeContext),
     Approval {
         #[serde(flatten)]
@@ -210,6 +289,7 @@ pub const MERGE_ERRORS: &[&str] = &[
     "json.unsupported_schema_version",
     "repository.invalid",
     "merge.primary_forbidden",
+    "merge.target_unavailable",
     "merge.dirty",
     "merge.not_fast_forwardable",
     "merge.squash_generator_missing",
@@ -240,6 +320,9 @@ pub const MERGE_ACTIONS: &[&str] = &[
     "trust.review",
     "merge.retry",
     "trust.review_squash_generator",
+    "worktree.enter_target",
+    "worktree.create_target",
+    "worktree.switch_primary",
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -257,12 +340,14 @@ pub enum PreflightFailureKind {
     NotFastForwardable,
     StalePlan,
     LeaseBusy,
+    TargetUnavailable,
     Blocked,
 }
 #[derive(Debug)]
 pub struct PreflightFailure {
     pub kind: PreflightFailureKind,
     error: anyhow::Error,
+    target: Option<Box<MergeTargetLocation>>,
 }
 impl std::fmt::Display for PreflightFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -275,6 +360,7 @@ impl From<anyhow::Error> for PreflightFailure {
         Self {
             kind: PreflightFailureKind::Blocked,
             error,
+            target: None,
         }
     }
 }
@@ -282,6 +368,7 @@ fn preflight(kind: PreflightFailureKind, message: impl Into<String>) -> Prefligh
     PreflightFailure {
         kind,
         error: anyhow::anyhow!(message.into()),
+        target: None,
     }
 }
 
@@ -296,6 +383,7 @@ pub fn merge_preflight_outcome(error: &PreflightFailure) -> MergeOutcome {
         PreflightFailureKind::SquashGeneratorMissing => "merge.squash_generator_missing",
         PreflightFailureKind::StalePlan => "merge.stale_plan",
         PreflightFailureKind::LeaseBusy => "merge.busy",
+        PreflightFailureKind::TargetUnavailable => "merge.target_unavailable",
         _ => "merge.blocked",
     };
     MergeOutcome {
@@ -303,11 +391,76 @@ pub fn merge_preflight_outcome(error: &PreflightFailure) -> MergeOutcome {
             code: code.into(),
             message: error.to_string(),
         }),
-        context: MergeOutcomeContext::Unavailable {},
+        context: error
+            .target
+            .as_deref()
+            .map_or(MergeOutcomeContext::Unavailable {}, |target| {
+                MergeOutcomeContext::TargetUnavailable(target.clone())
+            }),
         effects: Vec::new(),
         diagnostics: Vec::new(),
-        recovery: Vec::new(),
+        recovery: error
+            .target
+            .as_deref()
+            .map_or_else(Vec::new, target_recovery),
         destination: None,
+    }
+}
+
+/// Recovery steps for a target worktree the merge cannot use. None of them
+/// retries the merge, because each leaves a choice the caller must make first.
+fn target_recovery(
+    target: &MergeTargetLocation,
+) -> Vec<RecoveryAction<protocol::Request<MergeInput>>> {
+    let action = |action: &str,
+                  description: String,
+                  mutation: MutationClass,
+                  argv: &[&str],
+                  working_directory: &BytePath| RecoveryAction {
+        action: action.into(),
+        description,
+        mutation,
+        requires_human_approval: false,
+        invocation: RecoveryInvocation {
+            argv: argv.iter().map(|&arg| arg.to_owned()).collect(),
+            stdin: None,
+            working_directory: Some(working_directory.clone()),
+        },
+    };
+    let branch = target.target_branch.as_str();
+    match target.problem {
+        MergeTargetProblem::NotCheckedOut => vec![
+            action(
+                "worktree.create_target",
+                format!(
+                    "Create a worktree for {branch:?} and retry the merge from the topic worktree"
+                ),
+                MutationClass::Worktree,
+                &["pando", "switch", branch],
+                &target.topic_worktree,
+            ),
+            action(
+                "worktree.switch_primary",
+                format!(
+                    "Switch the primary worktree to {branch:?} and retry the merge from the topic worktree"
+                ),
+                MutationClass::Worktree,
+                &["git", "switch", branch],
+                &target.primary_worktree,
+            ),
+        ],
+        MergeTargetProblem::Dirty
+        | MergeTargetProblem::Locked
+        | MergeTargetProblem::CheckedOutElsewhere => vec![action(
+            "worktree.enter_target",
+            format!(
+                "Enter the worktree that has {branch:?} checked out to resolve the reported blocker"
+            ),
+            MutationClass::None,
+            &["pando", "switch", branch],
+            &target.topic_worktree,
+        )],
+        MergeTargetProblem::Ambiguous | MergeTargetProblem::Inaccessible => Vec::new(),
     }
 }
 
@@ -331,6 +484,8 @@ struct MergePlan {
     pub repository: Repository,
     pub context: MergeContext,
     pub config: EffectiveConfig,
+    /// Where the fast-forward runs and where a removing merge lands.
+    target_worktree: PathBuf,
     pub needs_rebase: bool,
     pub(crate) squash: squash::Assessment,
     resuming_squash: bool,
@@ -761,22 +916,20 @@ fn plan_merge(
     )?;
     let target = merge_target.branch;
     snapshot.validate(&target)?;
-    let checked_out = primary_branch(&repository)?;
-    if in_place {
-        if journal.is_none() && checked_out == target {
-            return Err(preflight(
-                PreflightFailureKind::NothingToMerge,
-                format!(
-                    "the primary worktree is already on {target:?}; check out a topic branch before merging"
-                ),
-            ));
-        }
-    } else if checked_out != target {
-        return Err(anyhow::anyhow!(
-            "configured target branch {target:?} must be checked out in the primary worktree"
-        )
-        .into());
+    let target_source = if journal.is_some() {
+        MergeTargetSource::Journal
+    } else {
+        MergeTargetSource::from_config(config.target_branch_source)
+    };
+    if in_place && journal.is_none() && primary_branch(&repository)? == target {
+        return Err(preflight(
+            PreflightFailureKind::NothingToMerge,
+            format!(
+                "the primary worktree is already on {target:?}; check out a topic branch before merging"
+            ),
+        ));
     }
+    let target_worktree = locate_target_worktree(&repository, &target, target_source, in_place)?;
     let source_commit = merge_target.source_commit;
     let target_commit = merge_target.target_commit;
     let mut integration_observed = false;
@@ -825,6 +978,11 @@ fn plan_merge(
     }
     let cleanup_pending =
         journal.as_ref().is_some_and(|state| state.cleanup_pending) || integration_observed;
+    // Once the target has been fast-forwarded, its worktree is only the
+    // destination, so local changes there no longer block cleanup.
+    if !in_place && !cleanup_pending {
+        check_target_worktree(&repository, &target, target_source, &target_worktree)?;
+    }
     let needs_rebase =
         !cleanup_pending && !rebase_active && !current_history.is_ancestor(&target, &source)?;
     if needs_rebase && policy.no_rebase {
@@ -893,6 +1051,8 @@ fn plan_merge(
         target_commit,
         topic_worktree: BytePath::path(&repository.current().path),
         primary_worktree: BytePath::path(primary),
+        target_worktree: BytePath::path(&target_worktree),
+        target_source,
         in_place,
         cleanup_pending,
         journaled: journal.is_some(),
@@ -911,6 +1071,7 @@ fn plan_merge(
         repository,
         context,
         config,
+        target_worktree,
         needs_rebase,
         squash,
         resuming_squash,
@@ -1070,7 +1231,7 @@ fn planned_merge_effects(
         ),
         remove_worktree: MergeEffectState::planned(serde_json::json!({"applicable":removes})),
         destination: MergeEffectState::planned(
-            serde_json::json!({"applicable":removes,"path":context.primary_worktree}),
+            serde_json::json!({"applicable":removes,"path":context.target_worktree}),
         ),
         journal_cleanup: MergeEffectState::planned(serde_json::json!({"applicable":true})),
     }
@@ -2087,7 +2248,9 @@ pub fn merge_dry_run(no_rebase: bool, no_remove: bool, no_squash: bool) -> Resul
         | MergeOutcomeContext::Approval {
             lifecycle: context, ..
         } => context,
-        MergeOutcomeContext::Completed { .. } | MergeOutcomeContext::Unavailable {} => {
+        MergeOutcomeContext::Completed { .. }
+        | MergeOutcomeContext::Unavailable {}
+        | MergeOutcomeContext::TargetUnavailable(_) => {
             unreachable!("a successful dry run has planned lifecycle context")
         }
     };
@@ -2114,8 +2277,13 @@ pub fn merge_dry_run(no_rebase: bool, no_remove: bool, no_squash: bool) -> Resul
     } else {
         " and remove the topic worktree".to_owned()
     };
+    let location = if context.in_place {
+        String::new()
+    } else {
+        format!(" at {}", context.target_worktree.display())
+    };
     ui::finish(format!(
-        "Would merge {} into {}{follow_up}; no changes made.",
+        "Would merge {} into {}{location}{follow_up}; no changes made.",
         context.source_branch, context.target_branch,
     ))
 }
@@ -2526,12 +2694,7 @@ fn run_validation_step(
 ) -> std::result::Result<String, DriverStepFailure> {
     let current = plan.repository.current();
     let current_history = HistoryObservation::new(&current.path);
-    let primary = plan
-        .repository
-        .primary
-        .as_ref()
-        .expect("a merge plan always has a primary worktree");
-    let primary_history = HistoryObservation::new(primary);
+    let target_history = HistoryObservation::new(&plan.target_worktree);
     let mut candidate = current_history
         .head_commit()
         .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::StalePlan, error))?;
@@ -2590,7 +2753,7 @@ fn run_validation_step(
         let refreshed = current_history
             .head_commit()
             .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::StalePlan, error))?;
-        if !primary_history
+        if !target_history
             .commit(&plan.context.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
         {
@@ -2624,22 +2787,17 @@ fn run_integration_step(
 ) -> std::result::Result<(), DriverStepFailure> {
     let current = plan.repository.current();
     let current_history = HistoryObservation::new(&current.path);
-    let primary = plan
-        .repository
-        .primary
-        .as_ref()
-        .expect("a merge plan always has a primary worktree");
-    let primary_history = HistoryObservation::new(primary);
+    let target_history = HistoryObservation::new(&plan.target_worktree);
     if !current_history
         .head_commit()
         .is_ok_and(|head| head == candidate)
-        || !primary_history
+        || !target_history
             .commit(&plan.context.source_branch)
             .is_ok_and(|head| head == candidate)
-        || !primary_history
+        || !target_history
             .commit(&plan.context.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
-        || !primary_history
+        || !target_history
             .is_ancestor(&plan.context.target_branch, candidate)
             .unwrap_or(false)
     {
@@ -2658,7 +2816,7 @@ fn run_integration_step(
         )
         .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::Integration, error))?;
     }
-    let refreshed_repository = RepositoryObservation::new(primary)
+    let refreshed_repository = RepositoryObservation::new(&plan.target_worktree)
         .repository()
         .map_err(|error| DriverStepFailure::new(MergeExecutionFailureKind::StalePlan, error))?;
     if !refreshed_repository
@@ -2666,13 +2824,13 @@ fn run_integration_step(
         .iter()
         .any(|worktree| worktree.path == current.path)
         || refreshed_repository.current_branch().ok() != Some(state.target_branch.as_str())
-        || !primary_history
+        || !target_history
             .commit(&state.source_branch)
             .is_ok_and(|head| head == candidate)
-        || !primary_history
+        || !target_history
             .commit(&state.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
-        || !primary_history
+        || !target_history
             .is_ancestor(&state.target_branch, candidate)
             .unwrap_or(false)
     {
@@ -2738,19 +2896,14 @@ fn execute_merge(
     let mut effects = plan.effects.clone();
     let mut diagnostics = Vec::new();
     let current = plan.repository.current();
-    let primary = plan
-        .repository
-        .primary
-        .as_ref()
-        .expect("a merge plan always has a primary worktree");
     let current_history = HistoryObservation::new(&current.path);
-    let primary_history = HistoryObservation::new(primary);
+    let target_history = HistoryObservation::new(&plan.target_worktree);
     let current_mutation = LifecycleMutation::new(&current.path);
-    let primary_mutation = LifecycleMutation::new(primary);
+    let target_mutation = LifecycleMutation::new(&plan.target_worktree);
     if !current_history
         .head_commit()
         .is_ok_and(|head| head == plan.context.source_commit)
-        || !primary_history
+        || !target_history
             .commit(&plan.context.target_branch)
             .is_ok_and(|head| head == plan.context.target_commit)
         || (!plan.context.rebase_active
@@ -2897,7 +3050,7 @@ fn execute_merge(
                         validated_candidate
                             .as_deref()
                             .expect("validation always supplies the integration candidate"),
-                        primary_mutation,
+                        target_mutation,
                         &mut effects,
                         &mut diagnostics,
                         observations,
@@ -3110,7 +3263,7 @@ fn execute_merge_cleanup(
     }
     effects.mark(MergeAction::RemoveWorktree, true, true);
     effects.mark(MergeAction::Destination, true, true);
-    let destination = Some(primary.clone());
+    let destination = Some(plan.target_worktree.clone());
 
     effects.mark(MergeAction::JournalCleanup, true, false);
     if let Err(error) = remove_journal(&plan.repository.common_dir, &state.topic_identity) {
@@ -3199,7 +3352,7 @@ fn finish_human_merge(outcome: &MergeOutcome) -> Result<()> {
         | MergeOutcomeContext::Completed {
             initial: context, ..
         } => context,
-        MergeOutcomeContext::Unavailable {} => {
+        MergeOutcomeContext::Unavailable {} | MergeOutcomeContext::TargetUnavailable(_) => {
             unreachable!("a successful merge always has lifecycle context")
         }
     };
@@ -3438,6 +3591,159 @@ fn check_removable(target: &Worktree, force: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Finds the one worktree that has the target branch checked out.
+///
+/// An in-place merge integrates in the primary worktree itself, so there the
+/// target must not be checked out anywhere else.
+fn locate_target_worktree(
+    repository: &Repository,
+    target: &str,
+    source: MergeTargetSource,
+    in_place: bool,
+) -> PreflightResult<PathBuf> {
+    let primary = repository
+        .primary
+        .as_ref()
+        .context("cannot merge from a bare repository")?;
+    let owners: Vec<&Worktree> = repository
+        .worktrees
+        .iter()
+        .filter(
+            |worktree| matches!(&worktree.kind, WorktreeKind::Branch(branch) if branch == target),
+        )
+        .collect();
+    let unavailable = |problem| {
+        Err(target_unavailable(
+            repository, target, source, problem, &owners,
+        ))
+    };
+    if in_place {
+        return if owners.iter().any(|owner| owner.path != *primary) {
+            unavailable(MergeTargetProblem::CheckedOutElsewhere)
+        } else {
+            Ok(primary.clone())
+        };
+    }
+    match owners.as_slice() {
+        [] => unavailable(MergeTargetProblem::NotCheckedOut),
+        [owner] if owner.path == repository.current().path => Err(preflight(
+            PreflightFailureKind::NothingToMerge,
+            format!(
+                "the current worktree is already on {target:?}; check out a topic branch before merging"
+            ),
+        )),
+        [owner] => Ok(owner.path.clone()),
+        _ => unavailable(MergeTargetProblem::Ambiguous),
+    }
+}
+
+/// Refuses a target worktree that cannot safely receive the fast-forward.
+/// Untracked files do not block it; Git itself refuses to overwrite them.
+fn check_target_worktree(
+    repository: &Repository,
+    target: &str,
+    source: MergeTargetSource,
+    path: &Path,
+) -> PreflightResult<()> {
+    let owner = repository
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.path == path)
+        .context("the target worktree is no longer registered")?;
+    let problem = if owner.locked.is_some() {
+        Some(MergeTargetProblem::Locked)
+    } else if owner.prunable.is_some()
+        || matches!(
+            owner.condition,
+            Condition::Missing | Condition::Inaccessible
+        )
+    {
+        Some(MergeTargetProblem::Inaccessible)
+    } else if HistoryObservation::new(path)
+        .status()?
+        .entries
+        .iter()
+        .any(|entry| !entry.is_untracked())
+    {
+        Some(MergeTargetProblem::Dirty)
+    } else {
+        None
+    };
+    problem.map_or(Ok(()), |problem| {
+        Err(target_unavailable(
+            repository,
+            target,
+            source,
+            problem,
+            &[owner],
+        ))
+    })
+}
+
+fn target_unavailable(
+    repository: &Repository,
+    target: &str,
+    source: MergeTargetSource,
+    problem: MergeTargetProblem,
+    owners: &[&Worktree],
+) -> PreflightFailure {
+    let primary = repository.primary.clone().unwrap_or_default();
+    let primary_branch = primary_branch(repository).ok();
+    let subject = format!("{} {target:?} ({})", source.subject(), source.origin());
+    let paths = owners
+        .iter()
+        .map(|owner| owner.path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let message = match problem {
+        MergeTargetProblem::NotCheckedOut => {
+            let primary_state = primary_branch.as_deref().map_or_else(
+                || "the primary worktree is detached".to_owned(),
+                |branch| format!("the primary worktree is on {branch:?}"),
+            );
+            let configure = if matches!(source, MergeTargetSource::Journal) {
+                ""
+            } else {
+                ", or set worktrees.target-branch in .pando.yaml or the global config"
+            };
+            format!(
+                "{subject} is not checked out in any worktree and {primary_state}; create a target worktree with 'pando switch {target}', switch the primary worktree to {target}{configure}"
+            )
+        }
+        MergeTargetProblem::Ambiguous => format!(
+            "{subject} is checked out in more than one worktree ({paths}); keep it checked out in only one before merging"
+        ),
+        MergeTargetProblem::CheckedOutElsewhere => format!(
+            "{subject} is checked out in {paths}, so the primary worktree cannot switch to it; switch that worktree to another branch or merge from a linked topic worktree"
+        ),
+        MergeTargetProblem::Dirty => format!(
+            "{subject} is checked out in {paths}, which has uncommitted changes; commit or stash them there before merging"
+        ),
+        MergeTargetProblem::Locked => format!(
+            "{subject} is checked out in {paths}, which is locked; unlock it with 'git worktree unlock' before merging"
+        ),
+        MergeTargetProblem::Inaccessible => format!(
+            "{subject} is checked out in {paths}, which is missing or inaccessible; restore it or prune it with 'git worktree prune' before merging"
+        ),
+    };
+    PreflightFailure {
+        kind: PreflightFailureKind::TargetUnavailable,
+        error: anyhow::anyhow!(message),
+        target: Some(Box::new(MergeTargetLocation {
+            problem,
+            target_branch: target.to_owned(),
+            target_source: source,
+            primary_worktree: BytePath::path(&primary),
+            primary_branch,
+            topic_worktree: BytePath::path(&repository.current().path),
+            target_worktrees: owners
+                .iter()
+                .map(|owner| BytePath::path(&owner.path))
+                .collect(),
+        })),
+    }
 }
 
 fn primary_branch(repository: &Repository) -> Result<String> {
