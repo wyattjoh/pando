@@ -345,11 +345,11 @@ impl Serialize for PropertyValue {
 }
 
 impl JsonSchema for PropertyValue {
-    fn schema_name() -> String {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
         PropertyWireValue::schema_name()
     }
 
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::schema::Schema {
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         PropertyWireValue::json_schema(generator)
     }
 }
