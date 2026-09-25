@@ -2558,6 +2558,306 @@ fn merge_from_the_primary_worktree_refuses_on_the_target_branch() {
     assert!(stderr.contains("already on"), "{stderr}");
 }
 
+/// Moves the primary worktree to `develop` and checks `main` out in a linked
+/// worktree, so the merge target lives somewhere other than the primary.
+fn check_out_main_in_a_linked_worktree(repo: &Repository) -> PathBuf {
+    git(&repo.main, ["switch", "-c", "develop"]);
+    let target = repo.temp.path().join("main worktree");
+    git(
+        &repo.main,
+        ["worktree", "add", target.to_str().unwrap(), "main"],
+    );
+    target
+}
+
+fn commit_feature_change(repo: &Repository) {
+    fs::write(repo.linked.join("feature.txt"), "feature\n").unwrap();
+    git(&repo.linked, ["add", "feature.txt"]);
+    git(&repo.linked, ["commit", "-m", "feature change"]);
+}
+
+fn target_error(output: &std::process::Output) -> serde_json::Value {
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["error"]["code"], "merge.target_unavailable",
+        "{value}"
+    );
+    value
+}
+
+fn next_step_actions(value: &serde_json::Value) -> Vec<String> {
+    value["next_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["action"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn merge_integrates_into_a_target_checked_out_in_a_linked_worktree() {
+    let repo = Repository::new();
+    let target = check_out_main_in_a_linked_worktree(&repo);
+    commit_feature_change(&repo);
+
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge"])
+        .current_dir(&repo.linked)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The shell lands in the worktree that received the fast-forward.
+    let mut expected = target.as_os_str().as_bytes().to_vec();
+    expected.push(b'\n');
+    assert_eq!(output.stdout, expected);
+    assert_eq!(
+        git_output(&target, ["log", "-1", "--format=%s"]),
+        "feature change"
+    );
+    assert!(git_output(&target, ["status", "--porcelain"]).is_empty());
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "--abbrev-ref", "HEAD"]),
+        "develop"
+    );
+    assert!(!repo.linked.exists());
+}
+
+#[test]
+fn json_merge_dry_run_reports_the_linked_target_worktree() {
+    let repo = Repository::new();
+    let target = check_out_main_in_a_linked_worktree(&repo);
+    commit_feature_change(&repo);
+    let main_before = git_output(&target, ["rev-parse", "HEAD"]);
+
+    let output = json_command(
+        &repo.linked,
+        &["merge", "--dry-run", "--output", "json"],
+        None,
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value = assert_json_pure(&output);
+    assert_eq!(
+        value["context"]["target_worktree"]["value"],
+        target.to_str().unwrap()
+    );
+    assert_eq!(
+        value["context"]["primary_worktree"]["value"],
+        repo.main.to_str().unwrap()
+    );
+    assert_eq!(value["context"]["target_source"], "fallback");
+    let destination = value["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|effect| effect["action"] == "destination")
+        .unwrap();
+    assert_eq!(
+        destination["details"]["path"]["value"],
+        target.to_str().unwrap()
+    );
+    assert_eq!(git_output(&target, ["rev-parse", "HEAD"]), main_before);
+
+    let human = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge", "--dry-run"])
+        .current_dir(&repo.linked)
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(
+        stderr.contains(&format!("into main at {}", target.display())),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn json_merge_names_the_fallback_source_of_an_unchecked_out_target() {
+    let repo = Repository::new();
+    git(&repo.main, ["switch", "-c", "develop"]);
+    commit_feature_change(&repo);
+    let worktrees_before = git_output(&repo.main, ["worktree", "list", "--porcelain"]);
+
+    let output = json_command(&repo.linked, &["merge", "--output", "json"], None);
+
+    let value = target_error(&output);
+    let context = &value["context"];
+    assert_eq!(context["problem"], "not_checked_out");
+    assert_eq!(context["target_branch"], "main");
+    assert_eq!(context["target_source"], "fallback");
+    assert_eq!(context["primary_branch"], "develop");
+    assert_eq!(context["target_worktrees"], serde_json::json!([]));
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("resolved target branch \"main\""),
+        "{message}"
+    );
+    assert!(message.contains("worktrees.target-branch"), "{message}");
+    assert_eq!(
+        next_step_actions(&value),
+        ["worktree.create_target", "worktree.switch_primary"]
+    );
+    // Recovery is only described; nothing is created or switched.
+    assert_eq!(
+        git_output(&repo.main, ["worktree", "list", "--porcelain"]),
+        worktrees_before
+    );
+}
+
+#[test]
+fn json_merge_names_the_shared_source_of_an_unchecked_out_target() {
+    let repo = Repository::new();
+    git(&repo.main, ["switch", "-c", "develop"]);
+    fs::write(
+        repo.linked.join(".pando.yaml"),
+        "worktrees:\n  target-branch: main\n",
+    )
+    .unwrap();
+    git(&repo.linked, ["add", ".pando.yaml"]);
+    git(&repo.linked, ["commit", "-m", "configure merge target"]);
+
+    let output = json_command(&repo.linked, &["merge", "--output", "json"], None);
+
+    let value = target_error(&output);
+    assert_eq!(value["context"]["target_source"], "shared");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("configured target branch \"main\" (from .pando.yaml)"),
+        "{message}"
+    );
+}
+
+#[test]
+fn merge_names_the_global_source_of_an_unchecked_out_target() {
+    let repo = Repository::new();
+    git(&repo.main, ["switch", "-c", "develop"]);
+    commit_feature_change(&repo);
+    let xdg = tempfile::tempdir().unwrap();
+    fs::create_dir_all(xdg.path().join("pando")).unwrap();
+    fs::write(
+        xdg.path().join("pando/config.yaml"),
+        "worktrees:\n  target-branch: main\n",
+    )
+    .unwrap();
+
+    let output = json_command_with_env(
+        &repo.linked,
+        &["merge", "--output", "json"],
+        None,
+        &[("XDG_CONFIG_HOME", xdg.path()), ("HOME", repo.temp.path())],
+    );
+    let value = target_error(&output);
+    assert_eq!(value["context"]["target_source"], "global");
+
+    let human = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["merge"])
+        .current_dir(&repo.linked)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("HOME", repo.temp.path())
+        .output()
+        .unwrap();
+    assert!(!human.status.success());
+    assert!(human.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    for expected in [
+        "configured target branch \"main\" (from the global config)",
+        "the primary worktree is on \"develop\"",
+        "pando switch main",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "missing {expected:?} in {stderr}"
+        );
+    }
+}
+
+#[test]
+fn json_merge_names_the_local_source_of_an_unchecked_out_target() {
+    let repo = Repository::new();
+    git(&repo.main, ["switch", "-c", "develop"]);
+    commit_feature_change(&repo);
+    write_ignored_local_config(&repo, "worktrees:\n  target-branch: main\n");
+
+    let output = json_command(&repo.linked, &["merge", "--output", "json"], None);
+
+    let value = target_error(&output);
+    assert_eq!(value["context"]["target_source"], "local");
+    let message = value["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("configured target branch \"main\" (from .pando.local.yaml)"),
+        "{message}"
+    );
+}
+
+#[test]
+fn merge_refuses_a_target_worktree_with_tracked_changes() {
+    let repo = Repository::new();
+    let target = check_out_main_in_a_linked_worktree(&repo);
+    commit_feature_change(&repo);
+    fs::write(target.join("README.md"), "uncommitted\n").unwrap();
+    let main_before = git_output(&target, ["rev-parse", "HEAD"]);
+
+    let output = json_command(&repo.linked, &["merge", "--output", "json"], None);
+
+    let value = target_error(&output);
+    assert_eq!(value["context"]["problem"], "dirty");
+    assert_eq!(
+        value["context"]["target_worktrees"][0]["value"],
+        target.to_str().unwrap()
+    );
+    assert_eq!(next_step_actions(&value), ["worktree.enter_target"]);
+    assert_eq!(git_output(&target, ["rev-parse", "HEAD"]), main_before);
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn merge_refuses_a_locked_target_worktree() {
+    let repo = Repository::new();
+    let target = check_out_main_in_a_linked_worktree(&repo);
+    commit_feature_change(&repo);
+    git(&repo.main, ["worktree", "lock", target.to_str().unwrap()]);
+
+    let output = json_command(&repo.linked, &["merge", "--output", "json"], None);
+
+    let value = target_error(&output);
+    assert_eq!(value["context"]["problem"], "locked");
+}
+
+#[test]
+fn merge_in_place_refuses_a_target_checked_out_elsewhere() {
+    let repo = Repository::new();
+    let target = check_out_main_in_a_linked_worktree(&repo);
+    fs::write(repo.main.join("inline.txt"), "inline\n").unwrap();
+    git(&repo.main, ["add", "inline.txt"]);
+    git(&repo.main, ["commit", "-m", "inline change"]);
+
+    let output = json_command(&repo.main, &["merge", "--output", "json"], None);
+
+    let value = target_error(&output);
+    assert_eq!(value["context"]["problem"], "checked_out_elsewhere");
+    assert_eq!(
+        value["context"]["target_worktrees"][0]["value"],
+        target.to_str().unwrap()
+    );
+    assert_eq!(
+        git_output(&repo.main, ["rev-parse", "--abbrev-ref", "HEAD"]),
+        "develop"
+    );
+}
+
 #[test]
 fn merge_yolo_uses_only_the_squash_generator_for_all_changes() {
     let repo = Repository::new();

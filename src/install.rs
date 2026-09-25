@@ -1142,7 +1142,7 @@ struct ManagedInstallCommand<'a> {
 }
 
 fn install_command_block(command: &str) -> Result<Vec<u8>> {
-    let yaml = serde_yaml::to_string(&ManagedInstallConfig {
+    let yaml = serde_yaml_ng::to_string(&ManagedInstallConfig {
         install: ManagedInstallCommand { command },
     })?;
     Ok([
@@ -1176,12 +1176,12 @@ fn has_top_level_install(existing: &[u8]) -> Result<bool> {
     if existing.is_empty() {
         return Ok(false);
     }
-    let document: serde_yaml::Value = serde_yaml::from_slice(existing)
+    let document: serde_yaml_ng::Value = serde_yaml_ng::from_slice(existing)
         .context("failed to inspect install.command in the global configuration")?;
     let Some(mapping) = document.as_mapping() else {
         return Ok(false);
     };
-    Ok(mapping.contains_key(serde_yaml::Value::String("install".to_owned())))
+    Ok(mapping.contains_key(serde_yaml_ng::Value::String("install".to_owned())))
 }
 
 fn update_install_command(existing: &[u8], command: &str) -> Result<Vec<u8>> {

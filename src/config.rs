@@ -254,6 +254,9 @@ pub struct EffectiveConfig {
     pub pr_provider: PrProvider,
     pub pr_generation: EffectiveGeneration,
     pub pull_request_template: Option<GenerationValue>,
+    /// The layer that set [`Self::target_branch`], or `None` when merge falls
+    /// back to discovering the target from the repository.
+    pub target_branch_source: Option<GenerationSource>,
 }
 
 impl EffectiveConfig {
@@ -452,6 +455,21 @@ impl EffectiveConfig {
                     .and_then(|section| section.include)
             })
             .unwrap_or(true);
+        let target_branch_source = if local
+            .worktrees
+            .as_ref()
+            .is_some_and(|section| section.target_branch.is_some())
+        {
+            Some(GenerationSource::Local)
+        } else if shared
+            .worktrees
+            .as_ref()
+            .is_some_and(|section| section.target_branch.is_some())
+        {
+            Some(GenerationSource::Shared)
+        } else {
+            target_branch.as_ref().map(|_| GenerationSource::Global)
+        };
         Ok(Self {
             root,
             target_branch,
@@ -532,6 +550,7 @@ impl EffectiveConfig {
                 shared_pr_template,
                 global_pr_template,
             ),
+            target_branch_source,
         })
     }
 
@@ -736,7 +755,7 @@ where
             return Err(error).with_context(|| format!("failed to read {}", path.display()));
         }
     };
-    serde_yaml::from_str(&content)
+    serde_yaml_ng::from_str(&content)
         .with_context(|| format!("failed to parse configuration file {}", path.display()))
 }
 
@@ -780,7 +799,7 @@ mod tests {
 
     #[test]
     fn pr_provider_defaults_to_auto() {
-        let config: PrConfig = serde_yaml::from_str("{}").unwrap();
+        let config: PrConfig = serde_yaml_ng::from_str("{}").unwrap();
         assert_eq!(config.provider.unwrap_or_default(), PrProvider::Auto);
     }
 
@@ -791,10 +810,11 @@ mod tests {
             ("github", PrProvider::Github),
             ("tea", PrProvider::Tea),
         ] {
-            let config: PrConfig = serde_yaml::from_str(&format!("provider: {value}\n")).unwrap();
+            let config: PrConfig =
+                serde_yaml_ng::from_str(&format!("provider: {value}\n")).unwrap();
             assert_eq!(config.provider, Some(expected));
         }
-        assert!(serde_yaml::from_str::<PrConfig>("provider: gitlab\n").is_err());
+        assert!(serde_yaml_ng::from_str::<PrConfig>("provider: gitlab\n").is_err());
     }
 
     #[test]
