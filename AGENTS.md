@@ -128,3 +128,9 @@ This repository uses a single-context domain-doc layout. See `docs/agents/domain
 ### CLI usage skill
 
 `skills/pando/` documents `pando`' own command surface, flags, config schema, and JSON contract for kickstarting usage (symlinked into `.claude/skills/pando` and `.agents/skills/pando`). Whenever a change touches the CLI's public surface, see `.claude/rules/cli-skill-sync.md` for which skill file to update alongside it.
+
+## Dependency References
+
+| Dependency | Version | Path |
+| ---------- | ------- | ---- |
+| hk | 2.5.0 | `.claude/references/hk` |

@@ -1,0 +1,3 @@
+[submodule ".claude/references/hk"]
+	path = .claude/references/hk
+	url = https://github.com/jdx/hk.git
