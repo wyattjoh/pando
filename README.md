@@ -395,7 +395,7 @@ devenv shell
 just install-hooks
 ```
 
-Alternatively, install [Rust](https://www.rust-lang.org/tools/install), [just](https://github.com/casey/just), and [prek](https://prek.j178.dev/installation/) directly. The hooks check staged Rust changes with the same formatting and lint commands used by CI.
+Alternatively, install [Rust](https://www.rust-lang.org/tools/install), [just](https://github.com/casey/just), and [prek](https://prek.j178.dev/installation/) directly. The pre-commit and pre-push hooks always check formatting and linting with the same commands used by CI, even when no Rust files change. Pre-push also runs the test suite.
 
 Run the complete checks with devenv:
 
