@@ -2567,7 +2567,7 @@ fn check_out_main_in_a_linked_worktree(repo: &Repository) -> PathBuf {
         &repo.main,
         ["worktree", "add", target.to_str().unwrap(), "main"],
     );
-    target
+    target.canonicalize().unwrap()
 }
 
 fn commit_feature_change(repo: &Repository) {
@@ -2605,6 +2605,8 @@ fn merge_integrates_into_a_target_checked_out_in_a_linked_worktree() {
         .unwrap()
         .args(["merge"])
         .current_dir(&repo.linked)
+        .env("HOME", repo.temp.path())
+        .env("XDG_CONFIG_HOME", repo.temp.path())
         .output()
         .unwrap();
 
@@ -2636,10 +2638,14 @@ fn json_merge_dry_run_reports_the_linked_target_worktree() {
     commit_feature_change(&repo);
     let main_before = git_output(&target, ["rev-parse", "HEAD"]);
 
-    let output = json_command(
+    let output = json_command_with_env(
         &repo.linked,
         &["merge", "--dry-run", "--output", "json"],
         None,
+        &[
+            ("HOME", repo.temp.path()),
+            ("XDG_CONFIG_HOME", repo.temp.path()),
+        ],
     );
 
     assert!(
@@ -2654,7 +2660,7 @@ fn json_merge_dry_run_reports_the_linked_target_worktree() {
     );
     assert_eq!(
         value["context"]["primary_worktree"]["value"],
-        repo.main.to_str().unwrap()
+        repo.main.canonicalize().unwrap().to_str().unwrap()
     );
     assert_eq!(value["context"]["target_source"], "fallback");
     let destination = value["effects"]
@@ -2673,6 +2679,8 @@ fn json_merge_dry_run_reports_the_linked_target_worktree() {
         .unwrap()
         .args(["merge", "--dry-run"])
         .current_dir(&repo.linked)
+        .env("HOME", repo.temp.path())
+        .env("XDG_CONFIG_HOME", repo.temp.path())
         .output()
         .unwrap();
     assert!(human.status.success());
@@ -2690,7 +2698,15 @@ fn json_merge_names_the_fallback_source_of_an_unchecked_out_target() {
     commit_feature_change(&repo);
     let worktrees_before = git_output(&repo.main, ["worktree", "list", "--porcelain"]);
 
-    let output = json_command(&repo.linked, &["merge", "--output", "json"], None);
+    let output = json_command_with_env(
+        &repo.linked,
+        &["merge", "--output", "json"],
+        None,
+        &[
+            ("HOME", repo.temp.path()),
+            ("XDG_CONFIG_HOME", repo.temp.path()),
+        ],
+    );
 
     let value = target_error(&output);
     let context = &value["context"];
@@ -2728,7 +2744,15 @@ fn json_merge_names_the_shared_source_of_an_unchecked_out_target() {
     git(&repo.linked, ["add", ".pando.yaml"]);
     git(&repo.linked, ["commit", "-m", "configure merge target"]);
 
-    let output = json_command(&repo.linked, &["merge", "--output", "json"], None);
+    let output = json_command_with_env(
+        &repo.linked,
+        &["merge", "--output", "json"],
+        None,
+        &[
+            ("HOME", repo.temp.path()),
+            ("XDG_CONFIG_HOME", repo.temp.path()),
+        ],
+    );
 
     let value = target_error(&output);
     assert_eq!(value["context"]["target_source"], "shared");
@@ -2791,7 +2815,15 @@ fn json_merge_names_the_local_source_of_an_unchecked_out_target() {
     commit_feature_change(&repo);
     write_ignored_local_config(&repo, "worktrees:\n  target-branch: main\n");
 
-    let output = json_command(&repo.linked, &["merge", "--output", "json"], None);
+    let output = json_command_with_env(
+        &repo.linked,
+        &["merge", "--output", "json"],
+        None,
+        &[
+            ("HOME", repo.temp.path()),
+            ("XDG_CONFIG_HOME", repo.temp.path()),
+        ],
+    );
 
     let value = target_error(&output);
     assert_eq!(value["context"]["target_source"], "local");
@@ -2810,7 +2842,15 @@ fn merge_refuses_a_target_worktree_with_tracked_changes() {
     fs::write(target.join("README.md"), "uncommitted\n").unwrap();
     let main_before = git_output(&target, ["rev-parse", "HEAD"]);
 
-    let output = json_command(&repo.linked, &["merge", "--output", "json"], None);
+    let output = json_command_with_env(
+        &repo.linked,
+        &["merge", "--output", "json"],
+        None,
+        &[
+            ("HOME", repo.temp.path()),
+            ("XDG_CONFIG_HOME", repo.temp.path()),
+        ],
+    );
 
     let value = target_error(&output);
     assert_eq!(value["context"]["problem"], "dirty");
@@ -2830,7 +2870,15 @@ fn merge_refuses_a_locked_target_worktree() {
     commit_feature_change(&repo);
     git(&repo.main, ["worktree", "lock", target.to_str().unwrap()]);
 
-    let output = json_command(&repo.linked, &["merge", "--output", "json"], None);
+    let output = json_command_with_env(
+        &repo.linked,
+        &["merge", "--output", "json"],
+        None,
+        &[
+            ("HOME", repo.temp.path()),
+            ("XDG_CONFIG_HOME", repo.temp.path()),
+        ],
+    );
 
     let value = target_error(&output);
     assert_eq!(value["context"]["problem"], "locked");
@@ -2844,7 +2892,15 @@ fn merge_in_place_refuses_a_target_checked_out_elsewhere() {
     git(&repo.main, ["add", "inline.txt"]);
     git(&repo.main, ["commit", "-m", "inline change"]);
 
-    let output = json_command(&repo.main, &["merge", "--output", "json"], None);
+    let output = json_command_with_env(
+        &repo.main,
+        &["merge", "--output", "json"],
+        None,
+        &[
+            ("HOME", repo.temp.path()),
+            ("XDG_CONFIG_HOME", repo.temp.path()),
+        ],
+    );
 
     let value = target_error(&output);
     assert_eq!(value["context"]["problem"], "checked_out_elsewhere");
