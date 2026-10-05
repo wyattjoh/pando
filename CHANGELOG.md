@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0](https://github.com/wyattjoh/pando/compare/v0.2.0...v0.3.0) (2026-10-05)
+
+
+### Features
+
+* **clean:** remove detached worktrees ([f2b4b9a](https://github.com/wyattjoh/pando/commit/f2b4b9a031670c258084e3468fc72fc3be66c9f0))
+
+
+### Bug Fixes
+
+* **hooks:** always run CI lint checks before commit and push ([072b702](https://github.com/wyattjoh/pando/commit/072b702d0b02292e0ed158724a34af860309de07))
+* **tests:** satisfy Clippy empty assertion lint ([eec39d2](https://github.com/wyattjoh/pando/commit/eec39d20ad083b230ce9c71ca5282c103a2d5a08))
+
+
+### Performance Improvements
+
+* stop running git status in every worktree ([22c7170](https://github.com/wyattjoh/pando/commit/22c7170747d1366274b20ee5ce8627e5bb777340))
+* stop running git status in every worktree ([38182bd](https://github.com/wyattjoh/pando/commit/38182bd01562f2fb02a7e0b44635a69cc6cec789))
+
 ## [0.2.0](https://github.com/wyattjoh/pando/compare/v0.1.1...v0.2.0) (2026-09-25)
 
 
