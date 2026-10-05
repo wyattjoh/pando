@@ -3,7 +3,10 @@ use std::{
     io::{Read, Write},
     os::{
         fd::AsRawFd,
-        unix::fs::{PermissionsExt, symlink},
+        unix::{
+            ffi::OsStrExt,
+            fs::{PermissionsExt, symlink},
+        },
     },
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -22,10 +25,7 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 #[cfg(target_os = "linux")]
-use std::{
-    ffi::OsString,
-    os::unix::ffi::{OsStrExt, OsStringExt},
-};
+use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
 struct Repository {
     temp: TempDir,
@@ -12175,8 +12175,14 @@ fn branch_completion_outside_a_repository_is_silent() {
 }
 
 fn run_clean(cwd: &Path, args: &[&str], input: &[u8]) -> PtyOutput {
+    let home = tempfile::tempdir().unwrap();
     let mut command = Command::cargo_bin("pando").unwrap();
-    command.arg("clean").args(args).current_dir(cwd);
+    command
+        .arg("clean")
+        .args(args)
+        .current_dir(cwd)
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path());
     run_pty_command(command, input)
 }
 
@@ -12188,6 +12194,336 @@ fn has_branch(dir: &Path, branch: &str) -> bool {
         .unwrap()
         .status
         .success()
+}
+
+fn initialize_test_submodule(repo: &Repository, worktree: &Path) {
+    let source = repo.temp.path().join("submodule-source");
+    fs::create_dir(&source).unwrap();
+    git(&source, ["init", "-b", "main"]);
+    git(&source, ["config", "user.email", "test@example.com"]);
+    git(&source, ["config", "user.name", "Test User"]);
+    git(&source, ["config", "commit.gpgsign", "false"]);
+    fs::write(source.join("payload"), "submodule contents\n").unwrap();
+    git(&source, ["add", "."]);
+    git(&source, ["commit", "-m", "initial"]);
+    git(
+        worktree,
+        [
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            source.to_str().unwrap(),
+            "nested",
+        ],
+    );
+    git(worktree, ["commit", "-am", "add submodule"]);
+}
+
+#[test]
+fn clean_removes_multiple_detached_worktrees_by_path() {
+    let repo = Repository::new();
+    let second = repo.add_worktree("other-detached", "other");
+    git(&repo.linked, ["checkout", "--detach"]);
+    git(&second, ["checkout", "--detach"]);
+
+    let output = run_clean(&repo.main, &[], b"\x01\ry");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.contains("Remove 2 worktrees"),
+        "{}",
+        output.stderr
+    );
+    assert!(!repo.linked.exists());
+    assert!(!second.exists());
+    assert!(has_branch(&repo.main, "feature"));
+    assert!(has_branch(&repo.main, "other"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn clean_detached_selection_preserves_non_utf8_path_bytes() {
+    use std::os::unix::ffi::OsStringExt as _;
+    let repo = Repository::new();
+    let path = repo
+        .temp
+        .path()
+        .join(std::ffi::OsString::from_vec(b"byte-detached-\xff".to_vec()));
+    let created = Command::new("git")
+        .args(["worktree", "add", "--detach"])
+        .arg(&path)
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let output = run_clean(&repo.main, &[], b"byte-detached \ry");
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(!path.exists());
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn clean_removes_current_detached_worktree_and_runs_hooks() {
+    let repo = Repository::new();
+    git(&repo.linked, ["checkout", "--detach"]);
+    let marker = repo.temp.path().join("removed-hook");
+    write_ignored_local_config(
+        &repo,
+        &format!(
+            "hooks:\n  pre-remove:\n    - command: touch '{}'\n",
+            marker.display()
+        ),
+    );
+
+    let output = run_clean(&repo.linked, &[], b" \ryy");
+
+    assert!(output.status.success(), "{}", output.stderr);
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", repo.main.canonicalize().unwrap().display())
+    );
+    assert!(!repo.linked.exists());
+    assert!(marker.exists());
+}
+
+#[test]
+fn clean_detached_dry_run_preserves_worktree() {
+    let repo = Repository::new();
+    git(&repo.linked, ["checkout", "--detach"]);
+    let output = run_clean(&repo.main, &["--dry-run"], b" \ry");
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(
+        output
+            .stderr
+            .contains("Would remove worktree for (detached)")
+    );
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn clean_locked_detached_worktree_cannot_be_selected() {
+    let repo = Repository::new();
+    git(&repo.linked, ["checkout", "--detach"]);
+    git(
+        &repo.main,
+        ["worktree", "lock", repo.linked.to_str().unwrap()],
+    );
+    let output = run_clean(&repo.main, &[], b" \r");
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stderr.contains("No worktrees were selected."));
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn clean_confirms_removing_initialized_submodules() {
+    let repo = Repository::new();
+    initialize_test_submodule(&repo, &repo.linked);
+    let output = run_clean(&repo.main, &[], b" \ry");
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.contains("deletes initialized submodules"),
+        "{}",
+        output.stderr
+    );
+    assert!(!repo.linked.exists());
+    assert!(has_branch(&repo.main, "feature"));
+}
+
+#[test]
+fn clean_declining_submodule_confirmation_preserves_contents() {
+    let repo = Repository::new();
+    initialize_test_submodule(&repo, &repo.linked);
+    let output = run_clean(&repo.main, &[], b" \rn");
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.contains("deletes initialized submodules"));
+    assert!(repo.linked.join("nested/payload").exists());
+}
+
+#[test]
+fn remove_interactive_confirms_force_required_worktrees() {
+    for submodule in [false, true] {
+        let repo = Repository::new();
+        if submodule {
+            initialize_test_submodule(&repo, &repo.linked);
+        } else {
+            fs::write(repo.linked.join("dirty"), "keep me").unwrap();
+        }
+        let mut command = Command::cargo_bin("pando").unwrap();
+        command.args(["remove", "feature"]).current_dir(&repo.main);
+        let output = run_pty_command(command, b"y");
+        assert!(output.status.success(), "{}", output.stderr);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.contains("Force-remove worktree"));
+        assert!(!repo.linked.exists());
+        assert!(has_branch(&repo.main, "feature"));
+    }
+}
+
+#[test]
+fn remove_interactive_decline_and_cancel_preserve_all_targets() {
+    for input in [b"n".as_slice(), b"\x1b".as_slice(), b"\r".as_slice()] {
+        let repo = Repository::new();
+        let second = repo.add_worktree("second", "second");
+        initialize_test_submodule(&repo, &second);
+        let marker = repo.temp.path().join("hook-must-not-run");
+        write_ignored_local_config(
+            &repo,
+            &format!(
+                "hooks:\n  pre-remove:\n    - command: touch '{}'\n",
+                marker.display()
+            ),
+        );
+        let mut command = Command::cargo_bin("pando").unwrap();
+        command
+            .args(["remove", "feature", "second"])
+            .current_dir(&repo.main);
+        let output = run_pty_command(command, input);
+        assert_eq!(
+            output.status.success(),
+            input != b"\x1b",
+            "{}",
+            output.stderr
+        );
+        assert!(output.stdout.is_empty());
+        assert!(repo.linked.exists());
+        assert!(second.join("nested/payload").exists());
+        assert!(!marker.exists());
+    }
+}
+
+#[test]
+fn remove_interactive_force_flag_skips_confirmation() {
+    let repo = Repository::new();
+    initialize_test_submodule(&repo, &repo.linked);
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["remove", "--force", "feature"])
+        .current_dir(&repo.main);
+    let output = run_pty_command(command, b"");
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.contains("Force-remove worktree"));
+    assert!(!repo.linked.exists());
+}
+
+#[test]
+fn remove_interactive_dry_run_keeps_force_required_worktree() {
+    let repo = Repository::new();
+    initialize_test_submodule(&repo, &repo.linked);
+    let mut command = Command::cargo_bin("pando").unwrap();
+    command
+        .args(["remove", "--dry-run", "feature"])
+        .current_dir(&repo.main);
+    let output = run_pty_command(command, b"y");
+    assert!(output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.contains("Would remove worktree"));
+    assert!(repo.linked.join("nested/payload").exists());
+}
+
+#[test]
+fn remove_noninteractive_submodules_still_require_force() {
+    let repo = Repository::new();
+    initialize_test_submodule(&repo, &repo.linked);
+    let request = serde_json::json!({"schema_version":1,"input":{"branches":["feature"]}});
+    let output = json_command(
+        &repo.main,
+        &["remove", "--input-output", "json"],
+        Some(&request),
+    );
+    assert!(!output.status.success());
+    let response = assert_json_pure(&output);
+    assert_eq!(response["error"]["code"], "remove.force_required");
+    assert!(
+        response["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|effect| effect["attempted"] == false)
+    );
+    assert!(repo.linked.join("nested/payload").exists());
+    for args in [
+        vec!["remove", "feature"],
+        vec!["remove", "feature", "--output", "json"],
+    ] {
+        let output = Command::cargo_bin("pando")
+            .unwrap()
+            .args(args)
+            .current_dir(&repo.main)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(repo.linked.join("nested/payload").exists());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("--force")
+                || String::from_utf8_lossy(&output.stdout).contains("remove.force_required")
+        );
+    }
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["remove", "--force", "feature"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(!repo.linked.exists());
+}
+
+#[test]
+fn remove_uninitialized_submodules_do_not_require_confirmation() {
+    let repo = Repository::new();
+    initialize_test_submodule(&repo, &repo.linked);
+    let second = repo.add_worktree("uninitialized", "uninitialized");
+    git(&second, ["merge", "--ff-only", "feature"]);
+    let output = Command::cargo_bin("pando")
+        .unwrap()
+        .args(["remove", "uninitialized"])
+        .current_dir(&repo.main)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(!second.exists());
+    assert!(repo.linked.exists());
+}
+
+#[test]
+fn clean_force_approval_does_not_apply_to_other_selected_worktrees() {
+    let repo = Repository::new();
+    let second = repo.add_worktree("second", "second");
+    fs::write(repo.linked.join("dirty"), "approved to discard").unwrap();
+    write_ignored_local_config(
+        &repo,
+        &format!(
+            "hooks:\n  pre-remove:\n    - command: touch '{}'\n",
+            second.join("became-dirty").display()
+        ),
+    );
+    let output = run_clean(&repo.main, &[], b"\x01\ryy");
+    assert!(!output.status.success(), "{}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(!repo.linked.exists());
+    assert!(second.join("became-dirty").exists());
+    assert!(output.stderr.contains("failed"));
 }
 
 #[test]

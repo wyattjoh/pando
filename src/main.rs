@@ -87,7 +87,7 @@ enum Commands {
         #[arg(add = ArgValueCandidates::new(completion::remove_candidates))]
         branches: Vec<String>,
     },
-    /// Interactively select topic worktrees to remove, showing their disk size.
+    /// Interactively select branch or detached worktrees to remove, showing their disk size.
     Clean {
         /// Validate and preview without mutation.
         #[arg(long)]

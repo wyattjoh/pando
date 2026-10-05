@@ -99,7 +99,7 @@ for leaf contracts and approval rules.
 | `create [--fetch] [--dry-run] <branch>` | Create a worktree and print its path, without confirming a new branch | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `get <property>` | Print one current-worktree property | [`references/commands/switch.md` (navigation)](references/commands/switch.md) |
 | `remove [--force] [--dry-run] [branches...]` | Remove one or more topic worktrees while retaining their branches, reporting each one's size as it goes | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
-| `clean [--dry-run]` | Interactively select topic worktrees to remove, showing the disk each occupies. Human output only | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
+| `clean [--dry-run]` | Interactively select branch or detached worktrees to remove, showing the disk each occupies. Human output only | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `merge [--no-rebase] [--no-remove] [--no-squash] [--yolo] [--dry-run]` | Integrate the current topic into the configured target branch, squashing it into one commit by default | [`references/commands/lifecycle.md`](references/commands/lifecycle.md) |
 | `commit [-m MSG] [--stage-all] [--dry-run]` | Commit the existing index, optionally staging every change first | [`references/commands/commit.md`](references/commands/commit.md) |
 | `trust [--dry-run] <subcommand>` | Inspect, approve, or revoke hook-phase, commit-generation, squash-message-generation, or PR-generation trust. Subcommands: `status`, `reset`, `commit-status`, `commit-reset`, `commit-approve`, `merge-status`, `merge-reset`, `merge-approve`, `pr-status`, `pr-reset`, `pr-approve` | [`references/commands/trust.md`](references/commands/trust.md) |
@@ -272,9 +272,11 @@ removes the checked set, `Ctrl-S` cycles the sort (including size,
 largest-first), and `Ctrl-A` checks everything matching the filter. The `SIZE`
 column fills in as background measurement completes; it counts allocated
 blocks, excludes nested registered worktrees, and never follows symlinks.
-Branches are always retained, `pre-remove` hooks still run, and a checked
-worktree with uncommitted changes is named in the confirmation before its
-changes are discarded. Human output only — agents use `remove` with explicit
+Detached worktrees are selectable too. Branches are always retained and
+`pre-remove` hooks still run. Checked worktrees with uncommitted changes or
+initialized submodules are named in the confirmation before their contents
+are discarded. Interactive human `remove` also prompts for force-required
+worktrees; JSON and noninteractive removal still require explicit `--force`. Human output only — agents use `remove` with explicit
 branch names.
 Source: `src/clean.rs`; removal contract in `src/lifecycle.rs`
 

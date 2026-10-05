@@ -763,6 +763,25 @@ impl<'cwd> RepositoryObservation<'cwd> {
         discover_completion_branch_names(self.cwd)
     }
 
+    /// Reports initialized submodules that make Git require forced removal.
+    pub(crate) fn has_initialized_submodules(self) -> Result<bool> {
+        if self.worktree_identity()?.join("modules").is_dir() {
+            return Ok(true);
+        }
+        let output = run_git(self.cwd, ["ls-files", "--stage", "-z"])?;
+        ensure_success(&output, "git ls-files")?;
+        Ok(output.stdout.split(|byte| *byte == 0).any(|entry| {
+            if !entry.starts_with(b"160000 ") {
+                return false;
+            }
+            let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
+                return false;
+            };
+            let path = OsStr::from_bytes(&entry[tab + 1..]);
+            self.cwd.join(path).join(".git").exists()
+        }))
+    }
+
     pub(crate) fn configured_editor(self) -> Result<Option<String>> {
         let output = run_git(self.cwd, ["config", "--get", "core.editor"])?;
         if !output.status.success() {

@@ -16,7 +16,7 @@ Usage: pando remove [OPTIONS] [BRANCHES]...
 | Flag/Arg | Purpose |
 |---|---|
 | `[BRANCHES]...` | Variadic; selects registered topic worktrees to remove. Omit to remove the current topic |
-| `--force` | Required to remove a dirty (uncommitted-changes) worktree |
+| `--force` | Authorize removal of dirty worktrees or initialized submodules; required in JSON/noninteractive mode, offered as a default-no confirmation in interactive human mode |
 
 Removes registered topic worktrees but **never** deletes their local branch
 refs. When the current worktree is among the removed targets, stdout contains
@@ -78,10 +78,12 @@ color disabled.
 | `Enter` | Remove the checked worktrees; with none checked it exits without removing anything |
 | `Esc`/`Ctrl-C` | Cancel |
 
-Locked, prunable, detached, missing, and inaccessible worktrees are listed
-with their state but cannot be checked. A worktree with uncommitted changes
-*can* be checked; the confirmation then names every such worktree before
-discarding its changes, and defaults to "no".
+Detached worktrees can be checked and are identified by path, so multiple
+detached worktrees remain distinct. Locked, prunable, missing, and inaccessible
+worktrees are listed with their state but cannot be checked. Worktrees with
+uncommitted changes or initialized submodules can be checked; the confirmation
+names every affected worktree before discarding its contents, and defaults to
+"no". Force authorization applies only to those named paths, not the entire batch.
 
 Removal then reports a timed step per worktree naming its size, and the outro
 reports the total reclaimed. The picker's measurements are handed to the

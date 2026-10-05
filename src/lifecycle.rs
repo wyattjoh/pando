@@ -1,6 +1,8 @@
 use std::{
     collections::HashSet,
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     fs::OpenOptions,
     io::{self, Write},
     os::unix::ffi::{OsStrExt, OsStringExt},
@@ -1615,7 +1617,7 @@ pub fn execute_removal(plan: &RemovalPlan) -> RemovalExecutionOutcome {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn execute_removal_with_observations(
     plan: &RemovalPlan,
-    sizes: &[(String, size::Size)],
+    sizes: &[(PathBuf, size::Size)],
     observations: &mut hook::Observations,
 ) -> RemovalExecutionOutcome {
     let mut effects = plan.effects.clone();
@@ -1748,14 +1750,14 @@ pub(crate) fn execute_removal_with_observations(
 
         let remove_effect = hook_effect + 1;
         effects[remove_effect].attempted = true;
-        let removal_mode = if plan.force {
+        let removal_mode = if plan.context.targets[index].force {
             git::RemovalMode::Force
         } else {
             git::RemovalMode::Safe
         };
-        let branch = target.worktree.branch_label();
-        let scale =
-            measured_size(sizes, branch).map_or_else(String::new, |size| format!(" ({size})"));
+        let branch = removal_label(&target.worktree);
+        let scale = measured_size(sizes, &target.worktree.path)
+            .map_or_else(String::new, |size| format!(" ({size})"));
         observations.progress_started(
             &format!("Removing {branch}{scale}"),
             &format!("Removed {branch}{scale}"),
@@ -2041,9 +2043,8 @@ pub fn remove(branches: &[String], force: bool) -> Result<()> {
 pub(crate) struct RemovalReport<'caller> {
     /// The command to suggest rerunning after a batch stops partway.
     pub(crate) rerun: &'caller str,
-    /// Worktree sizes the caller already measured, keyed by branch, so an
-    /// interactive selection does not pay to walk the same trees twice.
-    pub(crate) measured: &'caller [(String, size::Size)],
+    /// Worktree sizes the caller already measured, keyed by byte-preserving path.
+    pub(crate) measured: &'caller [(PathBuf, size::Size)],
 }
 
 impl RemovalReport<'static> {
@@ -2065,7 +2066,27 @@ pub(crate) fn remove_reported(
     force: bool,
     report: &RemovalReport<'_>,
 ) -> Result<()> {
-    let plan = plan_remove(branches, force)?;
+    let selection = RemovalSelection::Branches(branches);
+    let approved = approve_removal_force(selection, force)?;
+    let plan = plan_removal(selection, force, &approved)?;
+    execute_reported_removal(&plan, report)
+}
+
+/// Removes the picker's path-identified targets with only the named force approvals.
+pub(crate) fn remove_paths_reported(
+    paths: &[PathBuf],
+    approved: &[PathBuf],
+    report: &RemovalReport<'_>,
+    dry_run: bool,
+) -> Result<()> {
+    let plan = plan_removal(RemovalSelection::Paths(paths), false, approved)?;
+    if dry_run {
+        return render_removal_plan(&plan);
+    }
+    execute_reported_removal(&plan, report)
+}
+
+fn execute_reported_removal(plan: &RemovalPlan, report: &RemovalReport<'_>) -> Result<()> {
     for target in &plan.targets {
         hook_approval::approve_interactively(
             &plan.repository,
@@ -2073,14 +2094,21 @@ pub(crate) fn remove_reported(
             &target.config.pre_remove,
         )?;
     }
-    let sizes = measure_targets(&plan, report.measured);
+    let sizes = measure_targets(plan, report.measured);
     let input = RemovalInput {
-        branches: branches.to_vec(),
+        branches: plan
+            .targets
+            .iter()
+            .filter_map(|target| match &target.worktree.kind {
+                WorktreeKind::Branch(branch) => Some(branch.clone()),
+                _ => None,
+            })
+            .collect(),
         dry_run: false,
     };
     let mut observations = hook::Observations::human();
     let outcome = removal_outcome(
-        execute_removal_with_observations(&plan, &sizes, &mut observations),
+        execute_removal_with_observations(plan, &sizes, &mut observations),
         &input,
     );
     drop(observations.finish());
@@ -2109,8 +2137,8 @@ pub(crate) fn remove_reported(
 /// interleaving a walk between each pair of them.
 fn measure_targets(
     plan: &RemovalPlan,
-    supplied: &[(String, size::Size)],
-) -> Vec<(String, size::Size)> {
+    supplied: &[(PathBuf, size::Size)],
+) -> Vec<(PathBuf, size::Size)> {
     let excluded: HashSet<PathBuf> = plan
         .repository
         .worktrees
@@ -2120,7 +2148,7 @@ fn measure_targets(
     let outstanding = plan
         .targets
         .iter()
-        .filter(|target| measured_size(supplied, target.worktree.branch_label()).is_none())
+        .filter(|target| measured_size(supplied, &target.worktree.path).is_none())
         .count();
     let progress = (outstanding > 0)
         .then(|| {
@@ -2131,14 +2159,14 @@ fn measure_targets(
             .ok()
         })
         .flatten();
-    let sizes: Vec<(String, size::Size)> = plan
+    let sizes: Vec<(PathBuf, size::Size)> = plan
         .targets
         .iter()
         .map(|target| {
-            let branch = target.worktree.branch_label().to_owned();
-            let size = measured_size(supplied, &branch)
-                .unwrap_or_else(|| size::measure_now(&target.worktree.path, &excluded));
-            (branch, size)
+            let path = target.worktree.path.clone();
+            let size = measured_size(supplied, &path)
+                .unwrap_or_else(|| size::measure_now(&path, &excluded));
+            (path, size)
         })
         .collect();
     if let Some(progress) = progress {
@@ -2155,10 +2183,10 @@ fn measure_targets(
     sizes
 }
 
-fn measured_size(measured: &[(String, size::Size)], branch: &str) -> Option<size::Size> {
+fn measured_size(measured: &[(PathBuf, size::Size)], path: &Path) -> Option<size::Size> {
     measured
         .iter()
-        .find(|(name, _)| name == branch)
+        .find(|(name, _)| name == path)
         .map(|(_, size)| *size)
 }
 
@@ -2180,7 +2208,12 @@ fn render_removal_status(context: &RemovalOutcomeContext, rerun: &str) {
     let mut lines: Vec<String> = Vec::with_capacity(total + 1);
     for (state, targets) in states {
         for target in targets {
-            lines.push(format!("{}: {state}", target.branch));
+            let label = if target.branch_retained {
+                target.branch.clone()
+            } else {
+                format!("{} at {}", target.branch, target.path.display())
+            };
+            lines.push(format!("{label}: {state}"));
         }
     }
     lines.push(format!("Rerun {rerun} to retry the rest."));
@@ -2199,12 +2232,18 @@ fn render_removal_git_diagnostics(outcome: &RemovalOutcome) {
     }
 }
 
-/// Prints a human-readable removal plan without mutation or approval.
+/// Prints a human-readable removal plan without mutation or hook approval.
 ///
 /// # Errors
 /// Returns an error when preflight or terminal rendering fails.
 pub fn remove_dry_run(branches: &[String], force: bool) -> Result<()> {
-    let plan = plan_remove(branches, force)?;
+    let selection = RemovalSelection::Branches(branches);
+    let approved = approve_removal_force(selection, force)?;
+    let plan = plan_removal(selection, force, &approved)?;
+    render_removal_plan(&plan)
+}
+
+fn render_removal_plan(plan: &RemovalPlan) -> Result<()> {
     for target in &plan.targets {
         ui::info(format!(
             "Would remove worktree for {} at {}; branch retained{}.",
@@ -3408,17 +3447,32 @@ const fn plural(count: usize) -> &'static str {
 /// # Errors
 /// Returns an error for invalid repository state, targets, journals, or force policy.
 pub fn plan_remove(branches: &[String], force: bool) -> PreflightResult<RemovalPlan> {
+    plan_removal(RemovalSelection::Branches(branches), force, &[])
+}
+
+#[derive(Clone, Copy)]
+enum RemovalSelection<'selection> {
+    Branches(&'selection [String]),
+    Paths(&'selection [PathBuf]),
+}
+
+fn plan_removal(
+    selection: RemovalSelection<'_>,
+    force: bool,
+    approved: &[PathBuf],
+) -> PreflightResult<RemovalPlan> {
     let cwd = env::current_dir().context("failed to read the current directory")?;
     let repository = RepositoryObservation::new(&cwd).repository()?;
     let primary = repository
         .primary
         .clone()
         .context("cannot remove a worktree from a bare repository")?;
-    let worktrees = select_removal_targets(&repository, branches, force).map_err(|error| {
-        error
-            .downcast::<PreflightFailure>()
-            .unwrap_or_else(PreflightFailure::from)
-    })?;
+    let worktrees =
+        select_removal_targets(&repository, selection, force, approved).map_err(|error| {
+            error
+                .downcast::<PreflightFailure>()
+                .unwrap_or_else(PreflightFailure::from)
+        })?;
     let mut targets = Vec::with_capacity(worktrees.len());
     for worktree in worktrees {
         let stale_journal = inspect_removal_state(&repository, &worktree).map_err(|error| {
@@ -3440,9 +3494,9 @@ pub fn plan_remove(branches: &[String], force: bool) -> PreflightResult<RemovalP
         .map(|target| RemovalTargetContext {
             branch: target.worktree.branch_label().to_owned(),
             path: BytePath::path(&target.worktree.path),
-            branch_retained: true,
+            branch_retained: matches!(target.worktree.kind, WorktreeKind::Branch(_)),
             current: target.worktree.path == current,
-            force,
+            force: force || approved.contains(&target.worktree.path),
             pre_remove_hooks: target.config.pre_remove.len(),
         })
         .collect::<Vec<_>>();
@@ -3498,40 +3552,56 @@ pub fn plan_remove(branches: &[String], force: bool) -> PreflightResult<RemovalP
 
 fn select_removal_targets(
     repository: &Repository,
-    branches: &[String],
+    selection: RemovalSelection<'_>,
     force: bool,
+    approved: &[PathBuf],
 ) -> Result<Vec<Worktree>> {
-    let mut names = if branches.is_empty() {
-        vec![repository.current_branch()?.to_owned()]
-    } else {
-        branches.to_vec()
+    let worktrees: Vec<&Worktree> = match selection {
+        RemovalSelection::Paths(paths) => paths
+            .iter()
+            .map(|path| {
+                repository
+                    .worktrees
+                    .iter()
+                    .find(|worktree| &worktree.path == path)
+                    .ok_or_else(|| {
+                        preflight(
+                            PreflightFailureKind::UnknownTarget,
+                            format!("no registered worktree at {}", path.display()),
+                        )
+                    })
+            })
+            .collect::<std::result::Result<_, _>>()?,
+        RemovalSelection::Branches(branches) => {
+            let branches = if branches.is_empty() {
+                vec![repository.current_branch()?.to_owned()]
+            } else {
+                branches.to_vec()
+            };
+            branches
+                .iter()
+                .map(|branch| {
+                    repository.worktrees.iter().find(|worktree|
+                    matches!(&worktree.kind, WorktreeKind::Branch(name) if name == branch))
+                    .ok_or_else(|| preflight(PreflightFailureKind::UnknownTarget,
+                        format!("no registered topic worktree is attached to branch {branch:?}")))
+                })
+                .collect::<std::result::Result<_, _>>()?
+        }
     };
-    names.sort();
-    if names.windows(2).any(|pair| pair[0] == pair[1]) {
+    let mut seen = HashSet::new();
+    if worktrees
+        .iter()
+        .any(|worktree| !seen.insert(&worktree.path))
+    {
         return Err(preflight(
             PreflightFailureKind::DuplicateTarget,
-            "duplicate branch arguments are not allowed",
+            "duplicate worktree targets are not allowed",
         )
         .into());
     }
-    let mut targets = Vec::with_capacity(branches.len().max(1));
-    for branch in if branches.is_empty() {
-        vec![repository.current_branch()?.to_owned()]
-    } else {
-        branches.to_vec()
-    } {
-        let target = repository
-            .worktrees
-            .iter()
-            .find(
-                |worktree| matches!(&worktree.kind, WorktreeKind::Branch(name) if name == &branch),
-            )
-            .ok_or_else(|| {
-                preflight(
-                    PreflightFailureKind::UnknownTarget,
-                    format!("no registered topic worktree is attached to branch {branch:?}"),
-                )
-            })?;
+    let mut targets = Vec::with_capacity(worktrees.len());
+    for target in worktrees {
         if Some(&target.path) == repository.primary.as_ref() {
             return Err(preflight(
                 PreflightFailureKind::PrimaryForbidden,
@@ -3539,7 +3609,7 @@ fn select_removal_targets(
             )
             .into());
         }
-        check_removable(target, force)?;
+        check_removable(target, force || approved.contains(&target.path))?;
         targets.push(target.clone());
     }
     Ok(targets)
@@ -3566,6 +3636,76 @@ fn inspect_removal_state(repository: &Repository, target: &Worktree) -> Result<O
     Ok(Some(journal_path(&repository.common_dir, &identity)))
 }
 
+/// Fresh force requirements for the picker's confirmation, keyed by worktree path.
+pub(crate) fn removal_warnings(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>> {
+    let plan = plan_removal(RemovalSelection::Paths(paths), true, &[])?;
+    force_warnings(&plan)
+}
+
+fn force_warnings(plan: &RemovalPlan) -> Result<Vec<(PathBuf, String)>> {
+    plan.targets
+        .iter()
+        .filter_map(|target| match removal_force_warning(&target.worktree) {
+            Ok(Some(warning)) => Some(Ok((target.worktree.path.clone(), warning))),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn removal_label(target: &Worktree) -> String {
+    match &target.kind {
+        WorktreeKind::Branch(branch) => branch.clone(),
+        _ => format!("{} at {}", target.branch_label(), target.path.display()),
+    }
+}
+
+fn removal_force_warning(target: &Worktree) -> Result<Option<String>> {
+    let dirty = HistoryObservation::new(&target.path).status()?.is_dirty();
+    let submodules = RepositoryObservation::new(&target.path).has_initialized_submodules()?;
+    if !dirty && !submodules {
+        return Ok(None);
+    }
+    let label = removal_label(target);
+    let mut warning = String::new();
+    if dirty {
+        let _ = write!(warning, "Removing {label} discards uncommitted changes.");
+    }
+    if submodules {
+        if !warning.is_empty() {
+            warning.push(' ');
+        }
+        let _ = write!(
+            warning,
+            "Removing {label} deletes initialized submodules and their local contents."
+        );
+    }
+    Ok(Some(warning))
+}
+
+fn approve_removal_force(selection: RemovalSelection<'_>, force: bool) -> Result<Vec<PathBuf>> {
+    if force || !ui::is_interactive() {
+        return Ok(Vec::new());
+    }
+    let plan = plan_removal(selection, true, &[])?;
+    let mut approved = Vec::new();
+    for (path, warning) in force_warnings(&plan)? {
+        ui::warning(warning)?;
+        let confirmed = ui::prompt_result(
+            cliclack::confirm(format!("Force-remove worktree at {}?", path.display()))
+                .initial_value(false)
+                .interact(),
+            "removal cancelled",
+            "failed to read the removal confirmation from the terminal",
+        )?;
+        if !confirmed {
+            return Err(ui::declined_noop("Removal declined.", "Nothing removed."));
+        }
+        approved.push(path);
+    }
+    Ok(approved)
+}
+
 fn check_removable(target: &Worktree, force: bool) -> Result<()> {
     // Repository discovery reports only accessibility, so observe this one
     // target's clean/dirty condition now rather than every worktree's up front.
@@ -3575,10 +3715,7 @@ fn check_removable(target: &Worktree, force: bool) -> Result<()> {
     };
     if target.locked.is_some()
         || target.prunable.is_some()
-        || matches!(
-            target.kind,
-            WorktreeKind::Detached | WorktreeKind::Bare | WorktreeKind::Unknown
-        )
+        || matches!(target.kind, WorktreeKind::Bare | WorktreeKind::Unknown)
     {
         bail!(
             "worktree {} is not removable: {}",
@@ -3586,8 +3723,14 @@ fn check_removable(target: &Worktree, force: bool) -> Result<()> {
             target.state_label()
         );
     }
-    if !force && HistoryObservation::new(&target.path).status()?.is_dirty() {
-        return Err(preflight(PreflightFailureKind::ForceRequired, format!("worktree {} has local changes; rerun with --force to discard only worktree contents", target.path.display())).into());
+    if !force {
+        if let Some(reason) = removal_force_warning(target)? {
+            return Err(preflight(
+                PreflightFailureKind::ForceRequired,
+                format!("{reason} Rerun with --force to discard only worktree contents."),
+            )
+            .into());
+        }
     }
     if !matches!(target.condition, Condition::Clean | Condition::Dirty) {
         bail!(

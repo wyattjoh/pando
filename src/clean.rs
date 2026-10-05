@@ -2,7 +2,7 @@
 //!
 //! `clean` is a human-only adapter. It observes the repository, measures how
 //! much disk each topic worktree occupies, lets the user check the ones to
-//! discard, and hands the selected branches to [`crate::lifecycle`], which owns
+//! discard, and hands the selected worktree paths to [`crate::lifecycle`], which owns
 //! every removal decision, hook approval, and Git mutation. Nothing here plans
 //! or performs a removal of its own.
 //!
@@ -103,30 +103,19 @@ fn apply(picker: &CleanPicker, selected: &[usize], dry_run: bool) -> Result<()> 
         .iter()
         .map(|index| &picker.candidates[*index])
         .collect();
-    let branches: Vec<String> = chosen
+    let paths: Vec<PathBuf> = chosen
         .iter()
-        .filter_map(|candidate| candidate.branch().map(ToOwned::to_owned))
+        .map(|candidate| candidate.worktree.path.clone())
         .collect();
-    // Only a selection that already looked dirty asks removal to discard work.
-    // A worktree that turned dirty after observation fails preflight instead,
-    // because the confirmation the user answered never named it.
-    let force = chosen.iter().any(|candidate| candidate.row.is_dirty());
     let reclaim = size::Total::of(chosen.iter().map(|candidate| &candidate.size));
-    let dirty: Vec<&str> = chosen
-        .iter()
-        .filter(|candidate| candidate.row.is_dirty())
-        .map(|candidate| candidate.row.label.as_str())
-        .collect();
-    if !dirty.is_empty() {
-        ui::warning(format!(
-            "Removing {} discards uncommitted changes.",
-            join_labels(&dirty)
-        ))?;
+    let warnings = lifecycle::removal_warnings(&paths)?;
+    for (_, warning) in &warnings {
+        ui::warning(warning)?;
     }
     let prompt = format!(
         "Remove {} worktree{} and reclaim {reclaim}?",
-        branches.len(),
-        plural(branches.len())
+        paths.len(),
+        plural(paths.len())
     );
     let confirmed = ui::prompt_result(
         cliclack::confirm(prompt).initial_value(false).interact(),
@@ -138,34 +127,24 @@ fn apply(picker: &CleanPicker, selected: &[usize], dry_run: bool) -> Result<()> 
     }
     if dry_run {
         ui::info(format!("Would reclaim {reclaim}."))?;
-        return lifecycle::remove_dry_run(&branches, force);
     }
     // The picker already walked these trees, so removal reuses the measurements
     // instead of paying for a second walk of the same directories.
-    let measured: Vec<(String, Size)> = chosen
+    let measured: Vec<(PathBuf, Size)> = chosen
         .iter()
-        .filter_map(|candidate| {
-            candidate
-                .branch()
-                .map(|branch| (branch.to_owned(), candidate.size))
-        })
+        .map(|candidate| (candidate.worktree.path.clone(), candidate.size))
         .collect();
-    lifecycle::remove_reported(
-        &branches,
-        force,
+    // Approval is per path: an unrelated clean target never inherits force.
+    let approved: Vec<PathBuf> = warnings.into_iter().map(|(path, _)| path).collect();
+    lifecycle::remove_paths_reported(
+        &paths,
+        &approved,
         &lifecycle::RemovalReport {
             rerun: "pando clean",
             measured: &measured,
         },
+        dry_run,
     )
-}
-
-fn join_labels(labels: &[&str]) -> String {
-    match labels {
-        [] => String::new(),
-        [only] => (*only).to_owned(),
-        [head @ .., last] => format!("{} and {last}", head.join(", ")),
-    }
 }
 
 const fn plural(count: usize) -> &'static str {
@@ -200,13 +179,6 @@ impl Candidate {
         }
     }
 
-    fn branch(&self) -> Option<&str> {
-        match &self.worktree.kind {
-            WorktreeKind::Branch(branch) => Some(branch),
-            WorktreeKind::Detached | WorktreeKind::Bare | WorktreeKind::Unknown => None,
-        }
-    }
-
     const fn selectable(&self) -> bool {
         self.blocker.is_none()
     }
@@ -218,7 +190,10 @@ impl Candidate {
 /// from fresh repository facts, so a worktree that changes between selection
 /// and mutation is refused there rather than here.
 fn blocker(worktree: &Worktree) -> Option<String> {
-    if !matches!(worktree.kind, WorktreeKind::Branch(_)) {
+    if !matches!(
+        worktree.kind,
+        WorktreeKind::Branch(_) | WorktreeKind::Detached
+    ) {
         return Some(worktree.branch_label().trim_matches(['(', ')']).to_owned());
     }
     if worktree.locked.is_some()
@@ -768,7 +743,7 @@ fn clean_help() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CleanSort, join_labels};
+    use super::CleanSort;
     use crate::SortMode;
 
     #[test]
@@ -791,12 +766,5 @@ mod tests {
             ]
         );
         assert_eq!(CleanSort::Size.shared(), None);
-    }
-
-    #[test]
-    fn dirty_worktrees_are_named_as_a_readable_list() {
-        assert_eq!(join_labels(&["one"]), "one");
-        assert_eq!(join_labels(&["one", "two"]), "one and two");
-        assert_eq!(join_labels(&["one", "two", "three"]), "one, two and three");
     }
 }
