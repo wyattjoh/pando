@@ -2266,7 +2266,7 @@ mod tests {
 
         let (records, excluded) = parse_branch_refs(input);
 
-        assert!(excluded.is_empty());
+        assert_eq!(excluded, Vec::<String>::new());
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].branch, "feature/a");
         assert_eq!(records[0].head, "aaaa");
@@ -2294,7 +2294,7 @@ mod tests {
 
         let (records, excluded) = parse_branch_refs(&input);
 
-        assert!(records.is_empty());
+        assert_eq!(records, []);
         assert_eq!(excluded.len(), 1);
     }
 

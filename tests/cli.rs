@@ -102,7 +102,7 @@ fn list_shows_current_repository_worktrees_from_nested_directory() {
     let output = command.arg("list").current_dir(&nested).output().unwrap();
 
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("BRANCH"));
     assert!(!stderr.contains("STATE"));
@@ -137,7 +137,7 @@ fn list_branches_shows_attached_and_unattached_branches() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("Branches ("), "{stderr}");
     assert!(stderr.contains("feature"), "{stderr}");
@@ -272,7 +272,7 @@ fn list_uses_committer_timestamp_and_converts_it_to_local_time() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     let branch = stderr.find("BRANCH").unwrap();
     let last_commit = stderr.find("LAST COMMIT AT").unwrap();
@@ -319,7 +319,7 @@ fn list_honors_global_sort_and_ignored_local_override() {
         .output()
         .unwrap();
     assert!(global.status.success());
-    assert!(global.stdout.is_empty());
+    assert_eq!(global.stdout, b"");
     let global_stderr = String::from_utf8(global.stderr).unwrap();
     assert!(
         global_stderr.contains("Worktrees (branch A-Z)"),
@@ -346,7 +346,7 @@ fn list_honors_global_sort_and_ignored_local_override() {
         .output()
         .unwrap();
     assert!(local.status.success());
-    assert!(local.stdout.is_empty());
+    assert_eq!(local.stdout, b"");
     let local_stderr = String::from_utf8(local.stderr).unwrap();
     assert!(
         local_stderr.contains("Worktrees (last commit newest-first)"),
@@ -377,7 +377,7 @@ fn list_rejects_invalid_and_shared_default_sort_with_source_context() {
         .output()
         .unwrap();
     assert!(!invalid.status.success());
-    assert!(invalid.stdout.is_empty());
+    assert_eq!(invalid.stdout, b"");
     let invalid_stderr = String::from_utf8(invalid.stderr).unwrap();
     assert!(invalid_stderr.contains(&global_path.display().to_string()));
     assert!(
@@ -396,7 +396,7 @@ fn list_rejects_invalid_and_shared_default_sort_with_source_context() {
         .output()
         .unwrap();
     assert!(!shared.status.success());
-    assert!(shared.stdout.is_empty());
+    assert_eq!(shared.stdout, b"");
     let shared_stderr = String::from_utf8(shared.stderr).unwrap();
     assert!(shared_stderr.contains(&shared_path.display().to_string()));
     assert!(
@@ -419,7 +419,7 @@ fn list_abbreviates_home_directory_with_tilde() {
         .unwrap();
 
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("~/main"), "{stderr}");
     assert!(stderr.contains("~/feature worktree"), "{stderr}");
@@ -452,7 +452,7 @@ fn list_abbreviates_consecutive_paths_under_the_same_parent() {
         .unwrap();
 
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("~/feature worktree"), "{stderr}");
     assert!(stderr.contains("~/main"), "{stderr}");
@@ -474,7 +474,7 @@ fn list_uses_semantic_terminal_styles_without_writing_stdout() {
     let output = run_terminal_command(command);
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains(&forced_style(
             pando::ui::heading_style(),
@@ -515,7 +515,7 @@ fn list_uses_semantic_terminal_styles_without_writing_stdout() {
         .env_remove("CLICOLOR_FORCE");
     let plain = run_terminal_command(no_color);
     assert!(plain.status.success(), "{}", plain.stderr);
-    assert!(plain.stdout.is_empty());
+    assert_eq!(plain.stdout, "");
     assert!(!plain.stderr.contains('\u{1b}'), "{}", plain.stderr);
     assert!(plain.stderr.contains("* main"), "{}", plain.stderr);
 }
@@ -532,7 +532,7 @@ fn current_worktree_paths_with_trailing_spaces_are_marked_and_defaulted() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("* trailing-branch"), "{stderr}");
 
@@ -561,7 +561,7 @@ fn list_labels_staged_unstaged_and_untracked_changes_dirty() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("* main *"), "{stderr}");
     assert!(stderr.contains("feature *"), "{stderr}");
@@ -609,7 +609,7 @@ fn list_preserves_detached_locked_prunable_and_bare_records() {
         .current_dir(&repo.main)
         .output()
         .unwrap();
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("(detached)"), "{stderr}");
     assert!(stderr.contains("feature"), "{stderr}");
@@ -622,7 +622,7 @@ fn list_preserves_detached_locked_prunable_and_bare_records() {
         .current_dir(&bare_linked)
         .output()
         .unwrap();
-    assert!(bare_output.stdout.is_empty());
+    assert_eq!(bare_output.stdout, b"");
     let bare_stderr = String::from_utf8(bare_output.stderr).unwrap();
     assert!(bare_stderr.contains("(bare)"), "{bare_stderr}");
     assert!(bare_stderr.contains("bare"), "{bare_stderr}");
@@ -655,7 +655,7 @@ fn inaccessible_worktrees_are_labeled_and_not_selectable_when_permissions_allow(
     fs::set_permissions(&repo.linked, original_permissions).unwrap();
 
     assert!(listed.status.success());
-    assert!(listed.stdout.is_empty());
+    assert_eq!(listed.stdout, b"");
     let stderr = String::from_utf8(listed.stderr).unwrap();
     assert!(stderr.contains("inaccessible"), "{stderr}");
     assert!(switched.status.success(), "{}", switched.stderr);
@@ -685,7 +685,7 @@ fn list_reports_unknown_when_git_status_fails() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(stderr.matches("unknown").count(), 1, "{stderr}");
     assert!(stderr.contains("2 worktrees, 2 unknown"), "{stderr}");
@@ -715,7 +715,7 @@ fn metadata_failure_warns_once_for_human_list_and_is_structured_for_json() {
         .unwrap();
 
     assert!(human.status.success());
-    assert!(human.stdout.is_empty());
+    assert_eq!(human.stdout, b"");
     let human_stderr = String::from_utf8(human.stderr).unwrap();
     let stderr = console::strip_ansi_codes(&human_stderr);
     assert_eq!(
@@ -910,7 +910,7 @@ fn switch_branches_flag_opens_directly_in_branch_view() {
     let output = run_pty_command(command, b"\x1b");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let stderr = console::strip_ansi_codes(&output.stderr);
     assert!(stderr.contains("Choose a branch"), "{stderr}");
     assert!(!stderr.contains("Choose a worktree"), "{stderr}");
@@ -948,7 +948,7 @@ fn switch_ctrl_b_toggles_between_worktree_and_branch_view() {
     let output = run_pty_command(command, b"\x02\x02\x1b");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let stderr = console::strip_ansi_codes(&output.stderr);
     assert!(stderr.contains("Choose a worktree"), "{stderr}");
     assert!(stderr.contains("Choose a branch"), "{stderr}");
@@ -1009,7 +1009,7 @@ fn switch_ctrl_s_before_raw_mode_is_not_treated_as_flow_control() {
     let output = run_pty_command_with_size(command, b"\x1b[B\x13\x13\x13\x13\r", 24, 600);
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(!output.stdout.is_empty());
+    assert_ne!(output.stdout, "");
 }
 
 #[test]
@@ -1021,7 +1021,7 @@ fn switch_picker_preflights_stdin_before_rendering() {
     let output = run_terminal_command(command);
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("no interactive terminal"),
         "{}",
@@ -1193,7 +1193,7 @@ fn switch_picker_redraws_for_a_narrower_terminal() {
     let output = run_resized_pty_command(command, (24, 80), (10, terminal_columns), b"m\x1b");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let frame_start = output
         .stderr
         .rfind("◆  Choose")
@@ -1274,7 +1274,7 @@ fn switch_empty_filter_can_be_cancelled_without_panicking() {
     let output = run_switch(&repo.main, b"no-such-worktree\r\x1b");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("No worktrees match this filter"),
         "{}",
@@ -1352,7 +1352,7 @@ fn switch_picker_abbreviates_consecutive_paths_under_the_same_parent() {
     let output = run_pty_command(command, b"\x1b");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let picker = console::strip_ansi_codes(&output.stderr);
     assert!(picker.contains(".../.claude/worktrees/first"), "{picker}");
     assert!(picker.contains(".../.claude/worktrees/second"), "{picker}");
@@ -1393,7 +1393,7 @@ fn switch_escape_cancels_without_a_destination() {
     let output = run_switch(&repo.main, b"\x1b");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("selection cancelled"),
         "{}",
@@ -1435,7 +1435,7 @@ fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
     let removed = run_pty_command(remove, b"");
 
     assert!(removed.status.success(), "{}", removed.stderr);
-    assert!(removed.stdout.is_empty());
+    assert_eq!(removed.stdout, "");
     // The outro names the space reclaimed, which varies per run, so the styling
     // is asserted by the sequence that opens it rather than a whole string.
     let styled = forced_style(pando::ui::success_style(), "\u{0}");
@@ -1470,7 +1470,7 @@ fn lifecycle_completion_uses_semantic_success_without_polluting_stdout() {
     let merged = run_pty_command(merge, b"");
 
     assert!(merged.status.success(), "{}", merged.stderr);
-    assert!(merged.stdout.is_empty());
+    assert_eq!(merged.stdout, "");
     assert!(
         merged.stderr.contains(&format!(
             "{} {} {} {}{}",
@@ -1505,7 +1505,7 @@ fn human_and_json_execute_the_same_clean_retained_topic_plan() {
         .current_dir(&human.linked);
     let human_output = run_pty_command(human_command, b"");
     assert!(human_output.status.success(), "{}", human_output.stderr);
-    assert!(human_output.stdout.is_empty());
+    assert_eq!(human_output.stdout, "");
     assert!(human_output.stderr.contains("worktree retained"));
 
     let json_output = json_command(
@@ -1582,7 +1582,7 @@ fn merge_renders_git_output_inside_the_terminal_ui_rail() {
     let merged = run_pty_command(merge, b"");
 
     assert!(merged.status.success(), "{}", merged.stderr);
-    assert!(merged.stdout.is_empty(), "{}", merged.stdout);
+    assert_eq!(merged.stdout, "", "{}", merged.stdout);
     for progress in [
         "Rebasing onto main...",
         "Rebased onto main",
@@ -1641,7 +1641,7 @@ fn merge_reports_a_rebase_conflict_and_resumes_without_an_editor() {
     let conflicted = run_pty_command(conflicting, b"");
 
     assert!(!conflicted.status.success(), "{}", conflicted.stderr);
-    assert!(conflicted.stdout.is_empty(), "{}", conflicted.stdout);
+    assert_eq!(conflicted.stdout, "", "{}", conflicted.stdout);
     let plain = console::strip_ansi_codes(&conflicted.stderr);
     for line in [
         "│  CONFLICT (content): Merge conflict in README.md",
@@ -2271,7 +2271,7 @@ fn human_remove_renders_captured_git_failure_diagnostics() {
     drop(fake_bin);
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("injected git failure"), "{stderr}");
     assert!(repo.linked.exists());
@@ -2477,7 +2477,7 @@ fn merge_from_the_primary_worktree_switches_it_back_to_the_target() {
         String::from_utf8_lossy(&output.stderr)
     );
     // Nothing was removed, so the zsh wrapper gets no destination to `cd` to.
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert_eq!(
         git_output(&repo.main, ["rev-parse", "--abbrev-ref", "HEAD"]),
         "main"
@@ -2553,7 +2553,7 @@ fn merge_from_the_primary_worktree_refuses_on_the_target_branch() {
         .unwrap();
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("already on"), "{stderr}");
 }
@@ -2623,7 +2623,7 @@ fn merge_integrates_into_a_target_checked_out_in_a_linked_worktree() {
         git_output(&target, ["log", "-1", "--format=%s"]),
         "feature change"
     );
-    assert!(git_output(&target, ["status", "--porcelain"]).is_empty());
+    assert_eq!(git_output(&target, ["status", "--porcelain"]), "");
     assert_eq!(
         git_output(&repo.main, ["rev-parse", "--abbrev-ref", "HEAD"]),
         "develop"
@@ -2794,7 +2794,7 @@ fn merge_names_the_global_source_of_an_unchecked_out_target() {
         .output()
         .unwrap();
     assert!(!human.status.success());
-    assert!(human.stdout.is_empty());
+    assert_eq!(human.stdout, b"");
     let stderr = String::from_utf8_lossy(&human.stderr);
     for expected in [
         "configured target branch \"main\" (from the global config)",
@@ -2953,7 +2953,7 @@ fn merge_yolo_uses_only_the_squash_generator_for_all_changes() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert_eq!(
         git_output(&repo.main, ["log", "-1", "--format=%s"]),
         "feat: yolo merge"
@@ -3063,7 +3063,7 @@ fn merge_yolo_cleanup_retry_only_repeats_cleanup() {
     let failed = run_pty_command(command, b"y\r");
 
     assert!(!failed.status.success(), "{}", failed.stderr);
-    assert!(failed.stdout.is_empty());
+    assert_eq!(failed.stdout, "");
     assert!(repo.linked.exists());
     assert!(generator_calls.exists(), "{}", failed.stderr);
     assert_eq!(fs::read(&generator_calls).unwrap(), b"x");
@@ -3201,7 +3201,7 @@ fn merge_validation_hooks_stream_interactively_without_polluting_stdout() {
     let output = finish_pty_command(child, reader);
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
     assert!(stderr.contains("validation-ready"), "{stderr}");
     assert!(stderr.contains("validation:accepted"), "{stderr}");
@@ -3257,7 +3257,7 @@ fn merge_validation_failure_preserves_order_worktree_and_recovery() {
     let failed = run_pty_command(command, b"y\n");
 
     assert!(!failed.status.success());
-    assert!(failed.stdout.is_empty());
+    assert_eq!(failed.stdout, "");
     assert!(
         failed
             .stderr
@@ -3289,7 +3289,7 @@ fn merge_validation_failure_preserves_order_worktree_and_recovery() {
         "{}",
         String::from_utf8_lossy(&retry.stderr)
     );
-    assert!(retry.stdout.is_empty());
+    assert_eq!(retry.stdout, b"");
     assert_eq!(
         git_output(&repo.main, ["rev-parse", "HEAD"]),
         git_output(&repo.linked, ["rev-parse", "HEAD"])
@@ -3342,7 +3342,7 @@ fn merge_cleanup_hook_failure_retains_integrated_worktree_and_pending_recovery()
     let failed = run_pty_command(command, b"y\n");
 
     assert!(!failed.status.success());
-    assert!(failed.stdout.is_empty());
+    assert_eq!(failed.stdout, "");
     assert!(
         failed
             .stderr
@@ -3407,7 +3407,7 @@ fn merge_decline_and_cancellation_leave_the_lifecycle_untouched() {
         let output = run_pty_command(command, input);
 
         assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout, "");
         assert!(
             output.stderr.contains("pre-merge commands"),
             "{}",
@@ -3425,7 +3425,10 @@ fn merge_decline_and_cancellation_leave_the_lifecycle_untouched() {
         assert!(!marker.exists());
         assert!(!repo.main.join(".git/pando-state/lifecycle").exists());
         assert!(!xdg.path().join("pando/trust.json").exists());
-        assert!(git_output(&repo.linked, ["diff", "--cached", "--name-only"]).is_empty());
+        assert_eq!(
+            git_output(&repo.linked, ["diff", "--cached", "--name-only"]),
+            ""
+        );
     }
 }
 
@@ -3445,7 +3448,7 @@ fn merge_approval_persists_before_the_lifecycle_runs() {
     let output = run_pty_command(command, b"y\n");
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(marker.exists());
     assert!(xdg.path().join("pando/trust.json").exists());
     assert_eq!(git_output(&repo.main, ["show", "HEAD:topic.txt"]), "topic");
@@ -3521,7 +3524,7 @@ fn merge_rechecks_hook_trust_before_revalidating_a_new_commit() {
     let output = run_pty_command(command, b"y\n");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output
             .stderr
@@ -3562,7 +3565,7 @@ fn merge_invalidates_validation_when_the_target_advances() {
     let output = run_pty_command(command, b"y\n");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("target advanced during validation"),
         "{}",
@@ -3611,7 +3614,10 @@ fn json_merge_reports_pre_merge_approval_before_mutation() {
     assert!(!marker.exists());
     assert!(!repo.main.join(".git/pando-state/lifecycle").exists());
     assert!(!xdg.path().join("pando/trust.json").exists());
-    assert!(git_output(&repo.linked, ["diff", "--cached", "--name-only"]).is_empty());
+    assert_eq!(
+        git_output(&repo.linked, ["diff", "--cached", "--name-only"]),
+        ""
+    );
 }
 
 #[test]
@@ -3698,7 +3704,7 @@ fn merge_reprepares_before_requesting_ordered_pre_remove_approval() {
     let output = run_pty_command(command, b"y\nn\n");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let pre_merge = output.stderr.find("pre-merge commands").unwrap();
     let pre_remove = output.stderr.find("pre-remove commands").unwrap();
     assert!(pre_merge < pre_remove, "{}", output.stderr);
@@ -3762,7 +3768,7 @@ fn merge_squashes_a_multi_commit_topic_into_one_generated_commit() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Squash"), "{stderr}");
     // Three commits collapsed into exactly one commit on top of the target.
@@ -3814,7 +3820,7 @@ fn merge_prints_the_generated_squash_message_on_the_rail() {
     let output = run_terminal_command(merge);
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let stderr = &output.stderr;
     for heading in [
         "Generating squash commit message...",
@@ -4042,7 +4048,7 @@ fn merge_refuses_to_squash_without_a_configured_generator() {
         .unwrap();
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--no-squash"), "{stderr}");
     assert!(stderr.contains("generation.command"), "{stderr}");
@@ -4453,7 +4459,7 @@ fn merge_refuses_an_untrusted_shared_squash_generator_before_rebasing() {
         .unwrap();
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("trust merge-approve"), "{stderr}");
     // The topic is untouched: no rebase happened before the refusal.
@@ -4630,7 +4636,7 @@ fn pr_request_mode_preserves_request_id_on_version_failure() {
     let output = child.wait_with_output().unwrap();
 
     assert!(!output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, b"");
     let response = assert_json_pure(&output);
     assert_eq!(response["command"], "pr.create");
     assert_eq!(response["request_id"], "pr-40");
@@ -4659,7 +4665,7 @@ fn pr_request_mode_rejects_invalid_documents_with_one_failed_response() {
             "input={}",
             String::from_utf8_lossy(input)
         );
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, b"");
         let response = assert_json_pure(&output);
         assert_eq!(response["command"], "pr.create");
         assert_eq!(response["error"]["code"], "json.invalid_request");
@@ -4675,7 +4681,7 @@ fn pr_exact_leaf_help_describes_the_pr_contract() {
         .unwrap();
 
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, b"");
     let response = assert_json_pure(&output);
     assert_eq!(response["command"], "pr.create");
     let result = &response["result"];
@@ -4769,7 +4775,7 @@ fn pr_generator_overflow_is_bounded_and_stops_before_publication() {
             .len()
             < 1024
     );
-    assert!(response["effects"].as_array().unwrap().is_empty());
+    assert_eq!(response["effects"], serde_json::json!([]));
     assert!(!created.exists());
     assert_eq!(
         git_output(&bare, ["for-each-ref", "--format=%(refname)", "refs/heads"]),
@@ -4952,7 +4958,7 @@ fn pr_provider_failure_reports_completed_push_and_bounded_diagnostic() {
         .unwrap();
 
     assert!(!output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, b"");
     let response = assert_json_pure(&output);
     assert_eq!(response["error"]["code"], "provider.creation_failed");
     assert_eq!(response["effects"][0]["action"], "git.push");
@@ -5045,7 +5051,7 @@ fn install_decline_makes_no_filesystem_changes() {
 
     let output = run_install(home.path(), xdg.path(), Some(zdot.path()), b"n\r");
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(output.stderr.contains("declined"), "{}", output.stderr);
     assert!(
         output.stderr.contains(&forced_style(
@@ -5069,7 +5075,7 @@ fn install_escape_reports_cancellation_without_filesystem_changes() {
     let output = run_install(home.path(), xdg.path(), Some(zdot.path()), b"\x1b");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("installation cancelled"),
         "{}",
@@ -5092,7 +5098,7 @@ fn install_rejects_a_noninteractive_confirmation_before_rendering_a_prompt() {
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(stderr.contains("no interactive terminal"), "{stderr}");
     assert!(
         !stderr.contains("Planned zsh integration changes"),
@@ -5113,7 +5119,7 @@ fn install_guided_prompts_can_be_cancelled_after_shell_installation() {
     let output = run_pty_command(command, b"y\r\x1b");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("agent command entry cancelled"),
         "{}",
@@ -5136,7 +5142,7 @@ fn install_guidance_decline_is_a_successful_final_outcome() {
     let output = run_pty_command(command, b"y\rtrue\rn\r");
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output
             .stderr
@@ -5179,7 +5185,7 @@ fn install_guides_configuration_with_a_detected_agent_and_persists_its_command()
     let installed = run_pty_command(command, b"y\r\r\r\r");
 
     assert!(installed.status.success(), "{}", installed.stderr);
-    assert!(installed.stdout.is_empty(), "{}", installed.stdout);
+    assert_eq!(installed.stdout, "", "{}", installed.stdout);
     let stderr = console::strip_ansi_codes(&installed.stderr);
     assert!(
         stderr.contains("Choose your connected LLM agent"),
@@ -5406,7 +5412,7 @@ fn install_preserves_zshrc_and_is_idempotent() {
 
     let installed = run_install(home.path(), xdg.path(), Some(zdot.path()), b"y\r");
     assert!(installed.status.success(), "{}", installed.stderr);
-    assert!(installed.stdout.is_empty());
+    assert_eq!(installed.stdout, "");
     assert!(
         installed.stderr.contains(&forced_style(
             pando::ui::success_style(),
@@ -5458,7 +5464,7 @@ fn install_preserves_zshrc_and_is_idempotent() {
         .output()
         .unwrap();
     assert!(current.status.success());
-    assert!(current.stdout.is_empty());
+    assert_eq!(current.stdout, b"");
     assert!(
         String::from_utf8(current.stderr)
             .unwrap()
@@ -6278,7 +6284,7 @@ fn machine_readable_commands_keep_themed_feedback_off_stdout() {
     let inspected = run_pty_command(trust, b"");
 
     assert!(inspected.status.success(), "{}", inspected.stderr);
-    assert!(inspected.stdout.is_empty());
+    assert_eq!(inspected.stdout, "");
     assert!(
         inspected.stderr.contains(&forced_style(
             pando::ui::muted_style(),
@@ -6344,7 +6350,7 @@ fn get_slug_normalizes_the_current_branch_name() {
         .unwrap();
     assert!(human.status.success());
     assert_eq!(human.stdout, b"feature-some-branch\n");
-    assert!(human.stderr.is_empty());
+    assert_eq!(human.stderr, b"");
 
     let json = json_command(&worktree, &["get", "slug", "--output", "json"], None);
     assert!(json.status.success());
@@ -6573,10 +6579,7 @@ fn create_refuses_a_branch_that_already_has_a_worktree() {
     let output = create_command(&repo, &xdg, &["create", "feature"]);
 
     assert!(!output.status.success());
-    assert!(
-        output.stdout.is_empty(),
-        "a refusal must not print a destination"
-    );
+    assert_eq!(output.stdout, b"", "a refusal must not print a destination");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("already registered"), "{stderr}");
     assert!(stderr.contains("pando switch feature"), "{stderr}");
@@ -6594,18 +6597,21 @@ fn create_dry_run_previews_a_new_branch_and_refuses_a_registered_one() {
         "{}",
         String::from_utf8_lossy(&preview.stderr)
     );
-    assert!(preview.stdout.is_empty());
+    assert_eq!(preview.stdout, b"");
     assert!(
         String::from_utf8(preview.stderr)
             .unwrap()
             .contains("Would create a worktree for topic/preview")
     );
     assert!(!root.exists(), "a preview must not create the root");
-    assert!(git_output(&repo.main, ["branch", "--list", "topic/preview"]).is_empty());
+    assert_eq!(
+        git_output(&repo.main, ["branch", "--list", "topic/preview"]),
+        ""
+    );
 
     let registered = create_command(&repo, &xdg, &["create", "feature", "--dry-run"]);
     assert!(!registered.status.success());
-    assert!(registered.stdout.is_empty());
+    assert_eq!(registered.stdout, b"");
     assert!(
         String::from_utf8(registered.stderr)
             .unwrap()
@@ -6622,7 +6628,7 @@ fn create_requires_a_branch() {
     let output = create_command(&repo, &xdg, &["create"]);
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
@@ -6771,7 +6777,7 @@ fn create_refuses_post_create_hooks_without_a_terminal() {
     let output = create_command(&repo, &xdg, &["create", "hooked"]);
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(!root.join("hooked").exists());
 }
 
@@ -6830,7 +6836,7 @@ fn detached_branch_queries_fail_without_stdout() {
             .output()
             .unwrap();
         assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout, b"");
         assert!(String::from_utf8_lossy(&output.stderr).contains("detached"));
     }
 }
@@ -7031,7 +7037,7 @@ fn ambiguous_remote_branches_fail_noninteractively_before_mutation() {
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(stderr.contains("origin/ambiguous"), "{stderr}");
     assert!(stderr.contains("upstream/ambiguous"), "{stderr}");
     assert!(!root.join("ambiguous").exists());
@@ -7095,7 +7101,7 @@ fn remote_selection_caps_long_lists_to_a_scrollable_viewport() {
     let output = run_pty_command_with_rows(command, b"\x1b", 8);
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("remote-04/many"),
         "{}",
@@ -7147,7 +7153,7 @@ fn remote_matching_requires_the_complete_branch_name() {
         .unwrap();
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(!root.join("foo").exists());
     let local = Command::new("git")
         .args(["show-ref", "--verify", "--quiet", "refs/heads/foo"])
@@ -7214,7 +7220,7 @@ fn new_branch_confirmation_escape_is_reported_as_cancellation() {
     let output = run_pty_command(command, b"\x1b");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("branch creation cancelled"),
         "{}",
@@ -7314,7 +7320,7 @@ fn declining_hook_approval_is_a_warning_without_mutation() {
     let output = run_pty_command(command, b"n\r");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains(&forced_style(
             pando::ui::warning_style(),
@@ -7354,7 +7360,7 @@ fn hook_approval_escape_reports_cancellation_without_mutation() {
     let output = run_pty_command(command, b"\x1b");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output
             .stderr
@@ -7445,7 +7451,7 @@ fn incomplete_setup_supports_enter_once_then_mark_complete() {
     assert!(!failed.status.success());
     let cancelled = run(b"\x1b");
     assert!(!cancelled.status.success());
-    assert!(cancelled.stdout.is_empty());
+    assert_eq!(cancelled.stdout, "");
     assert!(
         cancelled.stderr.contains("setup recovery cancelled"),
         "{}",
@@ -7523,7 +7529,7 @@ fn picker_branch_action_uses_the_shared_resolver_and_branch_entry_cancels() {
 
     let cancelled = run(b"\x1b[Z\x1b");
     assert!(!cancelled.status.success());
-    assert!(cancelled.stdout.is_empty());
+    assert_eq!(cancelled.stdout, "");
     assert!(
         cancelled.stderr.contains("branch entry cancelled"),
         "{}",
@@ -7579,7 +7585,7 @@ fn malformed_incomplete_state_is_a_contextual_error() {
         .unwrap();
 
     assert!(!retried.status.success());
-    assert!(retried.stdout.is_empty());
+    assert_eq!(retried.stdout, b"");
     assert!(
         String::from_utf8(retried.stderr)
             .unwrap()
@@ -7713,7 +7719,7 @@ fn interrupted_setup_emits_no_destination_and_empty_hooks_clear_its_record() {
     let interrupted = run_pty_command(command, b"y\r");
 
     assert!(!interrupted.status.success());
-    assert!(interrupted.stdout.is_empty());
+    assert_eq!(interrupted.stdout, "");
     assert!(root.join("interrupted").exists());
     fs::remove_file(repo.main.join(".pando.yaml")).unwrap();
     let cleared = Command::cargo_bin("pando")
@@ -7729,7 +7735,7 @@ fn interrupted_setup_emits_no_destination_and_empty_hooks_clear_its_record() {
         "{}",
         String::from_utf8_lossy(&cleared.stderr)
     );
-    assert!(!cleared.stdout.is_empty());
+    assert_ne!(cleared.stdout, b"");
 }
 
 #[test]
@@ -7825,7 +7831,7 @@ fn trust_status_reset_and_reapproval_follow_the_current_command_hash() {
             .unwrap()
     };
     let untrusted = command(&["trust", "status"]);
-    assert!(untrusted.stdout.is_empty());
+    assert_eq!(untrusted.stdout, b"");
     assert!(
         String::from_utf8(untrusted.stderr)
             .unwrap()
@@ -7840,7 +7846,7 @@ fn trust_status_reset_and_reapproval_follow_the_current_command_hash() {
         .env("HOME", repo.temp.path());
     assert!(run_pty_command(approve, b"y\r").status.success());
     let trusted = command(&["trust", "status"]);
-    assert!(trusted.stdout.is_empty());
+    assert_eq!(trusted.stdout, b"");
     assert!(
         String::from_utf8(trusted.stderr)
             .unwrap()
@@ -7848,10 +7854,10 @@ fn trust_status_reset_and_reapproval_follow_the_current_command_hash() {
     );
 
     let reset = command(&["trust", "reset"]);
-    assert!(reset.stdout.is_empty());
+    assert_eq!(reset.stdout, b"");
     assert!(String::from_utf8(reset.stderr).unwrap().contains("Reset"));
     let reset_again = command(&["trust", "reset"]);
-    assert!(reset_again.stdout.is_empty());
+    assert_eq!(reset_again.stdout, b"");
     assert!(
         String::from_utf8(reset_again.stderr)
             .unwrap()
@@ -8242,7 +8248,7 @@ fn commit_with_explicit_message_stages_all_change_kinds() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Running pre-commit hooks"), "{stderr}");
     assert!(
@@ -8339,7 +8345,7 @@ fn commit_streams_and_clears_successful_pre_commit_hook_output() {
     let output = finish_pty_command(child, reader);
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("pre-commit stdout"),
         "{}",
@@ -8405,7 +8411,7 @@ fn commit_keeps_pre_commit_hook_output_when_hook_fails() {
     let output = run_terminal_command(command);
 
     assert!(!output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let failed = output.stderr.find("pre-commit failed stdout").unwrap();
     assert!(output.stderr.contains("pre-commit failed stderr"));
     assert!(
@@ -8434,7 +8440,7 @@ fn shared_commit_generator_requires_standalone_approval_interactively() {
     let output = run_pty_command(command, b"\x1b");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("run pando trust commit-approve"),
         "{}",
@@ -8472,7 +8478,7 @@ fn shared_commit_generator_approval_preflights_noninteractive_terminals() {
     let stderr = String::from_utf8(output.stderr).unwrap();
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(
         stderr.contains("run pando trust commit-approve"),
         "{stderr}"
@@ -8512,7 +8518,7 @@ fn commit_generates_message_from_global_configuration() {
     let output = run_terminal_command(command);
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let stderr = &output.stderr;
     for heading in [
         "Staged changes:",
@@ -8604,7 +8610,7 @@ fn commit_generation_spinner_reports_elapsed_time() {
     let output = run_terminal_command(command);
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let plain_stderr = console::strip_ansi_codes(&output.stderr);
     assert!(
         plain_stderr.contains("Generating commit message... 1s"),
@@ -8648,7 +8654,7 @@ fn commit_generator_failure_finishes_the_spinner_with_an_error_state() {
     let output = run_terminal_command(command);
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let plain_stderr = console::strip_ansi_codes(&output.stderr);
     assert!(
         plain_stderr.contains("Generating commit message... 1s"),
@@ -8726,7 +8732,7 @@ fn commit_generator_trust_commands_distinguish_absent_and_user_controlled_settin
         .output()
         .unwrap();
     assert!(absent.status.success());
-    assert!(absent.stdout.is_empty());
+    assert_eq!(absent.stdout, b"");
     assert!(
         String::from_utf8(absent.stderr)
             .unwrap()
@@ -8748,7 +8754,7 @@ fn commit_generator_trust_commands_distinguish_absent_and_user_controlled_settin
         .output()
         .unwrap();
     assert!(controlled.status.success());
-    assert!(controlled.stdout.is_empty());
+    assert_eq!(controlled.stdout, b"");
     assert!(
         String::from_utf8(controlled.stderr)
             .unwrap()
@@ -8763,7 +8769,7 @@ fn commit_generator_trust_commands_distinguish_absent_and_user_controlled_settin
         .output()
         .unwrap();
     assert!(reset.status.success());
-    assert!(reset.stdout.is_empty());
+    assert_eq!(reset.stdout, b"");
     assert!(
         String::from_utf8(reset.stderr)
             .unwrap()
@@ -8855,7 +8861,7 @@ fn human_and_json_provided_message_commits_share_one_semantic_result() {
         "{}",
         String::from_utf8_lossy(&human.stderr)
     );
-    assert!(human.stdout.is_empty());
+    assert_eq!(human.stdout, b"");
     let human_commit = git_output(&repo.main, ["rev-parse", "HEAD"]);
 
     git(&repo.main, ["reset", "--hard", &parent]);
@@ -8923,7 +8929,7 @@ fn json_dry_run_is_one_document_and_does_not_commit() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, b"");
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["status"], "success");
     assert_eq!(value["result"]["outcome"], "dry_run");
@@ -9003,8 +9009,9 @@ fn run_json_command(
 }
 
 fn assert_json_pure(output: &std::process::Output) -> serde_json::Value {
-    assert!(
-        output.stderr.is_empty(),
+    assert_eq!(
+        output.stderr,
+        b"",
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -9167,9 +9174,9 @@ fn json_version_one_rejection_is_characterized_across_every_command_family() {
         assert_eq!(value["status"], "error", "{args:?}");
         assert_eq!(value["error"]["code"], *code, "{args:?}: {value}");
         assert!(value["result"].is_null(), "{args:?}: {value}");
-        assert!(value["effects"].as_array().unwrap().is_empty());
-        assert!(value["diagnostics"].as_array().unwrap().is_empty());
-        assert!(value["next_steps"].as_array().unwrap().is_empty());
+        assert_eq!(value["effects"], serde_json::json!([]));
+        assert_eq!(value["diagnostics"], serde_json::json!([]));
+        assert_eq!(value["next_steps"], serde_json::json!([]));
     }
 }
 
@@ -9485,7 +9492,7 @@ fn human_and_json_get_preserve_the_same_natural_values() {
             .output()
             .unwrap();
         assert!(human.status.success());
-        assert!(human.stderr.is_empty());
+        assert_eq!(human.stderr, b"");
 
         let json = json_command_with_env(
             &repo.main,
@@ -9569,12 +9576,12 @@ fn json_version_one_byte_paths_effects_diagnostics_and_recovery_are_public() {
     assert!(!create.status.success());
     let create = assert_json_pure(&create);
     assert_eq!(create["error"]["code"], "create.branch_registered");
-    assert!(create["effects"].as_array().unwrap().is_empty());
+    assert_eq!(create["effects"], serde_json::json!([]));
     assert_eq!(
         create["next_steps"][0]["invocation"]["working_directory"]["encoding"],
         "base64"
     );
-    assert!(create["diagnostics"].as_array().unwrap().is_empty());
+    assert_eq!(create["diagnostics"], serde_json::json!([]));
 
     fs::write(repo.main.join("README.md"), "main conflict\n").unwrap();
     git(&repo.main, ["add", "README.md"]);
@@ -9842,7 +9849,10 @@ fn json_switch_and_create_report_post_create_approval_before_mutation() {
         assert!(!xdg.path().join("pando/trust.json").exists());
         assert!(!repo.main.join(".git/pando-state").exists());
     }
-    assert!(git_output(&repo.main, ["branch", "--list", "new-topic"]).is_empty());
+    assert_eq!(
+        git_output(&repo.main, ["branch", "--list", "new-topic"]),
+        ""
+    );
 }
 
 #[test]
@@ -9870,7 +9880,10 @@ fn post_create_approval_gates_an_explicit_fresh_base_fetch() {
     let value = assert_json_pure(&output);
     assert_eq!(value["error"]["code"], "trust.approval_required");
     assert_eq!(git_output(&repo.main, ["rev-parse", "origin/main"]), stale);
-    assert!(git_output(&repo.main, ["branch", "--list", "topic/fetched"]).is_empty());
+    assert_eq!(
+        git_output(&repo.main, ["branch", "--list", "topic/fetched"]),
+        ""
+    );
     assert!(!root.join("topic/fetched").exists());
     assert!(!xdg.path().join("pando/trust.json").exists());
 }
@@ -9913,7 +9926,7 @@ fn json_create_and_switch_capture_post_create_streams_in_order() {
 
     for (output, branch) in outputs.into_iter().zip(["create-topic", "switch-topic"]) {
         assert!(output.status.success());
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, b"");
         assert!(output.stdout.ends_with(b"\n"));
         assert!(!output.stdout[..output.stdout.len() - 1].contains(&b'\n'));
         let value = assert_json_pure(&output);
@@ -9985,7 +9998,7 @@ fn json_post_create_failure_and_interruption_preserve_recovery_contracts() {
         let output = json_create_request(&repo, &xdg, &request);
 
         assert!(!output.status.success());
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, b"");
         assert!(output.stdout.ends_with(b"\n"));
         assert!(!output.stdout[..output.stdout.len() - 1].contains(&b'\n'));
         let value = assert_json_pure(&output);
@@ -10020,7 +10033,7 @@ fn json_post_create_failure_and_interruption_preserve_recovery_contracts() {
             &[("XDG_CONFIG_HOME", xdg.path()), ("HOME", repo.temp.path())],
         );
         assert!(!switched.status.success());
-        assert!(switched.stderr.is_empty());
+        assert_eq!(switched.stderr, b"");
         let switched = assert_json_pure(&switched);
         assert_eq!(switched["status"], "error");
         assert!(switched["result"].is_null());
@@ -10050,7 +10063,7 @@ fn json_create_refuses_a_registered_branch_and_points_at_switch() {
     let value = assert_json_pure(&output);
     assert_eq!(value["error"]["code"], "create.branch_registered");
     assert_eq!(value["next_steps"][0]["action"], "switch");
-    assert!(value["effects"].as_array().unwrap().is_empty());
+    assert_eq!(value["effects"], serde_json::json!([]));
 }
 
 #[test]
@@ -10253,7 +10266,7 @@ fn json_create_description_does_not_modify_a_registered_branch() {
     assert!(!output.status.success());
     let value = assert_json_pure(&output);
     assert_eq!(value["error"]["code"], "create.branch_registered");
-    assert!(value["effects"].as_array().unwrap().is_empty());
+    assert_eq!(value["effects"], serde_json::json!([]));
     assert_eq!(
         branch_description(&repo.main, "feature").as_deref(),
         Some("Keep this")
@@ -10682,7 +10695,7 @@ fn declining_later_remove_approval_preserves_every_target() {
     let output = run_pty_command(command, b"y\rn\r");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("approval declined"),
         "{}",
@@ -10717,7 +10730,7 @@ fn approved_remove_hooks_run_in_target_order_and_retain_branches() {
     let output = run_pty_command(command, b"y\r");
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert_eq!(
         fs::read_to_string(hook_order).unwrap(),
         "feature worktreesecond topic"
@@ -10780,7 +10793,7 @@ fn json_remove_hook_failure_keeps_bounded_stream_diagnostics_and_retry() {
     let output = run_json_command(command, Some(&request));
 
     assert!(!output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, b"");
     let value = assert_json_pure(&output);
     assert_eq!(value["error"]["code"], "remove.hook_failed");
     assert_eq!(value["request_id"], "remove-hook-failure");
@@ -10873,7 +10886,7 @@ fn human_remove_dry_run_uses_preflight_without_mutation() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(String::from_utf8_lossy(&output.stderr).contains("branch retained"));
     assert!(repo.linked.exists());
 }
@@ -10979,7 +10992,7 @@ fn json_merge_dry_run_reports_policy_and_never_mutates_refs_or_worktrees() {
         .output()
         .unwrap();
     assert!(human.status.success());
-    assert!(human.stdout.is_empty(), "dry run emitted a destination");
+    assert_eq!(human.stdout, b"", "dry run emitted a destination");
     let stderr = String::from_utf8_lossy(&human.stderr);
     assert!(stderr.contains("Would merge feature into main"), "{stderr}");
     assert_eq!(git_output(&repo.main, ["rev-parse", "HEAD"]), main_before);
@@ -11300,7 +11313,7 @@ fn create_rejects_an_unknown_base_value() {
     let output = create_command(&repo, &xdg, &["create", "topic/invalid"]);
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("pando/config.yaml"), "{stderr}");
     assert!(stderr.contains("stale"), "{stderr}");
@@ -11315,11 +11328,14 @@ fn create_fresh_without_a_resolvable_base_fails_with_guidance() {
     let output = create_command(&repo, &xdg, &["create", "topic/unresolvable"]);
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("worktrees.target-branch"), "{stderr}");
     assert!(stderr.contains("git remote set-head origin -a"), "{stderr}");
-    assert!(git_output(&repo.main, ["branch", "--list", "topic/unresolvable"]).is_empty());
+    assert_eq!(
+        git_output(&repo.main, ["branch", "--list", "topic/unresolvable"]),
+        ""
+    );
 }
 
 #[test]
@@ -11337,7 +11353,7 @@ fn create_fresh_with_an_unfetched_tracking_ref_fails_with_guidance() {
     let output = create_command(&repo, &xdg, &["create", "topic/unfetched"]);
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("origin/release"), "{stderr}");
     assert!(stderr.contains("--fetch"), "{stderr}");
@@ -11443,13 +11459,16 @@ fn create_dry_run_reflects_the_configured_base() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains(&format!("from branch \"origin/main\" at {published}")),
         "{stderr}"
     );
-    assert!(git_output(&repo.main, ["branch", "--list", "topic/planned"]).is_empty());
+    assert_eq!(
+        git_output(&repo.main, ["branch", "--list", "topic/planned"]),
+        ""
+    );
 }
 
 #[test]
@@ -11519,7 +11538,7 @@ fn fetch_is_rejected_when_it_would_do_nothing() {
         assert!(!output.status.success(), "{branch}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains(reason), "{branch}: {stderr}");
-        assert!(output.stdout.is_empty(), "{branch}");
+        assert_eq!(output.stdout, b"", "{branch}");
     }
 }
 
@@ -11634,7 +11653,10 @@ fn json_reports_an_inapplicable_fetch_as_a_typed_error() {
     let value = assert_json_pure(&output);
     assert!(!output.status.success());
     assert_eq!(value["error"]["code"], "create.fetch_not_applicable");
-    assert!(git_output(&repo.main, ["branch", "--list", "topic/json"]).is_empty());
+    assert_eq!(
+        git_output(&repo.main, ["branch", "--list", "topic/json"]),
+        ""
+    );
 }
 
 #[test]
@@ -11701,7 +11723,10 @@ fn json_reports_an_unresolvable_fresh_base_as_a_typed_error() {
         message.contains("git remote set-head origin -a"),
         "{message}"
     );
-    assert!(git_output(&repo.main, ["branch", "--list", "topic/json"]).is_empty());
+    assert_eq!(
+        git_output(&repo.main, ["branch", "--list", "topic/json"]),
+        ""
+    );
 }
 
 #[test]
@@ -11734,7 +11759,7 @@ fn dry_run_previews_a_multi_remote_branch_without_prompting() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
@@ -11758,7 +11783,7 @@ fn switch_dry_run_names_the_fresh_base_on_the_human_rail() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains(&format!("from branch \"origin/main\" at {published}")),
@@ -12193,7 +12218,7 @@ fn branch_completion_discovery_failure_is_silent_and_read_only() {
         )),
         "branch facts must be all-or-nothing after discovery fails: {stdout}"
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, b"");
     let calls = fs::read_to_string(call_log).unwrap();
     for mutation in ["fetch", "worktree add", "config", "reset", "checkout"] {
         assert!(
@@ -12218,8 +12243,9 @@ fn branch_completion_outside_a_repository_is_silent() {
         .unwrap();
 
     assert!(output.status.success());
-    assert!(
-        output.stderr.is_empty(),
+    assert_eq!(
+        output.stderr,
+        b"",
         "a completion widget must never print diagnostics: {}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -12286,7 +12312,7 @@ fn clean_removes_multiple_detached_worktrees_by_path() {
     let output = run_clean(&repo.main, &[], b"\x01\ry");
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("Remove 2 worktrees"),
         "{}",
@@ -12320,7 +12346,7 @@ fn clean_detached_selection_preserves_non_utf8_path_bytes() {
     );
     let output = run_clean(&repo.main, &[], b"byte-detached \ry");
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(!path.exists());
     assert!(repo.linked.exists());
 }
@@ -12355,7 +12381,7 @@ fn clean_detached_dry_run_preserves_worktree() {
     git(&repo.linked, ["checkout", "--detach"]);
     let output = run_clean(&repo.main, &["--dry-run"], b" \ry");
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output
             .stderr
@@ -12384,7 +12410,7 @@ fn clean_confirms_removing_initialized_submodules() {
     initialize_test_submodule(&repo, &repo.linked);
     let output = run_clean(&repo.main, &[], b" \ry");
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(
         output.stderr.contains("deletes initialized submodules"),
         "{}",
@@ -12400,7 +12426,7 @@ fn clean_declining_submodule_confirmation_preserves_contents() {
     initialize_test_submodule(&repo, &repo.linked);
     let output = run_clean(&repo.main, &[], b" \rn");
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(output.stderr.contains("deletes initialized submodules"));
     assert!(repo.linked.join("nested/payload").exists());
 }
@@ -12418,7 +12444,7 @@ fn remove_interactive_confirms_force_required_worktrees() {
         command.args(["remove", "feature"]).current_dir(&repo.main);
         let output = run_pty_command(command, b"y");
         assert!(output.status.success(), "{}", output.stderr);
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout, "");
         assert!(output.stderr.contains("Force-remove worktree"));
         assert!(!repo.linked.exists());
         assert!(has_branch(&repo.main, "feature"));
@@ -12450,7 +12476,7 @@ fn remove_interactive_decline_and_cancel_preserve_all_targets() {
             "{}",
             output.stderr
         );
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout, "");
         assert!(repo.linked.exists());
         assert!(second.join("nested/payload").exists());
         assert!(!marker.exists());
@@ -12467,7 +12493,7 @@ fn remove_interactive_force_flag_skips_confirmation() {
         .current_dir(&repo.main);
     let output = run_pty_command(command, b"");
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(!output.stderr.contains("Force-remove worktree"));
     assert!(!repo.linked.exists());
 }
@@ -12482,7 +12508,7 @@ fn remove_interactive_dry_run_keeps_force_required_worktree() {
         .current_dir(&repo.main);
     let output = run_pty_command(command, b"y");
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(output.stderr.contains("Would remove worktree"));
     assert!(repo.linked.join("nested/payload").exists());
 }
@@ -12536,7 +12562,7 @@ fn remove_noninteractive_submodules_still_require_force() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(!repo.linked.exists());
 }
 
@@ -12557,7 +12583,7 @@ fn remove_uninitialized_submodules_do_not_require_confirmation() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     assert!(!second.exists());
     assert!(repo.linked.exists());
 }
@@ -12576,7 +12602,7 @@ fn clean_force_approval_does_not_apply_to_other_selected_worktrees() {
     );
     let output = run_clean(&repo.main, &[], b"\x01\ryy");
     assert!(!output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     assert!(!repo.linked.exists());
     assert!(second.join("became-dirty").exists());
     assert!(output.stderr.contains("failed"));
@@ -12594,7 +12620,7 @@ fn clean_without_a_terminal_points_at_remove() {
         .unwrap();
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("requires an interactive terminal"),
@@ -12628,7 +12654,7 @@ fn clean_lists_topic_worktrees_with_a_size_column_and_omits_the_primary() {
     let output = run_clean(&repo.main, &[], b"\x1b");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
     assert!(stderr.contains("Select worktrees to remove"), "{stderr}");
     assert!(stderr.contains("SIZE"), "{stderr}");
@@ -12681,7 +12707,7 @@ fn clean_applied_with_nothing_selected_removes_nothing() {
     let output = run_clean(&repo.main, &[], b"\r");
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
     assert!(stderr.contains("No worktrees were selected."), "{stderr}");
     assert!(stderr.contains("Nothing removed."), "{stderr}");
@@ -12695,7 +12721,7 @@ fn clean_declined_at_the_confirmation_removes_nothing() {
     let output = run_clean(&repo.main, &[], b" \rn");
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
     assert!(stderr.contains("Cleanup declined."), "{stderr}");
     assert!(repo.linked.exists());
@@ -12708,7 +12734,7 @@ fn clean_removes_the_selected_worktree_and_reports_the_space_reclaimed() {
     let output = run_clean(&repo.main, &[], b" \ry");
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
     assert!(
         stderr.contains("Removed 1 worktree; branches retained."),
@@ -12761,7 +12787,7 @@ fn clean_dry_run_previews_the_plan_without_removing_anything() {
     let output = run_clean(&repo.main, &["--dry-run"], b" \ry");
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let stderr = console::strip_ansi_codes(&output.stderr).into_owned();
     assert!(stderr.contains("Would reclaim"), "{stderr}");
     assert!(
@@ -12921,7 +12947,7 @@ fn remove_reports_progress_and_size_for_every_target() {
     let output = run_pty_command(command, b"");
 
     assert!(output.status.success(), "{}", output.stderr);
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, "");
     let plain = console::strip_ansi_codes(&output.stderr).into_owned();
     assert!(plain.contains("Measuring 2 worktrees"), "{plain}");
     assert!(plain.contains("Removing feature ("), "{plain}");

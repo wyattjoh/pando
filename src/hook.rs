@@ -435,6 +435,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(execution.outcome, HookOutcome::Success);
-        assert!(execution.output.is_empty());
+        assert_eq!(execution.output, []);
     }
 }
