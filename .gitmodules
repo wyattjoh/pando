@@ -1,3 +1,6 @@
 [submodule ".claude/references/hk"]
 	path = .claude/references/hk
 	url = https://github.com/jdx/hk.git
+[submodule ".claude/references/prek"]
+	path = .claude/references/prek
+	url = https://github.com/j178/prek.git

@@ -134,3 +134,4 @@ This repository uses a single-context domain-doc layout. See `docs/agents/domain
 | Dependency | Version | Path |
 | ---------- | ------- | ---- |
 | hk | 2.5.0 | `.claude/references/hk` |
+| prek | 0.5.5 | `.claude/references/prek` |
